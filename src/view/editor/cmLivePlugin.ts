@@ -259,6 +259,8 @@ class HrWidget extends WidgetType {
 	}
 }
 
+const activeImageResizeCleanup = new WeakMap<HTMLElement, () => void>();
+
 class ImageWidget extends WidgetType {
 	constructor(
 		private readonly spec: ParsedImageSpec,
@@ -356,6 +358,7 @@ class ImageWidget extends WidgetType {
 					if (e.button !== 0) return;
 					e.preventDefault();
 					e.stopPropagation();
+					activeImageResizeCleanup.get(wrap)?.();
 					const startX = e.clientX;
 					const startW = Math.round(img.getBoundingClientRect().width || this.spec.width || 320);
 					const maxW = Math.max(240, Math.round(wrap.getBoundingClientRect().width || 760));
@@ -364,22 +367,41 @@ class ImageWidget extends WidgetType {
 					widthBadge.hidden = false;
 					widthBadge.textContent = `${startW}px`;
 
+					const cleanup = () => {
+						window.removeEventListener("mousemove", onMove);
+						window.removeEventListener("mouseup", onUp);
+						window.removeEventListener("blur", onCancel);
+						if (activeImageResizeCleanup.get(wrap) === cleanup) {
+							activeImageResizeCleanup.delete(wrap);
+						}
+						frame.classList.remove("is-resizing");
+						widthBadge.hidden = true;
+					};
 					const onMove = (ev: MouseEvent) => {
+						if (!wrap.isConnected) {
+							cleanup();
+							return;
+						}
 						nextW = Math.max(80, Math.min(maxW, Math.round(startW + (ev.clientX - startX))));
 						img.style.width = `${nextW}px`;
 						widthBadge.textContent = `${nextW}px`;
 					};
+					const onCancel = () => {
+						cleanup();
+						img.style.width = this.spec.width ? `${this.spec.width}px` : "";
+					};
 					const onUp = () => {
-						window.removeEventListener("mousemove", onMove);
-						window.removeEventListener("mouseup", onUp);
-						frame.classList.remove("is-resizing");
-						widthBadge.hidden = true;
+						const connected = wrap.isConnected;
+						cleanup();
+						if (!connected) return;
 						if (nextW !== startW) {
 							cb?.onResizeImage(this.from, this.to, nextW);
 						}
 					};
+					activeImageResizeCleanup.set(wrap, cleanup);
 					window.addEventListener("mousemove", onMove);
 					window.addEventListener("mouseup", onUp);
+					window.addEventListener("blur", onCancel);
 				});
 				frame.appendChild(handle);
 			}
@@ -421,6 +443,9 @@ class ImageWidget extends WidgetType {
 			view.dispatch({ selection: EditorSelection.cursor(Math.min(this.from, view.state.doc.length)), scrollIntoView: true });
 		});
 		return wrap;
+	}
+	destroy(dom: HTMLElement) {
+		activeImageResizeCleanup.get(dom)?.();
 	}
 	ignoreEvent() {
 		return true;

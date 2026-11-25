@@ -641,9 +641,12 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	};
 
 	let canvasWatchCleanup: (() => void) | undefined;
+	let canvasElCleanup: (() => void) | undefined;
 	onCleanup(() => {
 		canvasWatchCleanup?.();
 		canvasWatchCleanup = undefined;
+		canvasElCleanup?.();
+		canvasElCleanup = undefined;
 	});
 	const watchCanvas = (el: HTMLDivElement) => {
 		canvasWatchCleanup?.();
@@ -658,10 +661,10 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			frame = requestAnimationFrame(() => {
 				setCompact(width > 0 && width < 540);
 				setTight(width > 0 && width < 360);
-				if (!isTextMode() && width > 10 && height > 10) {
-					if (!fitted && layout()) {
+				if (!untrack(isTextMode) && width >= 10 && height >= 10) {
+					if (!fitted && untrack(layout)) {
 						if (fit()) fitted = true;
-					} else if (view() === fittedView) {
+					} else if (untrack(view) === fittedView) {
 						queueMicrotask(() => void (fittedWhole ? whole() : fit()));
 					}
 				}
@@ -672,6 +675,23 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			cancelAnimationFrame(frame);
 			observer.disconnect();
 		};
+	};
+	const bindCanvas = (el: HTMLDivElement) => {
+		canvas = el;
+		canvasElCleanup?.();
+		canvasElCleanup = undefined;
+		if (!fitted && !untrack(isTextMode) && untrack(layout) && fit()) fitted = true;
+		if (typeof ResizeObserver === "undefined") return;
+		const observer = new ResizeObserver((entries) => {
+			const rect = entries[0]?.contentRect;
+			const w = rect?.width ?? 0;
+			const h = rect?.height ?? 0;
+			if (!fitted && w >= 10 && h >= 10 && !untrack(isTextMode) && untrack(layout)) {
+				if (fit()) fitted = true;
+			}
+		});
+		observer.observe(el);
+		canvasElCleanup = () => observer.disconnect();
 	};
 
 	const refocus = () => queueMicrotask(() => !editing() && !isTextMode() && canvas?.focus());
@@ -1956,8 +1976,11 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		e.preventDefault();
 		e.stopPropagation();
 		cancelActiveDrag?.();
-		select(null);
-		setEdge({ from: line.from, to: line.to });
+		const curEdge = edge();
+		if (!curEdge || curEdge.from !== line.from || curEdge.to !== line.to) {
+			select(null);
+			setEdge({ from: line.from, to: line.to });
+		}
 		const startDelta = line.route?.[handle.key] ?? 0;
 		let cur: RouteDrag = {
 			from: line.from,
@@ -3008,9 +3031,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 								far: far(),
 							},
 						]}
-						ref={(el) => {
-							canvas = el;
-						}}
+						ref={bindCanvas}
 						tabindex={0}
 						role="application"
 						aria-label="Plan chart. Hover any node or edge to add steps or drag connections; arrow keys navigate."
@@ -3682,14 +3703,14 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 									</Show>
 
 									{/* Live Shift+Drag marquee box selection */}
-									<Show when={marquee()} keyed>
+									<Show when={marquee()}>
 										{(m) => (
 											<rect
 												class="plan-marquee"
-												x={Math.min(m.start.x, m.cur.x)}
-												y={Math.min(m.start.y, m.cur.y)}
-												width={Math.abs(m.cur.x - m.start.x)}
-												height={Math.abs(m.cur.y - m.start.y)}
+												x={Math.min(m().start.x, m().cur.x)}
+												y={Math.min(m().start.y, m().cur.y)}
+												width={Math.abs(m().cur.x - m().start.x)}
+												height={Math.abs(m().cur.y - m().start.y)}
 												rx="4"
 												style={{
 													fill: "color-mix(in srgb, var(--accent) 12%, transparent)",
@@ -3728,22 +3749,22 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 											};
 											return (
 												<g class="plan-edge-handles">
-													<For each={activeHandles()}>
-														{({ line, h, active }) => (
+													<For each={activeHandles()} keyed={(item) => item.h.key}>
+														{(item) => (
 															<g
-																class={[`plan-seg-handle ${h.axis}`, { active }]}
-																transform={`translate(${h.x},${h.y})`}
-																onMouseDown={(e) => startRouteDrag(e, line, h)}
+																class={[`plan-seg-handle ${item().h.axis}`, { active: item().active }]}
+																transform={`translate(${item().h.x},${item().h.y})`}
+																onMouseDown={(e) => startRouteDrag(e, item().line, item().h)}
 																onClick={(e) => e.stopPropagation()}
 																onDblClick={(e) => {
 																	e.stopPropagation();
-																	resetEdgeRoute({ from: line.from, to: line.to }, h.key);
+																	resetEdgeRoute({ from: item().line.from, to: item().line.to }, item().h.key);
 																}}
 															>
-																<title>{h.axis === "h" ? "Drag up or down to move this wire segment (double-click to reset)" : "Drag left or right to move this wire segment (double-click to reset)"}</title>
+																<title>{item().h.axis === "h" ? "Drag up or down to move this wire segment (double-click to reset)" : "Drag left or right to move this wire segment (double-click to reset)"}</title>
 																<circle class="plan-seg-hit" r="14" />
 																<Show
-																	when={h.axis === "h"}
+																	when={item().h.axis === "h"}
 																	fallback={
 																		<>
 																			<rect class="plan-seg-pill" x="-4.5" y="-11" width="9" height="22" rx="4.5" />
@@ -3787,116 +3808,29 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 						</svg>
 
 						{/* Floating contextual action toolbar above the selected node, multi-selection, or edge. */}
-						<Show when={floatBarPos()} keyed>
-							{(bar) => (
-								<div
-									class="plan-float-bar"
-									style={{ left: `${bar.left}px`, top: `${bar.top}px` }}
-									onMouseDown={(e) => e.stopPropagation()}
-									onClick={(e) => e.stopPropagation()}
-								>
-									<Show
-										when={bar.kind === "multi"}
-										fallback={
-											<Show
-												when={bar.kind === "node"}
-												fallback={
-													(() => {
-														const eb = bar as Extract<NonNullable<ReturnType<typeof floatBarPos>>, { kind: "edge" }>;
-														return (
-															<>
-																<button type="button" title="Edit connection label (F2)" onClick={() => setEditing({ from: eb.edge.from, to: eb.edge.to })}>
-																	<Icon name="note" />
-																	<span>Label</span>
-																</button>
-																<button type="button" title="Insert a step on this wire" onClick={() => insertBetween(eb.edge.from, eb.edge.to)}>
-																	<Icon name="add" />
-																	<span>Insert step</span>
-																</button>
-																<button type="button" title="Reverse connection direction" onClick={() => (reverseSelectedEdge({ from: eb.edge.from, to: eb.edge.to }), refocus())}>
-																	<Icon name="refresh" />
-																</button>
-																<Show when={eb.edge.route && Object.keys(eb.edge.route).length > 0}>
-																	<button type="button" title="Reset manual wire route (R)" onClick={() => (resetEdgeRoute({ from: eb.edge.from, to: eb.edge.to }), refocus())}>
-																		<Icon name="discard" />
-																		<span>Reset</span>
-																	</button>
-																</Show>
-																<span class="plan-float-sep" />
-																<button type="button" class="danger" title="Delete connection (Del)" onClick={() => (remove(), refocus())}>
-																	<Icon name="trash" />
-																</button>
-															</>
-														);
-													})()
-												}
-											>
-												{(() => {
-													const n = (bar as Extract<NonNullable<ReturnType<typeof floatBarPos>>, { kind: "node" }>).node;
-													const canBranch = n.kind === "step" || n.kind === "call" || n.kind === "decision";
-													const canDup = n.kind !== "start" && n.kind !== "end";
-													const hasCode = linksOf(n.id).length > 0 || Boolean(textOf(n.ref).trim());
-													return (
-														<>
-															<Show when={n.kind !== "end"}>
-																<button type="button" title="Add next step (Enter)" onClick={() => (addNextFrom(n.id, "step"), refocus())}>
-																	<Icon name="add" />
-																	<span>Step</span>
-																</button>
-															</Show>
-															<Show when={canBranch}>
-																<button type="button" title="Add branch (B)" onClick={() => (addBranchFrom(n.id), refocus())}>
-																	<Icon name="git-branch" />
-																	<span>Branch</span>
-																</button>
-																<button
-																	type="button"
-																	class={{ on: n.kind === "decision" }}
-																	title="Toggle Step / Decision (D)"
-																	onClick={() => (toggleDecision(n.id), refocus())}
-																>
-																	<span>{n.kind === "decision" ? "To Step" : "Decision"}</span>
-																</button>
-															</Show>
-															<Show when={n.kind !== "end"}>
-																<button
-																	type="button"
-																	class={{ on: linking() === n.id }}
-																	title="Connect to another node (C)"
-																	onClick={() => (linking() ? setLinking(null) : beginLink(n.id), refocus())}
-																>
-																	<Icon name="symbol-event" />
-																</button>
-															</Show>
-															<Show when={canDup}>
-																<button type="button" title="Duplicate step" onClick={() => (duplicateById(n.id), refocus())}>
-																	<Icon name="layers" />
-																</button>
-															</Show>
-															<Show when={safeOffset(n.offset, direction()).x !== 0 || safeOffset(n.offset, direction()).y !== 0}>
-																<button type="button" title="Reset node position (R)" onClick={() => (resetNodePos(n.id), refocus())}>
-																	<Icon name="discard" />
-																	<span>Reset</span>
-																</button>
-															</Show>
-															<Show when={hasCode}>
-																<button type="button" title="Inspect linked code (G)" onClick={() => openCode(n.id)}>
-																	<Icon name="go-to-file" />
-																</button>
-															</Show>
-															<span class="plan-float-sep" />
-															<button type="button" class="danger" title="Delete step (Del)" onClick={() => (remove(), refocus())}>
-																<Icon name="trash" />
-															</button>
-														</>
-													);
-												})()}
-											</Show>
-										}
+						<Show when={floatBarPos()}>
+							{(bar) => {
+								const multiBar = () => {
+									const b = bar();
+									return b.kind === "multi" ? b : null;
+								};
+								const nodeBar = () => {
+									const b = bar();
+									return b.kind === "node" ? b : null;
+								};
+								const edgeBar = () => {
+									const b = bar();
+									return b.kind === "edge" ? b : null;
+								};
+								return (
+									<div
+										class="plan-float-bar"
+										style={{ left: `${bar().left}px`, top: `${bar().top}px` }}
+										onMouseDown={(e) => e.stopPropagation()}
+										onClick={(e) => e.stopPropagation()}
 									>
-										{(() => {
-											const mb = bar as Extract<NonNullable<ReturnType<typeof floatBarPos>>, { kind: "multi" }>;
-											return (
+										<Show when={multiBar()}>
+											{(mb) => (
 												<>
 													<button type="button" title="Align selected nodes to left edge" onClick={() => (runAlign("left"), refocus())}>
 														<span>Align L</span>
@@ -3907,7 +3841,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 													<button type="button" title="Align selected nodes to top edge" onClick={() => (runAlign("top"), refocus())}>
 														<span>Top</span>
 													</button>
-													<Show when={mb.count >= 3}>
+													<Show when={mb().count >= 3}>
 														<button type="button" title="Distribute selected nodes horizontally" onClick={() => (runAlign("distribute-h"), refocus())}>
 															<span>Dist H</span>
 														</button>
@@ -3922,15 +3856,94 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 													<button type="button" title="Copy selected steps (Ctrl+C)" onClick={() => (copySelection(), refocus())}>
 														<Icon name="copy" />
 													</button>
-													<button type="button" class="danger" title={`Delete ${mb.count} selected steps (Del)`} onClick={() => (remove(), refocus())}>
+													<button type="button" class="danger" title={`Delete ${mb().count} selected steps (Del)`} onClick={() => (remove(), refocus())}>
 														<Icon name="trash" />
 													</button>
 												</>
-											);
-										})()}
-									</Show>
-								</div>
-							)}
+											)}
+										</Show>
+										<Show when={nodeBar()}>
+											{(nb) => {
+												const node = () => nb().node;
+												const canBranch = () => node().kind === "step" || node().kind === "call" || node().kind === "decision";
+												const canDup = () => node().kind !== "start" && node().kind !== "end";
+												const hasCode = () => linksOf(node().id).length > 0 || Boolean(textOf(node().ref).trim());
+												return (
+													<>
+														<Show when={node().kind !== "end"}>
+															<button type="button" title="Add next step (Enter)" onClick={() => { const n = node(); addNextFrom(n.id, "step"), refocus(); }}>
+																<Icon name="add" />
+																<span>Step</span>
+															</button>
+														</Show>
+														<Show when={canBranch()}>
+															<button type="button" title="Add branch (B)" onClick={() => { const n = node(); addBranchFrom(n.id), refocus(); }}>
+																<Icon name="git-branch" />
+																<span>Branch</span>
+															</button>
+															<button type="button" class={{ on: node().kind === "decision" }} title="Toggle Step / Decision (D)" onClick={() => { const n = node(); toggleDecision(n.id), refocus(); }}>
+																<span>{node().kind === "decision" ? "To Step" : "Decision"}</span>
+															</button>
+														</Show>
+														<Show when={node().kind !== "end"}>
+															<button type="button" class={{ on: linking() === node().id }} title="Connect to another node (C)" onClick={() => { const n = node(); linking() ? setLinking(null) : beginLink(n.id), refocus(); }}>
+																<Icon name="symbol-event" />
+															</button>
+														</Show>
+														<Show when={canDup()}>
+															<button type="button" title="Duplicate step" onClick={() => { const n = node(); duplicateById(n.id), refocus(); }}>
+																<Icon name="layers" />
+															</button>
+														</Show>
+														<Show when={safeOffset(node().offset, direction()).x !== 0 || safeOffset(node().offset, direction()).y !== 0}>
+															<button type="button" title="Reset node position (R)" onClick={() => { const n = node(); resetNodePos(n.id), refocus(); }}>
+																<Icon name="discard" />
+																<span>Reset</span>
+															</button>
+														</Show>
+														<Show when={hasCode()}>
+															<button type="button" title="Inspect linked code (G)" onClick={() => openCode(node().id)}>
+																<Icon name="go-to-file" />
+															</button>
+														</Show>
+														<span class="plan-float-sep" />
+														<button type="button" class="danger" title="Delete step (Del)" onClick={() => (remove(), refocus())}>
+															<Icon name="trash" />
+														</button>
+													</>
+												);
+											}}
+										</Show>
+										<Show when={edgeBar()}>
+											{(ebAcc) => (
+												<>
+													<button type="button" title="Edit connection label (F2)" onClick={() => { const eb = ebAcc(); setEditing({ from: eb.edge.from, to: eb.edge.to }); }}>
+														<Icon name="note" />
+														<span>Label</span>
+													</button>
+													<button type="button" title="Insert a step on this wire" onClick={() => { const eb = ebAcc(); insertBetween(eb.edge.from, eb.edge.to); }}>
+														<Icon name="add" />
+														<span>Insert step</span>
+													</button>
+													<button type="button" title="Reverse connection direction" onClick={() => { const eb = ebAcc(); reverseSelectedEdge({ from: eb.edge.from, to: eb.edge.to }), refocus(); }}>
+														<Icon name="refresh" />
+													</button>
+													<Show when={ebAcc().edge.route && Object.keys(ebAcc().edge.route!).length > 0}>
+														<button type="button" title="Reset manual wire route (R)" onClick={() => { const eb = ebAcc(); resetEdgeRoute({ from: eb.edge.from, to: eb.edge.to }), refocus(); }}>
+															<Icon name="discard" />
+															<span>Reset</span>
+														</button>
+													</Show>
+													<span class="plan-float-sep" />
+													<button type="button" class="danger" title="Delete connection (Del)" onClick={() => (remove(), refocus())}>
+														<Icon name="trash" />
+													</button>
+												</>
+											)}
+										</Show>
+									</div>
+								);
+							}}
 						</Show>
 
 						{/* Floating bottom-left zoom, fit, and keyboard shortcuts pill. */}
@@ -3989,6 +4002,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 								const box = createMemo(() => editBox());
 								const hasBox = createMemo(() => Boolean(box()));
 								let inputEl: HTMLInputElement | undefined;
+								let settled = false;
 								createEffect(
 									() => hasBox(),
 									(ready) => {
@@ -4019,14 +4033,21 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 										onClick={(e) => e.stopPropagation()}
 										onKeyDown={(e) => {
 											e.stopPropagation();
-											if (e.key === "Enter") commitEdit(e.currentTarget.value);
+											if (e.key === "Enter") {
+												settled = true;
+												commitEdit(e.currentTarget.value);
+											}
 											if (e.key === "Escape") {
+												settled = true;
 												setEditing(null);
 												refocus();
 											}
 										}}
 										onBlur={(e) => {
-											if (editing()) commitEdit(e.currentTarget.value, false);
+											if (!settled && editing() === target) {
+												settled = true;
+												commitEdit(e.currentTarget.value, false);
+											}
 										}}
 									/>
 								);
@@ -4039,15 +4060,15 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 							</div>
 						</Show>
 
-						<Show when={!linking() && activePathInfo()} keyed>
+						<Show when={!linking() && activePathInfo()}>
 							{(info) => (
 								<div class="plan-path-bar" role="status" aria-label="Highlighted test journey">
 									<Icon name="beaker" class="plan-path-bar-icon" />
 									<span class="plan-path-bar-num">
-										Journey #{info.index + 1} of {info.total}
+										Journey #{info().index + 1} of {info().total}
 									</span>
-									<span class="plan-path-bar-summary" title={info.summary}>
-										{info.summary}
+									<span class="plan-path-bar-summary" title={info().summary}>
+										{info().summary}
 									</span>
 									<span class="plan-float-sep" aria-hidden="true" />
 									<button type="button" title="Previous test path" aria-label="Previous test path" onClick={() => stepActivePath(-1)}>

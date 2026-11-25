@@ -461,7 +461,7 @@ export function createBackend(host: Host, initial?: string) {
 			const destDir = ws.inside(request.destDir);
 			const attachDir = request.attachmentsDir ? ws.inside(request.attachmentsDir) : ws.inside(join(ws.root, "docs", "attachments"));
 			const kind: "docx" | "html" | "md" = ext === ".docx" ? "docx" : ext === ".html" || ext === ".htm" ? "html" : "md";
-			const rawStem = basename(src, ext).replace(/[\\/:*?"<>|]+/g, "-").trim() || "imported";
+			const rawStem = basename(src, extname(src)).replace(/[\\/:*?"<>|]+/g, "-").trim() || "imported";
 			const baseDestPath = ws.inside(join(destDir, `${rawStem}.md`));
 			const mode = request.onConflict ?? "copy";
 

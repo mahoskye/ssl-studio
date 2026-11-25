@@ -324,6 +324,7 @@ const {
 	newUntitled,
 	nextTab,
 	openFile,
+	openedForALook,
 	revealSignal,
 	save,
 	saveSetting,
@@ -336,6 +337,7 @@ const { assistOf, begin, dismissWarning, latestAssistOf, planOf, stopAssist, upd
 const { discardRun, loadRun, reviewBuild, runFile } = await import("../src/view/plan/buildRun");
 const { discard, useGit } = await import("../src/view/git");
 const { resetTidy, runStep, startTidy } = await import("../src/view/agent/tidy");
+const { attachFileToAgent, currentAgentContext } = await import("../src/view/agent/Agent");
 
 // --- In-process MockSocket RPC driver ---
 type RpcHandler = (method: string, args: unknown[]) => unknown | Promise<unknown>;
@@ -1020,6 +1022,209 @@ describe("SolidJS 2.0.3 audit — state.ts & recentTabs.ts", () => {
 		flush();
 		expect(state.groups[0]!.tabs).toContain("/ws/p2.ssl");
 	});
+
+	test("fileRenamed clears stale conflicts[target], bumps kindVersion on binary-over-binary, and prevents preview demotion", async () => {
+		rpcHandler = (method, args) => {
+			const p = String(args[0] ?? "");
+			if (method === "read") {
+				if (p.endsWith(".png")) {
+					const size = p.endsWith("img1.png") ? 10 : 20;
+					return { text: "", mtime: 1, binary: { size, image: "image/png" } };
+				}
+				return { text: `text:${p}`, mtime: 1, encoding: "utf-8" };
+			}
+			if (method === "sizes") return { [String((args[0] as string[])[0])]: 10 };
+			if (method === "create") return null;
+			if (method === "write") return { mtime: 5 };
+			return null;
+		};
+
+		// 1. Renaming a kept tab over a preview tab clears conflicts[target] and clears g.preview (never demotes kept tab).
+		await openFile("/ws/kept.ssl", { keep: true });
+		await openFile("/ws/preview.ssl", { preview: true });
+		flush();
+		expect(state.groups[0]!.preview).toBe("/ws/preview.ssl");
+
+		setState((s) => {
+			s.conflicts["/ws/preview.ssl"] = true;
+		});
+		flush();
+
+		fileRenamed("/ws/kept.ssl", "/ws/preview.ssl");
+		expect(state.conflicts["/ws/preview.ssl"]).toBeUndefined();
+		expect(state.groups[0]!.preview).toBeNull();
+		expect(state.groups[0]!.tabs).toEqual(["/ws/preview.ssl"]);
+
+		// 2. Binary-over-binary rename bumps kindVersion so image/binary viewers refresh cleanly.
+		await openFile("/ws/img1.png", { keep: true });
+		await openFile("/ws/img2.png", { keep: true });
+		flush();
+		const kindBefore = state.kindVersion;
+		fileRenamed("/ws/img1.png", "/ws/img2.png");
+		expect(state.kindVersion).toBe(kindBefore + 1);
+		expect(documents.get("/ws/img2.png")?.binary?.size).toBe(10);
+
+		// 3. Untitled save over an existing preview tab clears g.preview.
+		await openFile("/ws/preview-target.ssl", { preview: true });
+		const untitled = newUntitled(0, "ssl");
+		flush();
+		expect(state.groups[0]!.preview).toBe("/ws/preview-target.ssl");
+		documents.get(untitled)!.model.setValue(":RETURN 42;");
+		askHandler = () => "preview-target.ssl";
+		chooseHandler = () => "Overwrite";
+		expect(await save(untitled)).toBe(true);
+		expect(state.groups[0]!.preview).toBeNull();
+	});
+
+	test("onFlush callbacks guard against superseded focus and centerView switches while clearing lookedAt", async () => {
+		rpcHandler = (method, args) => {
+			if (method === "read") return { text: `body:${String(args[0])}`, mtime: 1, encoding: "utf-8" };
+			return null;
+		};
+		await openFile("/ws/a.ssl", { keep: true });
+		await openFile("/ws/b.ssl", { keep: true });
+		await openFile("/ws/c.ssl", { keep: true });
+		flush();
+		tabShown(0, "/ws/a.ssl");
+		tabShown(0, "/ws/b.ssl");
+		tabShown(0, "/ws/c.ssl");
+
+		const events: string[] = [];
+		const unsubReveal = revealSignal.listen((p) => events.push(`reveal:${p}`));
+		const unsubFocus = focusRequest.listen((t) => events.push(`focus:${t}`));
+
+		try {
+			// 1. nextTab() superseded by switching centerView to "graph" before flush must NOT reveal or steal focus.
+			nextTab();
+			setState((s) => {
+				s.centerView = "graph";
+			});
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(events).toEqual([]);
+
+			// 2. Rapid stepRecent() A -> B -> C before flush skips stale B reveal/focus and only fires for A.
+			setState((s) => {
+				s.centerView = "editors";
+				s.groups[0]!.active = "/ws/c.ssl";
+			});
+			flush();
+			events.length = 0;
+			stepRecent(1, true); // c -> b
+			stepRecent(1, false); // b -> a
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(events).toEqual(["reveal:/ws/a.ssl", "focus:editor"]);
+
+			// 3. Concurrent openFile(a, keep) + openFile(b, keep) suppresses stale a.ssl reveal/focus.
+			events.length = 0;
+			await Promise.all([openFile("/ws/a.ssl", { keep: true }), openFile("/ws/b.ssl", { keep: true })]);
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(events).toEqual(["reveal:/ws/b.ssl", "focus:editor"]);
+
+			// 4. openFile(a, keep) superseded in the same microtask batch by openFile(a, preview) does NOT steal focus.
+			events.length = 0;
+			await Promise.all([openFile("/ws/a.ssl", { keep: true }), openFile("/ws/a.ssl", { preview: true })]);
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(openedForALook("/ws/a.ssl")).toBe(false);
+			expect(events).not.toContain("focus:editor");
+
+			// 5. openFile(c, preview) interrupted by switching to "graph" during flush still clears lookedAt and skips reveal/focus.
+			events.length = 0;
+			let sawLookDuringFlush = false;
+			const dispose = createRoot((d) => {
+				createEffect(
+					() => state.groups[0]?.active,
+					(active) => {
+						if (active === "/ws/c.ssl" && openedForALook("/ws/c.ssl")) {
+							sawLookDuringFlush = true;
+							setState((s) => {
+								s.centerView = "graph";
+							});
+						}
+					},
+				);
+				return d;
+			});
+			try {
+				flush();
+				await openFile("/ws/c.ssl", { preview: true });
+				await Promise.resolve();
+				await Promise.resolve();
+				expect(sawLookDuringFlush).toBe(true);
+				expect(openedForALook("/ws/c.ssl")).toBe(false);
+				expect(events).toEqual([]);
+			} finally {
+				dispose();
+			}
+		} finally {
+			unsubReveal();
+			unsubFocus();
+		}
+	});
+
+	test("saveSetting ignores late success and failure rollback after switching workspaces", async () => {
+		let resolveSave!: (v: unknown) => void;
+		let rejectSave!: (e: Error) => void;
+		let failMode = false;
+		let settingsReads = 0;
+
+		rpcHandler = (method) => {
+			if (method === "saveSettings") {
+				return new Promise((resolve, reject) => {
+					resolveSave = resolve;
+					rejectSave = reject;
+				});
+			}
+			if (method === "settings") {
+				settingsReads++;
+				return { effective: { ...DEFAULT_SETTINGS, wordWrap: true } };
+			}
+			return null;
+		};
+
+		// 1. In-flight success from Workspace A must not overwrite Workspace B.
+		setState((s) => {
+			s.workspace = { root: "/ws-a", name: "ws-a" };
+			s.settings.wordWrap = false;
+		});
+		flush();
+
+		const savingA = saveSetting({ wordWrap: true });
+		await Promise.resolve();
+		await Promise.resolve();
+
+		setState((s) => {
+			s.workspace = { root: "/ws-b", name: "ws-b" };
+			s.settings.wordWrap = false;
+		});
+		flush();
+
+		resolveSave({ ...DEFAULT_SETTINGS, wordWrap: true });
+		await savingA;
+		flush();
+		expect(state.settings.wordWrap).toBe(false);
+
+		// 2. In-flight failure from Workspace B must not trigger disk rollback over Workspace C.
+		failMode = true;
+		const failingB = saveSetting({ wordWrap: true });
+		await Promise.resolve();
+		await Promise.resolve();
+
+		setState((s) => {
+			s.workspace = { root: "/ws-c", name: "ws-c" };
+			s.settings.wordWrap = false;
+		});
+		flush();
+
+		if (failMode) rejectSave(new Error("ws-b write failed"));
+		await failingB;
+		flush();
+		expect(settingsReads).toBe(0);
+		expect(state.settings.wordWrap).toBe(false);
+	});
 });
 
 // =============================================================================
@@ -1127,6 +1332,52 @@ describe("SolidJS 2.0.3 audit — asyncQuery.ts", () => {
 			ctx.dispose();
 		}
 	});
+
+	test("refetch() on a falsy source returns early without wiping a mutate()d value", async () => {
+		let fetchCalls = 0;
+		const ctx = createRoot((dispose) => {
+			const [key, setKey] = createSignal<string | false | null>(false);
+			const [data, { refetch, mutate }] = createAsyncQuery(key, (k) => {
+				fetchCalls++;
+				return `fetched:${k}`;
+			});
+			return { setKey, data, refetch, mutate, dispose };
+		});
+		try {
+			flush();
+			expect(fetchCalls).toBe(0);
+
+			ctx.mutate("kept-local");
+			flush();
+			expect(ctx.data()).toBe("kept-local");
+			expect(ctx.data.latest).toBe("kept-local");
+
+			// Calling refetch() while source is falsy must NOT wipe the mutated value or trigger a fetch.
+			ctx.refetch();
+			flush();
+			expect(fetchCalls).toBe(0);
+			expect(ctx.data()).toBe("kept-local");
+			expect(ctx.data.latest).toBe("kept-local");
+
+			// Switching to a truthy source fetches normally, and refetch() works again on a truthy source.
+			ctx.setKey("live");
+			flush();
+			await Promise.resolve();
+			await Promise.resolve();
+			flush();
+			expect(fetchCalls).toBe(1);
+			expect(ctx.data()).toBe("fetched:live");
+
+			ctx.refetch();
+			flush();
+			await Promise.resolve();
+			await Promise.resolve();
+			flush();
+			expect(fetchCalls).toBe(2);
+		} finally {
+			ctx.dispose();
+		}
+	});
 });
 
 // =============================================================================
@@ -1196,6 +1447,50 @@ describe("SolidJS 2.0.3 audit — lsp/session.ts", () => {
 			model.dispose();
 		}
 	});
+
+	test("multi-owner diagnostics reconcile does not alias objects across Owner A + Owner B -> clear A -> republish A", () => {
+		const model = createFakeModel("x := 1;\ny := 2;\n", "ssl", makeUri("file", "/ws/multi-owner-diag.ssl"));
+		const uri = model.uri.toString();
+		try {
+			// Step 1: Owner A publishes A1, Owner B publishes B1 -> [A1, B1]
+			publishFindings(model as any, "ownerA", [
+				{ line: 1, column: 1, endLine: 1, endColumn: 2, severity: 1, message: "A1", code: "A1" },
+			]);
+			publishFindings(model as any, "ownerB", [
+				{ line: 2, column: 1, endLine: 2, endColumn: 2, severity: 2, message: "B1", code: "B1" },
+			]);
+			flush();
+			expect(diagnostics[uri]?.map((d) => d.message)).toEqual(["A1", "B1"]);
+
+			// Step 2: Clear Owner A (with empty list, preserving ownerA before ownerB, just like LSP publishDiagnostics([])) -> [B1]
+			publishFindings(model as any, "ownerA", []);
+			flush();
+			expect(diagnostics[uri]?.map((d) => d.message)).toEqual(["B1"]);
+
+			// Step 3: Republish Owner A with A2 -> MUST hold [A2, B1], NOT [A2, A2]!
+			publishFindings(model as any, "ownerA", [
+				{ line: 1, column: 1, endLine: 1, endColumn: 3, severity: 1, message: "A2", code: "A2" },
+			]);
+			flush();
+			expect(diagnostics[uri]?.map((d) => d.message)).toEqual(["A2", "B1"]);
+
+			// Step 4: Also verify clear via null followed by republish A3 -> [B1, A3] without corrupting B1
+			publishFindings(model as any, "ownerA", null);
+			flush();
+			expect(diagnostics[uri]?.map((d) => d.message)).toEqual(["B1"]);
+
+			publishFindings(model as any, "ownerA", [
+				{ line: 1, column: 1, endLine: 1, endColumn: 4, severity: 1, message: "A3", code: "A3" },
+			]);
+			flush();
+			expect(diagnostics[uri]?.map((d) => d.message)).toEqual(["B1", "A3"]);
+		} finally {
+			publishFindings(model as any, "ownerA", null);
+			publishFindings(model as any, "ownerB", null);
+			flush();
+			model.dispose();
+		}
+	});
 });
 
 // =============================================================================
@@ -1259,5 +1554,55 @@ describe("SolidJS 2.0.3 audit — git.ts & agent/tidy.ts", () => {
 		const texts = state.messages.map((m) => m.text);
 		expect(texts.some((t) => t.includes("Run the context step first"))).toBe(true);
 		expect(texts.some((t) => t.includes("is not open"))).toBe(false);
+	});
+});
+
+// =============================================================================
+// 7. agent/Agent.tsx — same-tick workspace switch + attachFileToAgent + currentAgentContext
+// =============================================================================
+describe("SolidJS 2.0.3 audit — agent/Agent.tsx", () => {
+	beforeAll(connectTestRpc);
+	afterAll(disconnectTestRpc);
+	beforeEach(resetAll);
+
+	test("same-tick workspace switch + attachFileToAgent + currentAgentContext preserves new attachment and never leaks old workspace context", () => {
+		// 1. Seed Workspace A with an attached file.
+		setState((s) => {
+			s.workspace = { root: "/ws-agent-a", name: "ws-a" };
+		});
+		flush();
+		attachFileToAgent("/ws-agent-a/docs/old.md");
+		flush();
+		expect(currentAgentContext().workOptions.ticketFiles).toEqual([
+			{ path: "/ws-agent-a/docs/old.md", rel: "docs/old.md" },
+		]);
+
+		// 2. Switch to Workspace B WITHOUT flushing, attach a Workspace B file, and immediately read currentAgentContext().
+		setState((s) => {
+			s.workspace = { root: "/ws-agent-b", name: "ws-b" };
+		});
+		attachFileToAgent("/ws-agent-b/docs/new.md");
+		const ctxSameTick = currentAgentContext();
+		expect(ctxSameTick.workOptions.ticketFiles).toEqual([
+			{ path: "/ws-agent-b/docs/new.md", rel: "docs/new.md" },
+		]);
+		expect(ctxSameTick.workOptions.includeSchema).toBe(false);
+		expect(ctxSameTick.workOptions.includeRegistries).toBe(false);
+		expect(ctxSameTick.workOptions.includeState).toBe(false);
+
+		// 3. Switch to Workspace C WITHOUT flushing and read currentAgentContext() without attaching: clean empty context!
+		setState((s) => {
+			s.workspace = { root: "/ws-agent-c", name: "ws-c" };
+		});
+		const ctxC1 = currentAgentContext();
+		expect(ctxC1.workOptions.ticketFiles).toEqual([]);
+		const ctxC2 = currentAgentContext();
+		expect(ctxC2.workOptions.ticketFiles).toEqual([]);
+
+		// 4. Attempting to attach a Workspace A file while switched to Workspace C (unflushed) is rejected.
+		attachFileToAgent("/ws-agent-a/docs/old.md");
+		expect(currentAgentContext().workOptions.ticketFiles).toEqual([]);
+		flush();
+		expect(currentAgentContext().workOptions.ticketFiles).toEqual([]);
 	});
 });

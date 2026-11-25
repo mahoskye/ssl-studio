@@ -3,7 +3,7 @@
 // analysts and managers lead with plain process language, while developers can
 // expand once to inspect implementing scripts, functions, called procedures,
 // and live read-only SSL previews (all ranges from starlims-lsp, ADR 0003).
-import { createEffect, createMemo, createSignal, For, Show, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";
 import { baseName, dirName } from "../../shared/paths";
 import { Icon } from "../Icon";
 import { IconButton } from "../panels/Rows";
@@ -288,6 +288,15 @@ export function PlanImplementation(props: {
 			setScriptsDraft(v);
 		},
 	);
+	const resyncScripts = (el: HTMLTextAreaElement) => {
+		onSettled(() => {
+			if (!el.isConnected) return;
+			const cur = untrack(scriptsText);
+			setScriptsDraft(cur);
+			if (el.value !== cur) el.value = cur;
+			props.fitTextarea(el);
+		});
+	};
 
 	const summary = createMemo(() => {
 		const sc = allScripts().length;
@@ -379,7 +388,14 @@ export function PlanImplementation(props: {
 								setScriptsDraft(e.currentTarget.value);
 								props.fitTextarea(e.currentTarget);
 							}}
-							onChange={(e) => props.onSetTargets(e.currentTarget.value)}
+							onChange={(e) => {
+								const el = e.currentTarget;
+								props.onSetTargets(el.value);
+								resyncScripts(el);
+							}}
+							onBlur={(e) => {
+								resyncScripts(e.currentTarget);
+							}}
 						/>
 					</label>
 				</div>

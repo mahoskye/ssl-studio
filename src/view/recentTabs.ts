@@ -102,6 +102,8 @@ export function stepRecent(by: 1 | -1, hold?: boolean) {
 		if (s.bottomMaximized) s.bottomMaximized = false;
 	});
 	onFlush(() => {
+		const cur = snapshot(state);
+		if (cur.centerView !== "editors" || cur.groups[cur.activeGroup]?.active !== next.path) return;
 		revealSignal.fire(next.path);
 		focusEditor();
 	});

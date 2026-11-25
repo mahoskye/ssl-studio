@@ -1,8 +1,10 @@
 import { describe, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { createEffect, createMemo, createRoot, createSignal, flush, untrack } from "solid-js";
-import { setPath } from "../src/shared/styleProfile";
+import { createEffect, createMemo, createRoot, createSignal, flush, onCleanup, onSettled, untrack } from "solid-js";
+import { frontMatter, frontMatterInnerSpan } from "../src/shared/frontMatter";
+import { getPath, HOUSE_STYLE, SERVER_DEFAULTS, setPath } from "../src/shared/styleProfile";
+import { createAsyncQuery } from "../src/view/asyncQuery";
 import { defaultMarkdownPanelTab } from "../src/view/panels/markdownBridge";
 
 // Minimal headless browser & Monaco shims so view modules load cleanly under Bun.
@@ -244,14 +246,14 @@ describe("Solid 2.0.3 Audit — Agent.tsx workspace reset & snapshot(agent).chat
 		}
 	});
 
-	test("Agent.tsx ensureAgentWorkspace returns boolean, runAskAbout uses snapshot(agent).chatSession and explicit flags", () => {
+	test("Agent.tsx uses agentCtx store + snapshot(agentCtx) and runAskAbout uses snapshot(agent).chatSession and explicit flags", () => {
 		const src = readSrc("../src/view/agent/Agent.tsx");
 		expect(src).toContain("function ensureAgentWorkspace(): boolean");
-		expect(src).toContain("const didReset = ensureAgentWorkspace();");
-		expect(src).toContain("const picked = didReset ? null : pickedTicket();");
-		expect(src).toContain("includeSchema: didReset ? false : withSchema(),");
-		expect(src).toContain("includeRegistries: didReset ? false : withRegistries(),");
-		expect(src).toContain("includeState: didReset ? false : withState(),");
+		expect(src).toContain("const ctx = snapshot(agentCtx);");
+		expect(src).toContain("const picked = ctx.pickedTicket;");
+		expect(src).toContain("includeSchema: ctx.withSchema,");
+		expect(src).toContain("includeRegistries: ctx.withRegistries,");
+		expect(src).toContain("includeState: ctx.withState,");
 
 		const runStart = src.indexOf("async function runAskAbout(");
 		const runEnd = src.indexOf("export async function askAbout(", runStart);
@@ -262,9 +264,9 @@ describe("Solid 2.0.3 Audit — Agent.tsx workspace reset & snapshot(agent).chat
 		expect(runSrc).toContain("const chatSession = snapshot(agent).chatSession;");
 		expect(runSrc).toContain("sessionID: chatSession ?? undefined,");
 		expect(runSrc).not.toContain("agent.chatSession");
-		expect(runSrc).toContain("withGitDiff: didReset ? false : withGitDiff(),");
-		expect(runSrc).toContain("withGoverningDocs: didReset ? false : withGoverningDocs(),");
-		expect(runSrc).toContain("withRefTables: didReset ? false : withRefTables(),");
+		expect(runSrc).toContain("withGitDiff: ctx.withGitDiff,");
+		expect(runSrc).toContain("withGoverningDocs: ctx.withGoverningDocs,");
+		expect(runSrc).toContain("withRefTables: ctx.withRefTables,");
 
 		const prepStart = src.indexOf("async function prepareContextDelta(");
 		const prepEnd = src.indexOf("async function runAskAbout(", prepStart);
@@ -390,7 +392,7 @@ describe("Solid 2.0.3 Audit — StyleProfile.tsx & Settings.tsx", () => {
 		expect(src).toContain("function DraftInput(");
 		expect(src).toContain("const committed = createMemo(() => props.value);");
 		expect(src).toContain("const [draft, setDraft] = createSignal(untrack(committed));");
-		expect(src).toContain("onInput={(e) => setDraft(e.currentTarget.value)}");
+		expect(src).toContain("setDraft(e.currentTarget.value);");
 		expect(src).toContain("onKeyDown={commitOnEnter}");
 
 		const draftUses = [...src.matchAll(/<DraftInput\b/g)].length;
@@ -493,5 +495,631 @@ describe("Solid 2.0.3 Audit — Objects.tsx auto-default Markdown tab tracks doc
 		} finally {
 			ctx.dispose();
 		}
+	});
+});
+
+describe("Solid 2.0.3 Audit Pass 2 — Search.tsx noReplace(true) replace/preview handoff", () => {
+	test("Search.tsx separates reactive noReplace() from synchronous noReplace(true) in executeReplace and previewReplace", () => {
+		const src = readSrc("../src/view/panels/Search.tsx");
+		expect(src).toContain("const noReplace = (ignoreReplaceActive = false) => {");
+		expect(src).toContain('if (status() === "busy" || (!ignoreReplaceActive && replaceActive())) return "The search is still running";');
+
+		const execStart = src.indexOf("const executeReplace = async (skipConfirm: boolean) => {");
+		const previewStart = src.indexOf("const previewReplace = async () => {", execStart);
+		expect(execStart).toBeGreaterThan(0);
+		expect(previewStart).toBeGreaterThan(execStart);
+
+		expect(src.slice(execStart, execStart + 200)).toContain("if (replaceBusy || noReplace(true)) return;");
+		expect(src.slice(previewStart, previewStart + 200)).toContain("if (replaceBusy || noReplace(true)) return;");
+		// Both handoffs must exit the try block without early-returning past the post-finally handoff check.
+		expect(src.slice(execStart, previewStart)).toContain("handoffToPreview = true;\n\t\t\t\t\t\tbreak replaceBody;");
+		expect(src.slice(previewStart, previewStart + 4200)).not.toContain("applyAfter = true;\n\t\t\t\treturn;");
+		// Reactive button guards keep noReplace() with default ignoreReplaceActive = false.
+		expect(src).toContain('aria-disabled={noReplace() ? "true" : undefined}');
+	});
+
+	test("executeReplace -> previewReplace and previewReplace -> executeReplace(true) hand off cleanly without waiting for deferred setReplaceActive(false) flush", async () => {
+		const ctx = createRoot((dispose) => {
+			const [status, setStatus] = createSignal<"done" | "busy">("done");
+			const [replaceActive, setReplaceActive] = createSignal(false);
+			let replaceBusy = false;
+			const events: string[] = [];
+
+			const noReplace = (ignoreReplaceActive = false) => {
+				if (status() === "busy" || (!ignoreReplaceActive && replaceActive())) return "The search is still running";
+				return "";
+			};
+
+			const executeReplace = async (skipConfirm: boolean, choosePreview = false) => {
+				if (replaceBusy || noReplace(true)) {
+					events.push("execute:aborted");
+					return;
+				}
+				replaceBusy = true;
+				setReplaceActive(true);
+				let handoffToPreview = false;
+				replaceBody: try {
+					if (!skipConfirm && choosePreview) {
+						await Promise.resolve();
+						handoffToPreview = true;
+						break replaceBody;
+					}
+					events.push(skipConfirm ? "execute:applied-from-preview" : "execute:applied-direct");
+				} finally {
+					replaceBusy = false;
+					setReplaceActive(false);
+				}
+				if (handoffToPreview) {
+					// Deferred Solid 2 write: replaceActive() is still true before flush, but noReplace(true) allows handoff.
+					expect(replaceActive()).toBe(true);
+					await previewReplace(false);
+				}
+			};
+
+			const previewReplace = async (applyOnPick: boolean) => {
+				if (replaceBusy || noReplace(true)) {
+					events.push("preview:aborted");
+					return;
+				}
+				replaceBusy = true;
+				setReplaceActive(true);
+				let applyAfter = false;
+				try {
+					events.push("preview:opened");
+					await Promise.resolve();
+					if (applyOnPick) applyAfter = true;
+				} finally {
+					replaceBusy = false;
+					setReplaceActive(false);
+				}
+				if (applyAfter) {
+					expect(replaceActive()).toBe(true);
+					await executeReplace(true);
+				}
+			};
+
+			return { setStatus, replaceActive, noReplace, executeReplace, previewReplace, events, dispose };
+		});
+
+		try {
+			flush();
+			// Flow 1: Replace all -> Preview changes…
+			await ctx.executeReplace(false, true);
+			flush();
+			expect(ctx.events).toEqual(["preview:opened"]);
+			expect(ctx.replaceActive()).toBe(false);
+
+			// Flow 2: Preview… -> Apply replace
+			ctx.events.length = 0;
+			await ctx.previewReplace(true);
+			flush();
+			expect(ctx.events).toEqual(["preview:opened", "execute:applied-from-preview"]);
+			expect(ctx.replaceActive()).toBe(false);
+			expect(ctx.noReplace()).toBe("");
+		} finally {
+			ctx.dispose();
+		}
+	});
+});
+
+describe("Solid 2.0.3 Audit Pass 2 — Palette.tsx DraftInput/DraftTextarea snap-back & Escape revert", () => {
+	test("Palette.tsx imports onSettled and handles Escape revert & post-commit snap-back in DraftInput and DraftTextarea", () => {
+		const src = readSrc("../src/view/panels/Palette.tsx");
+		expect(src).toContain("onSettled");
+		const draftStart = src.indexOf("const DraftInput =");
+		const draftEnd = src.indexOf("const showTemplate =", draftStart);
+		expect(draftStart).toBeGreaterThan(0);
+		expect(draftEnd).toBeGreaterThan(draftStart);
+		const draftSrc = src.slice(draftStart, draftEnd);
+
+		expect(draftSrc.match(/let reverted = false;/g)?.length).toBe(2);
+		expect(draftSrc.match(/e\.key === "Escape"/g)?.length).toBe(2);
+		expect(draftSrc.match(/onSettled\(\(\) => \{/g)?.length).toBe(2);
+		expect(draftSrc).toContain("if (reverted) {");
+		expect(draftSrc).toContain("const cur = untrack(() => props.value);");
+	});
+
+	test("DraftInput snaps back on rejected/trimmed commits via onSettled and reverts without committing on Escape", () => {
+		const committedCalls: string[] = [];
+		const ctx = createRoot((dispose) => {
+			const [committed, setCommitted] = createSignal("Validate");
+			const [draft, setDraft] = createSignal(untrack(committed));
+			let reverted = false;
+			let disposed = false;
+			onCleanup(() => {
+				disposed = true;
+			});
+
+			const onCommit = (raw: string) => {
+				committedCalls.push(raw);
+				const trimmed = raw.trim();
+				if (!trimmed) return; // Rejected empty label
+				setCommitted(trimmed);
+			};
+
+			const syncVal = createMemo(
+				() => ({ key: "n1", value: committed() }),
+				{ equals: (a, b) => a.key === b.key && a.value === b.value },
+			);
+			createEffect(syncVal, ({ value }) => {
+				setDraft(value);
+			});
+
+			const el = { value: "Validate", blurred: 0, blur() { this.blurred++; } };
+
+			const triggerInput = (v: string) => {
+				reverted = false;
+				el.value = v;
+				setDraft(v);
+			};
+			const triggerFocus = () => {
+				reverted = false;
+			};
+			const triggerEscape = () => {
+				let prevented = false;
+				let stopped = false;
+				reverted = true;
+				prevented = true;
+				stopped = true;
+				const cur = untrack(committed);
+				setDraft(cur);
+				el.value = cur;
+				el.blur();
+				return { prevented, stopped };
+			};
+			const triggerChange = () => {
+				if (reverted) {
+					reverted = false;
+					return;
+				}
+				onCommit(el.value);
+				onSettled(() => {
+					if (disposed) return;
+					const cur = untrack(committed);
+					setDraft(cur);
+					if (el.value !== cur) el.value = cur;
+				});
+			};
+
+			return { committed, draft, el, triggerInput, triggerFocus, triggerEscape, triggerChange, dispose };
+		});
+
+		try {
+			flush();
+
+			// 1. Rejected empty commit snaps back to committed value after flush/onSettled.
+			ctx.triggerInput("");
+			flush();
+			expect(ctx.draft()).toBe("");
+			ctx.triggerChange();
+			flush();
+			expect(committedCalls).toEqual([""]);
+			expect(ctx.committed()).toBe("Validate");
+			expect(ctx.draft()).toBe("Validate");
+			expect(ctx.el.value).toBe("Validate");
+
+			// 2. Whitespace-padded commit matching committed value trims and snaps back cleanly.
+			ctx.triggerInput("  Validate  ");
+			flush();
+			ctx.triggerChange();
+			flush();
+			expect(ctx.draft()).toBe("Validate");
+			expect(ctx.el.value).toBe("Validate");
+
+			// 3. Pressing Escape reverts immediately and suppresses subsequent change commit on blur.
+			ctx.triggerInput("Temporary draft");
+			flush();
+			expect(ctx.draft()).toBe("Temporary draft");
+			const esc = ctx.triggerEscape();
+			expect(esc).toEqual({ prevented: true, stopped: true });
+			expect(ctx.el.blurred).toBe(1);
+			expect(ctx.el.value).toBe("Validate");
+			// Even if browser fires change during blur, commit must be suppressed.
+			ctx.triggerChange();
+			flush();
+			expect(committedCalls).toEqual(["", "  Validate  "]);
+			expect(ctx.committed()).toBe("Validate");
+			expect(ctx.draft()).toBe("Validate");
+
+			// 4. Subsequent focus + edit + commit works normally after Escape.
+			ctx.triggerFocus();
+			ctx.triggerInput("  Approve sample  ");
+			flush();
+			ctx.triggerChange();
+			flush();
+			expect(ctx.committed()).toBe("Approve sample");
+			expect(ctx.draft()).toBe("Approve sample");
+			expect(ctx.el.value).toBe("Approve sample");
+		} finally {
+			ctx.dispose();
+		}
+	});
+});
+
+describe("Solid 2.0.3 Audit Pass 2 — MarkdownInspector.tsx frontRaw, query memos, keyed <For>, yamlCompleter cleanup & kindVersion", () => {
+	test("MarkdownInspector.tsx wires kindVersion, frontRaw, structural query memos, untrack(docs), keyed <For>, yamlOpenForEdit, and yamlCompleter onCleanup", () => {
+		const src = readSrc("../src/view/panels/MarkdownInspector.tsx");
+
+		const activeDocStart = src.indexOf("const activeMdDoc = createMemo(() => {");
+		expect(activeDocStart).toBeGreaterThan(0);
+		expect(src.slice(activeDocStart, activeDocStart + 180)).toContain("void state.kindVersion;");
+
+		expect(src).toContain("const frontRaw = createMemo(() => {");
+		expect(src).toContain("const front = createMemo(() => frontMatter(frontRaw()));");
+		expect(src).toContain("const yamlOpenForEdit = createMemo(() => !isRead() && propsOpen() && editYaml() && Boolean(yamlSpan()));");
+
+		expect(src).toContain("const linkedQuerySource = createMemo(");
+		expect(src).toContain("const [linked] = createAsyncQuery(\n\t\tlinkedQuerySource,");
+		expect(src).toContain("const files = untrack(docs);");
+
+		expect(src).toContain("const unlinkedQuerySource = createMemo(");
+		expect(src).toContain("const [unlinkedMentions] = createAsyncQuery(\n\t\tunlinkedQuerySource,");
+		expect(src).toContain("for (const d of untrack(docs)) {");
+
+		expect(src).toContain("<For each={groupedFacts().primary} keyed={(f) => f.key}>");
+		expect(src).toContain("<For each={groupedFacts().governance} keyed={(f) => f.key}>");
+		expect(src).toContain("{(fact) => <PropertyRow fact={fact()} />}");
+
+		const yamlShowStart = src.indexOf("<Show when={!isRead() && editYaml() && yamlSpan()}>");
+		expect(yamlShowStart).toBeGreaterThan(0);
+		const yamlShowHead = src.slice(yamlShowStart, yamlShowStart + 260);
+		expect(yamlShowHead).toContain("onCleanup(() => {");
+		expect(yamlShowHead).toContain("yamlCompleter?.dispose();");
+		expect(yamlShowHead).toContain("yamlCompleter = undefined;");
+		expect(yamlShowHead).toContain("yamlInputEl = undefined;");
+	});
+
+	test("frontRaw matches frontMatter(text) on all fence/EOL variants and prevents front recomputation on body keystrokes", () => {
+		const extractFrontRaw = (t: string) => {
+			const span = frontMatterInnerSpan(t);
+			if (!span) return "";
+			const closeNl = t.indexOf("\n", span.end);
+			const closeEnd = closeNl < 0 ? t.length : t[closeNl - 1] === "\r" ? closeNl - 1 : closeNl;
+			return t.slice(0, closeEnd);
+		};
+
+		const samples = [
+			"---\ntitle: Spec\ntags: [a, b]\n---\n# Heading\nBody",
+			"---\ntitle: Spec\n---",
+			"---\r\ntitle: Spec\r\nstatus: open\r\n---\r\nBody line",
+			"---\n---\nBody after empty fm",
+			"---\ntitle: Ellipsis\n...\nBody",
+			"<!-- template: spec -->\n---\ntitle: Templated\n---\nBody",
+			"\uFEFF---\ntitle: Bom\n---\nBody",
+			"# Plain doc without frontmatter\nParagraph",
+			"---\ntitle: Unclosed\nNo closing fence",
+		];
+		for (const sample of samples) {
+			const expected = frontMatter(sample);
+			const actual = frontMatter(extractFrontRaw(sample));
+			expect(actual.values).toEqual(expected.values);
+			expect(actual.lines).toBe(expected.lines);
+		}
+
+		let frontRuns = 0;
+		const ctx = createRoot((dispose) => {
+			const [text, setText] = createSignal("---\ntitle: Spec\nstatus: open\n---\nHello");
+			const yamlSpan = createMemo(() => frontMatterInnerSpan(text()), {
+				equals: (a, b) =>
+					a === b ||
+					(Boolean(a && b) && a!.start === b!.start && a!.end === b!.end && a!.inner === b!.inner && a!.eol === b!.eol),
+			});
+			const frontRaw = createMemo(() => {
+				const t = text();
+				const span = yamlSpan();
+				if (!span) return "";
+				const closeNl = t.indexOf("\n", span.end);
+				const closeEnd = closeNl < 0 ? t.length : t[closeNl - 1] === "\r" ? closeNl - 1 : closeNl;
+				return t.slice(0, closeEnd);
+			});
+			const front = createMemo(() => {
+				frontRuns++;
+				return frontMatter(frontRaw());
+			});
+			return { setText, front, dispose };
+		});
+
+		try {
+			flush();
+			expect(ctx.front().values.status).toBe("open");
+			expect(frontRuns).toBe(1);
+
+			// Body keystrokes must NOT re-parse frontmatter.
+			ctx.setText("---\ntitle: Spec\nstatus: open\n---\nHello world");
+			flush();
+			ctx.setText("---\ntitle: Spec\nstatus: open\n---\nHello world\nMore prose");
+			flush();
+			expect(ctx.front().values.status).toBe("open");
+			expect(frontRuns).toBe(1);
+
+			// Frontmatter edit DOES re-parse frontmatter.
+			ctx.setText("---\ntitle: Spec\nstatus: done\n---\nHello world\nMore prose");
+			flush();
+			expect(ctx.front().values.status).toBe("done");
+			expect(frontRuns).toBe(2);
+		} finally {
+			ctx.dispose();
+		}
+	});
+
+	test("structural query memos with untrack(docs) keep backlinks & unlinked mentions stable across mode toggles and identical doc snapshots", async () => {
+		let linkedFetches = 0;
+		let unlinkedFetches = 0;
+		const ctx = createRoot((dispose) => {
+			const [path, setPath] = createSignal("/ws/docs/spec.md");
+			const [root] = createSignal("/ws");
+			const [rev] = createSignal(0);
+			const [mode, setMode] = createSignal<"live" | "read">("live");
+			const [docsSig, setDocsSig] = createSignal([{ path: "/ws/docs/spec.md", title: "Spec" }, { path: "/ws/docs/ref.md", title: "Ref" }]);
+			const docsFingerprint = createMemo(() => `${docsSig().length}:${docsSig().map((d) => `${d.path}|${d.title}`).join("\n")}`);
+
+			const linkedQuerySource = createMemo(
+				() => {
+					const p = path();
+					const r = root();
+					return p && r ? { path: p, sig: docsFingerprint(), root: r, rev: rev() } : null;
+				},
+				{
+					equals: (a, b) =>
+						a === b ||
+						(Boolean(a && b) && a!.path === b!.path && a!.sig === b!.sig && a!.root === b!.root && a!.rev === b!.rev),
+				},
+			);
+
+			const [linked] = createAsyncQuery(linkedQuerySource, async (src) => {
+				linkedFetches++;
+				const files = untrack(docsSig);
+				await Promise.resolve();
+				return { path: src.path, root: src.root, value: files.map((f) => f.path) };
+			});
+
+			const unlinkedQuerySource = createMemo(
+				() => {
+					const p = path();
+					const r = root();
+					const back = linked();
+					if (!p || !r || linked.loading || !back || back.path !== p || back.root !== r) return null;
+					const linkedPaths = back.value;
+					return { path: p, root: r, title: "Spec", ticket: "", stem: "spec", sig: docsFingerprint(), linkedPaths, linkedKey: linkedPaths.join("\0"), rev: rev() };
+				},
+				{
+					equals: (a, b) =>
+						a === b ||
+						(Boolean(a && b) &&
+							a!.path === b!.path &&
+							a!.root === b!.root &&
+							a!.title === b!.title &&
+							a!.ticket === b!.ticket &&
+							a!.stem === b!.stem &&
+							a!.sig === b!.sig &&
+							a!.linkedKey === b!.linkedKey &&
+							a!.rev === b!.rev),
+				},
+			);
+
+			const [unlinked] = createAsyncQuery(unlinkedQuerySource, async (src) => {
+				unlinkedFetches++;
+				const files = untrack(docsSig);
+				await Promise.resolve();
+				return { path: src.path, root: src.root, count: files.length };
+			});
+
+			return { setPath, setMode, setDocsSig, linked, unlinked, mode, dispose };
+		});
+
+		try {
+			flush();
+			await Promise.resolve();
+			await Promise.resolve();
+			flush();
+			await Promise.resolve();
+			await Promise.resolve();
+			flush();
+
+			expect(linkedFetches).toBe(1);
+			expect(unlinkedFetches).toBe(1);
+			expect(ctx.linked()?.value.length).toBe(2);
+			expect(ctx.linked.loading).toBe(false);
+			expect(ctx.unlinked()?.count).toBe(2);
+
+			// Toggle Live -> Read and push a fresh docs array with identical fingerprint: no refetch, no drop to 0.
+			ctx.setMode("read");
+			ctx.setDocsSig([{ path: "/ws/docs/spec.md", title: "Spec" }, { path: "/ws/docs/ref.md", title: "Ref" }]);
+			flush();
+			await Promise.resolve();
+			flush();
+			expect(linkedFetches).toBe(1);
+			expect(unlinkedFetches).toBe(1);
+			expect(ctx.linked.loading).toBe(false);
+			expect(ctx.linked()?.value.length).toBe(2);
+		} finally {
+			ctx.dispose();
+		}
+	});
+});
+
+describe("Solid 2.0.3 Audit Pass 2 — StyleProfile.tsx <select> snap-back, inheritedValue & scope reset", () => {
+	test("StyleProfile.tsx imports onSettled, adds inheritedValue + scope reset effect, and resyncs choice <select> in onSettled", () => {
+		const src = readSrc("../src/view/StyleProfile.tsx");
+		expect(src).toContain("onSettled");
+		expect(src).toContain('() => !state.workspace && scope() === "workspace"');
+		expect(src).toContain('if (reset) setScope("user");');
+		expect(src).toContain("const inheritedValue = (path: PathKey) => {");
+		expect(src).toContain('return String(inheritedValue(field.path) ?? "");');
+		expect(src).toContain('const next = String(untrack(() => displayed(f.path) ?? ""));');
+		expect(src).toContain("if (el.value !== next) el.value = next;");
+	});
+
+	test("inheritedValue resolves fallback immediately before flush, choice <select> snaps back in onSettled, and scope resets on workspace close", () => {
+		const ctx = createRoot((dispose) => {
+			const [hasWorkspace, setHasWorkspace] = createSignal(true);
+			const [scope, setScope] = createSignal<"user" | "workspace">("workspace");
+			const [layers, setLayers] = createSignal<{ user: Record<string, any>; workspace: Record<string, any> }>({
+				user: {},
+				workspace: { format: { indentSize: 2 } },
+			});
+
+			createEffect(
+				() => !hasWorkspace() && scope() === "workspace",
+				(reset) => {
+					if (reset) setScope("user");
+				},
+			);
+
+			const displayed = (path: string) => {
+				if (scope() === "user") {
+					return getPath(layers().user, path) ?? getPath(HOUSE_STYLE, path) ?? getPath(SERVER_DEFAULTS, path);
+				}
+				return getPath(layers().workspace, path) ?? getPath(layers().user, path) ?? getPath(HOUSE_STYLE, path) ?? getPath(SERVER_DEFAULTS, path);
+			};
+			const inheritedValue = (path: string) => {
+				if (scope() === "user") {
+					return getPath(HOUSE_STYLE, path) ?? getPath(SERVER_DEFAULTS, path);
+				}
+				return getPath(layers().user, path) ?? getPath(HOUSE_STYLE, path) ?? getPath(SERVER_DEFAULTS, path);
+			};
+			const set = (path: string, value: unknown) => {
+				const targetScope = scope();
+				setLayers((prev) => ({ ...prev, [targetScope]: setPath(prev[targetScope], path, value) }));
+			};
+
+			const selectEl = { value: "tab" };
+			const chooseServerDefault = () => {
+				selectEl.value = "";
+				set("format.indentStyle", undefined);
+				onSettled(() => {
+					const next = String(untrack(() => displayed("format.indentStyle") ?? ""));
+					if (selectEl.value !== next) selectEl.value = next;
+				});
+			};
+
+			return { setHasWorkspace, scope, setScope, displayed, inheritedValue, set, selectEl, chooseServerDefault, dispose };
+		});
+
+		try {
+			flush();
+
+			// 1. Clearing a workspace number override returns inherited server default (4) immediately before flush.
+			ctx.set("format.indentSize", undefined);
+			expect(String(ctx.inheritedValue("format.indentSize") ?? "")).toBe("4");
+			flush();
+			expect(ctx.displayed("format.indentSize")).toBe(4);
+
+			// 2. Picking "server default" ("") on a choice <select> snaps visually back to inherited "tab" in onSettled.
+			ctx.chooseServerDefault();
+			expect(ctx.selectEl.value).toBe("");
+			flush();
+			expect(ctx.selectEl.value).toBe("tab");
+
+			// 3. Closing workspace while scope === "workspace" resets scope to "user".
+			expect(ctx.scope()).toBe("workspace");
+			ctx.setHasWorkspace(false);
+			flush();
+			expect(ctx.scope()).toBe("user");
+		} finally {
+			ctx.dispose();
+		}
+	});
+});
+
+describe("Solid 2.0.3 Audit Pass 2 — Settings.tsx failed-save DraftInput revert & Git.tsx scope button .on guard", () => {
+	test("Settings.tsx save() returns Promise<boolean> and DraftInput reverts to committed value when async commit fails", async () => {
+		const src = readSrc("../src/view/Settings.tsx");
+		expect(src).toContain("const save = async <K extends keyof Settings>(key: K, value: Settings[K] | null): Promise<boolean> => {");
+		expect(src).toContain("return saved;");
+		expect(src).toContain("onCommit: (value: string, el: HTMLInputElement) => Promise<string | false | void> | string | false | void;");
+		expect(src).toContain("const next = result === false ? untrack(committed) : typeof result === \"string\" ? result : undefined;");
+
+		let resolveFirstSave!: (ok: boolean) => void;
+		const ctx = createRoot((dispose) => {
+			const [committed, setCommitted] = createSignal("13");
+			const [draft, setDraft] = createSignal(untrack(committed));
+			let seq = 0;
+			let disposed = false;
+			onCleanup(() => {
+				disposed = true;
+			});
+			createEffect(committed, (v) => {
+				setDraft(v);
+			});
+
+			const el = { value: "13" };
+			const onInput = (v: string) => {
+				seq++;
+				el.value = v;
+				setDraft(v);
+			};
+			const onChange = (onCommit: (v: string) => Promise<string | false | void> | string | false | void) => {
+				const mySeq = ++seq;
+				const apply = (result: string | false | void) => {
+					if (disposed || seq !== mySeq) return;
+					const next = result === false ? untrack(committed) : typeof result === "string" ? result : undefined;
+					if (next !== undefined) {
+						setDraft(next);
+						if (el.value !== next) el.value = next;
+					}
+				};
+				const res = onCommit(el.value);
+				if (res !== null && typeof res === "object") {
+					void res.then(apply, () => apply(false));
+				} else {
+					apply(res);
+				}
+			};
+			return { setCommitted, draft, el, onInput, onChange, dispose };
+		});
+
+		try {
+			flush();
+
+			// Failed async save reverts draft & input element back to committed "13".
+			ctx.onInput("24");
+			flush();
+			ctx.onChange(async (): Promise<false> => false);
+			await Promise.resolve();
+			await Promise.resolve();
+			flush();
+			expect(ctx.draft()).toBe("13");
+			expect(ctx.el.value).toBe("13");
+
+			// Stale failed save must not clobber newer user input typed while save was in-flight.
+			ctx.onInput("20");
+			flush();
+			ctx.onChange(
+				() =>
+					new Promise<string | false>((resolve) => {
+						resolveFirstSave = (ok) => resolve(ok ? "20" : false);
+					}),
+			);
+			ctx.onInput("18");
+			flush();
+			resolveFirstSave(false);
+			await Promise.resolve();
+			await Promise.resolve();
+			flush();
+			expect(ctx.draft()).toBe("18");
+			expect(ctx.el.value).toBe("18");
+		} finally {
+			ctx.dispose();
+		}
+	});
+
+	test("Git.tsx guards ticket scope buttons .on class with ticket key presence so disabled buttons are never active", () => {
+		const src = readSrc("../src/view/panels/Git.tsx");
+		expect(src).toContain('class={{ on: Boolean(activeTicketKey()) && (commitScope() === "active" || !fileTicketKey()) }}');
+		expect(src).toContain('class={{ on: Boolean(fileTicketKey()) && (commitScope() === "file" || !activeTicketKey()) }}');
+
+		const states = (active: string, file: string, scope: "active" | "file") => ({
+			activeOn: Boolean(active) && (scope === "active" || !file),
+			fileOn: Boolean(file) && (scope === "file" || !active),
+		});
+
+		expect(states("", "LIMS-9", "active")).toEqual({ activeOn: false, fileOn: true });
+		expect(states("", "LIMS-9", "file")).toEqual({ activeOn: false, fileOn: true });
+		expect(states("LIMS-1", "", "file")).toEqual({ activeOn: true, fileOn: false });
+		expect(states("LIMS-1", "", "active")).toEqual({ activeOn: true, fileOn: false });
+		expect(states("LIMS-1", "LIMS-9", "active")).toEqual({ activeOn: true, fileOn: false });
+		expect(states("LIMS-1", "LIMS-9", "file")).toEqual({ activeOn: false, fileOn: true });
+		expect(states("", "", "active")).toEqual({ activeOn: false, fileOn: false });
 	});
 });

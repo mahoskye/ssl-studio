@@ -3376,6 +3376,10 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 	color: var(--editor-strong);
 }
 
+.monaco-editor .monaco-hover .hover-row.hover-row-with-copy > .marker.hover-contents {
+	padding-right: 8px !important;
+}
+
 /* Hide Monaco 0.58+'s inline severity icon so our ::before gutter badge owns all 4 severities without duplicate icons. */
 .monaco-editor .monaco-hover .hover-row > .marker.hover-contents > .marker-severity {
 	display: none;
@@ -3425,6 +3429,13 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 	font-weight: 400;
 	font-size: var(--text-md) !important;
 	color: var(--editor-fg);
+}
+
+.monaco-editor .monaco-hover .hover-row > .marker.hover-contents > .marker-message > div > span,
+.monaco-editor .monaco-hover .hover-row > .marker.hover-contents > div:not(.marker-message) > span {
+	font-family: var(--ui-font) !important;
+	font-size: var(--text-md) !important;
+	line-height: inherit !important;
 }
 
 /* Soften and tighten symbol help documentation when stacked below a diagnostic so the problem commands first attention */

@@ -1,7 +1,7 @@
 // The style profile editor: the language server's `ssl` settings, per user
 // or per workspace, with the house preset (decisions 0002, 0005, 0006).
 import { Icon } from "./Icon";
-import { createEffect, createMemo, createSignal, createUniqueId, For, Show, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, onSettled, Show, untrack } from "solid-js";
 import { createAsyncQuery } from "./asyncQuery";
 import { getPath, HOUSE_STYLE, SERVER_DEFAULTS, RULE_LEVELS, SECTIONS, setPath, type Field, type PathKey } from "../shared/styleProfile";
 import { backend } from "./backend";
@@ -71,6 +71,12 @@ export function StyleProfile() {
 		() => open(),
 		(isOpen) => {
 			if (isOpen) void reload();
+		},
+	);
+	createEffect(
+		() => !state.workspace && scope() === "workspace",
+		(reset) => {
+			if (reset) setScope("user");
 		},
 	);
 	const current = () => layers()[scope()];
@@ -158,6 +164,14 @@ export function StyleProfile() {
 		return getPath(layers().workspace, path) ?? getPath(layers().user, path) ?? getPath(effectiveBaseStyle(), path) ?? getPath(state.settings.ssl, path) ?? getPath(SERVER_DEFAULTS, path);
 	};
 
+	/** Fallback value inherited from lower layers, skipping the active scope's own override. */
+	const inheritedValue = (path: PathKey) => {
+		if (scope() === "user") {
+			return getPath(userBaseStyle(), path) ?? getPath(SERVER_DEFAULTS, path);
+		}
+		return getPath(layers().user, path) ?? getPath(effectiveBaseStyle(), path) ?? getPath(SERVER_DEFAULTS, path);
+	};
+
 	/** Non-undefined when viewing user scope and the open workspace overrides this path. */
 	const workspaceOverride = (path: PathKey) => (scope() === "user" && state.workspace ? getPath(layers().workspace, path) : undefined);
 
@@ -202,7 +216,7 @@ export function StyleProfile() {
 		const raw = rawValue.trim();
 		if (raw === "") {
 			set(field.path, undefined);
-			return String(displayed(field.path) ?? "");
+			return String(inheritedValue(field.path) ?? "");
 		}
 		const parsed = Number(raw);
 		if (!Number.isFinite(parsed)) {
@@ -259,7 +273,17 @@ export function StyleProfile() {
 				) : f.kind === "number" ? (
 					<NumberInput field={f} />
 				) : (
-					<select value={displayed(f.path) ?? ""} onChange={(e) => set(f.path, e.currentTarget.value || undefined)}>
+					<select
+						value={displayed(f.path) ?? ""}
+						onChange={(e) => {
+							const el = e.currentTarget;
+							set(f.path, el.value || undefined);
+							onSettled(() => {
+								const next = String(untrack(() => displayed(f.path) ?? ""));
+								if (el.value !== next) el.value = next;
+							});
+						}}
+					>
 						<option value="">server default</option>
 						<For each={f.options}>{(o) => <option value={o}>{o}</option>}</For>
 					</select>

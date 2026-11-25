@@ -120,9 +120,11 @@ export function resolveMarkerHoverSeverity(
 	const detail = readText(spans[1]);
 	const iconSev = severityFromIcon(el.querySelector?.(":scope > .marker-severity"));
 	// Monaco 0.58+ renders unambiguous codicons for Error, Warning, and Hint (`severity-ignore`);
-	// match against model markers for legacy DOM and for `codicon-info` (distinguishing Hint vs Info).
+	// match against model markers for legacy DOM and for `codicon-info` (distinguishing Hint vs Info,
+	// without ever upgrading a `codicon-info` row to Error or Warning).
 	if (iconSev === "error" || iconSev === "warning" || iconSev === "hint") return iconSev;
-	return matchMarkerSeverity(msg, detail, markers, lineNumber, iconSev ?? "warning");
+	const candidates = iconSev === "info" ? markers.filter((m) => m.severity <= 2) : markers;
+	return matchMarkerSeverity(msg, detail, candidates, lineNumber, iconSev ?? "warning");
 }
 
 /**
@@ -172,6 +174,12 @@ export function observeMarkerHoverSeverity(editor: monaco.editor.ICodeEditor): (
 	const moveSub = editor.onMouseMove?.((e) => {
 		hoveredLine = e.target?.position?.lineNumber ?? null;
 	});
+	const leaveSub = editor.onMouseLeave?.(() => {
+		hoveredLine = null;
+	});
+	const cursorSub = editor.onDidChangeCursorPosition?.(() => {
+		hoveredLine = null;
+	});
 	const sub = editor.onDidChangeModel(() => {
 		hoveredLine = null;
 		attach();
@@ -179,6 +187,8 @@ export function observeMarkerHoverSeverity(editor: monaco.editor.ICodeEditor): (
 	attach();
 	return () => {
 		moveSub?.dispose();
+		leaveSub?.dispose();
+		cursorSub?.dispose();
 		sub.dispose();
 		observer?.disconnect();
 		observer = null;

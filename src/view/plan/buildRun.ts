@@ -119,28 +119,28 @@ export async function read(text: string): Promise<Reading> {
 }
 
 async function buildUnit(path: string, root: string, plan: Plan, spec: string, run: BuildRun, unit: BuildUnit, callable: string, skills: string[]) {
-	if (state.workspace?.root !== root) return;
+	if (snapshot(state).workspace?.root !== root) return;
 	unit.status = "running";
 	delete unit.problems;
 	publish(path, run, root);
 	const script = scriptOf(unit, plan);
 	const existing = await readScript(script, root);
-	if (state.workspace?.root !== root) return;
+	if (snapshot(state).workspace?.root !== root) return;
 	const spans = await spansIn(existing);
-	if (state.workspace?.root !== root) return;
+	if (snapshot(state).workspace?.root !== root) return;
 	const passed = run.units.filter((u) => u.status === "passed");
 	const banner = bannerFor(plan);
 	const others = passed.filter((u) => scriptOf(u, plan) === script);
 	const without = assembleScript(existing, banner, others, plan, spans);
 	const was = await read(without);
-	if (state.workspace?.root !== root) return;
+	if (snapshot(state).workspace?.root !== root) return;
 	// Taken away by hand since it was built: written again, as new.
 	const current = unit.change && existing !== null ? procedureText(existing, spans, unit.name) : null;
 	if (!current) delete unit.change;
 	const known = run.units.filter((u) => u.status === "passed" || u.status === "kept");
 	const ticketKey = (typeof plan.ticket === "string" && plan.ticket.trim()) || ticketForFile(docs(), path, root);
 	const work = ticketKey ? await workPrompt(ticketKey, { specs: false, plans: false }).catch(() => null) : null;
-	if (state.workspace?.root !== root) return;
+	if (snapshot(state).workspace?.root !== root) return;
 	const rawBase = unitPrompt(plan, spec, unit, known, callable, patternsFrom(TEMPLATES), current ? changeText(plan, unit, current) : "");
 	const base = work ? `${rawBase}\n\n${work.text}` : rawBase;
 	const units = run.units;
@@ -148,12 +148,12 @@ async function buildUnit(path: string, root: string, plan: Plan, spec: string, r
 	let problems: string[] = [];
 	let code: string | null = null;
 	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-		if (state.workspace?.root !== root) return;
+		if (snapshot(state).workspace?.root !== root) return;
 		unit.attempts = attempt;
 		const spent = latestAssistOf(path);
 		const before = { tokens: spent.tokens, cost: spent.cost };
 		const reply = await askAgent(path, `Build ${unit.name} (try ${attempt} of ${MAX_ATTEMPTS})`, prompt, skills, TOOL_LIMIT);
-		if (state.workspace?.root !== root) return;
+		if (snapshot(state).workspace?.root !== root) return;
 		const now = latestAssistOf(path);
 		run.tokens += now.tokens - before.tokens;
 		run.cost += now.cost - before.cost;
@@ -175,7 +175,7 @@ async function buildUnit(path: string, root: string, plan: Plan, spec: string, r
 			return publish(path, run, root);
 		}
 		const withUnit = code ? await read(assembleScript(existing, banner, [...others, { ...unit, code }], plan, spans)) : null;
-		if (state.workspace?.root !== root) return;
+		if (snapshot(state).workspace?.root !== root) return;
 		problems = judgeUnit({
 			unit,
 			code,
@@ -187,12 +187,12 @@ async function buildUnit(path: string, root: string, plan: Plan, spec: string, r
 			planned: units.map((u) => u.name),
 			mustCall: session.supports("ssl/callGraph") ? requiredCalls(unit, plan, units).filter((c) => c.toLowerCase() !== unit.name.toLowerCase()) : [],
 			size: withUnit?.size ?? was.size,
-			limits: state.settings.limits,
+			limits: snapshot(state).settings.limits,
 		});
 		if (!problems.length) {
 			const options = { tabSize: 4, insertSpaces: false };
 			unit.code = await session.formatText(code!, options).catch(() => code!);
-			if (state.workspace?.root !== root) return;
+			if (snapshot(state).workspace?.root !== root) return;
 			unit.status = "passed";
 			delete unit.draft;
 			return publish(path, run, root);
@@ -207,7 +207,7 @@ async function buildUnit(path: string, root: string, plan: Plan, spec: string, r
 }
 
 async function secondOpinion(path: string, root: string, plan: Plan, spec: string, run: BuildRun) {
-	if (state.workspace?.root !== root) return;
+	if (snapshot(state).workspace?.root !== root) return;
 	const passed = run.units.filter((u) => u.status === "passed");
 	if (!passed.length || overBudget(run)) return;
 	const scripts: { path: string; text: string }[] = [];
@@ -218,11 +218,11 @@ async function secondOpinion(path: string, root: string, plan: Plan, spec: strin
 	const partial = run.units.some((u) => u.status === "kept" || u.change);
 	const ticketKey = (typeof plan.ticket === "string" && plan.ticket.trim()) || ticketForFile(docs(), path, root);
 	const work = ticketKey ? await workPrompt(ticketKey, { specs: false, plans: false }).catch(() => null) : null;
-	if (state.workspace?.root !== root) return;
+	if (snapshot(state).workspace?.root !== root) return;
 	const workContext = work?.text ? cut(work.text, MAX_WORK_PROMPT_CHARS) : "";
 	const review = reviewPrompt(plan, spec, scripts, partial ? passed.flatMap((u) => u.nodes ?? []) : undefined);
 	const reply = await askAgent(path, "A second opinion", workContext ? `${review}\n\n${workContext}` : review, [], TOOL_LIMIT);
-	if (state.workspace?.root !== root) return;
+	if (snapshot(state).workspace?.root !== root) return;
 	const now = latestAssistOf(path);
 	run.tokens += now.tokens - before.tokens;
 	run.cost += now.cost - before.cost;
@@ -233,7 +233,7 @@ async function secondOpinion(path: string, root: string, plan: Plan, spec: strin
 /** Stage 4. Runs unattended from an approved spec, or carries on from where a run stopped. */
 export function startBuild(path: string) {
 	return begin(path, "build", async () => {
-		const root = state.workspace?.root;
+		const root = snapshot(state).workspace?.root;
 		if (!root) return;
 		const plan = planOf(path);
 		if (!plan) return notify("Fix the plan's text first.");
@@ -241,21 +241,21 @@ export function startBuild(path: string) {
 			(f) => f.text,
 			() => null,
 		);
-		if (state.workspace?.root !== root) return;
+		if (snapshot(state).workspace?.root !== root) return;
 		if (!specText) return notify("Write and approve a plan doc first.");
 		const hash = planHash(plan);
 		if (specHash(specText) !== hash) return notify("The plan has changed since its plan doc was approved. Write the plan doc again first.");
 		const { units, map } = readSpecFile(specText);
 		if (!units.length && !builtOf(plan)) return notify("The spec lists nothing to build.");
 		const model = currentModel();
-		const local = agent.models.find((m) => `${m.providerID}/${m.id}` === model)?.local ?? true;
+		const local = snapshot(agent).models.find((m) => `${m.providerID}/${m.id}` === model)?.local ?? true;
 		const existingRun = latestAssistOf(path).run;
 		let run: BuildRun | null = existingRun ? plain(existingRun) : null;
 		if (!run || run.planHash !== hash) {
 			let cost: number | undefined;
 			if (!local) {
 				const answer = await askUser(`${model} may cost money. Stop the build at what cost?`, "1");
-				if (state.workspace?.root !== root || answer === null) return;
+				if (snapshot(state).workspace?.root !== root || answer === null) return;
 				cost = Number(answer);
 				if (!Number.isFinite(cost) || cost <= 0) return notify("Give the budget as a number above zero.");
 			}
@@ -265,15 +265,15 @@ export function startBuild(path: string) {
 		stopping.delete(path);
 		run.status = "running";
 		const skills = ((await backend.agent("skills", []).catch(() => [])) as { id: string }[]).map((s) => s.id);
-		if (state.workspace?.root !== root) return;
+		if (snapshot(state).workspace?.root !== root) return;
 		if (!skills.includes("ssl-new-procedure")) return notify("The style guide's ssl-new-procedure skill is not installed, and building needs it.", "error");
 		updateAssist(path, { progress: "Surveying the workspace…" });
 		const callable = await survey(plan);
-		if (state.workspace?.root !== root) return;
+		if (snapshot(state).workspace?.root !== root) return;
 		const spec = specText.split("\n## Units")[0]!.trim();
 		publish(path, run, root);
 		for (;;) {
-			if (state.workspace?.root !== root) {
+			if (snapshot(state).workspace?.root !== root) {
 				stopping.delete(path);
 				return;
 			}
@@ -293,7 +293,7 @@ export function startBuild(path: string) {
 			}
 			await buildUnit(path, root, plan, spec, run, unit, callable, ["ssl-new-procedure"]);
 		}
-		if (state.workspace?.root !== root) {
+		if (snapshot(state).workspace?.root !== root) {
 			stopping.delete(path);
 			return;
 		}
@@ -301,7 +301,7 @@ export function startBuild(path: string) {
 			updateAssist(path, { progress: "Asking for a second opinion…" });
 			await secondOpinion(path, root, plan, spec, run);
 		}
-		if (state.workspace?.root !== root) {
+		if (snapshot(state).workspace?.root !== root) {
 			stopping.delete(path);
 			return;
 		}
@@ -384,16 +384,16 @@ export async function reviewBuild(path: string) {
 	const script = scriptsToReview(run, plan)[0];
 	if (!script) return notify("Nothing is waiting for review.");
 	const existing = await readScript(script, root);
-	if (state.workspace?.root !== root) return;
+	if (snapshot(state).workspace?.root !== root) return;
 	const passed = run.units.filter((u) => u.status === "passed" && scriptOf(u, plan) === script);
 	const spans = await spansIn(existing);
-	if (state.workspace?.root !== root) return;
+	if (snapshot(state).workspace?.root !== root) return;
 	const proposed = assembleScript(existing, bannerFor(plan), passed, plan, spans);
 	const reading = await read(proposed);
-	if (state.workspace?.root !== root) return;
+	if (snapshot(state).workspace?.root !== root) return;
 	const unresolved = reading.edges.filter((e) => !e.resolved).map((e) => e.target);
 	const unbuilt = unbuiltNodes(plan, run);
-	const local = agent.models.find((m) => `${m.providerID}/${m.id}` === run.model)?.local ?? true;
+	const local = snapshot(agent).models.find((m) => `${m.providerID}/${m.id}` === run.model)?.local ?? true;
 	const checks: Check[] = [
 		{ label: "Every step of the chart is built", ok: !unbuilt.length, detail: unbuilt.length ? `nothing yet for ${unbuilt.map((t) => `"${t}"`).join(", ")}` : undefined },
 		{ label: "Every call resolves", ok: !unresolved.length, detail: unresolved.length ? [...new Set(unresolved)].join(", ") : undefined },
@@ -411,10 +411,10 @@ export async function reviewBuild(path: string) {
 		note: run.review ? `A second opinion, which may be wrong:\n\n${run.review}` : undefined,
 		acceptLabel: existing === null ? "Accept and create the file" : "Accept into the editor",
 		onAccept: async (final) => {
-			if (state.workspace?.root !== root) return;
+			if (snapshot(state).workspace?.root !== root) return;
 			// The plan records this, so it must be open; the script is what you see afterwards.
 			if (!planOf(path)) await openFile(path);
-			if (state.workspace?.root !== root) return;
+			if (snapshot(state).workspace?.root !== root) return;
 			const full = joinPath(root, script);
 			const openNow = documents.has(canonical(full)) || documents.has(full);
 			const existsNow =
@@ -423,10 +423,10 @@ export async function reviewBuild(path: string) {
 					() => true,
 					() => false,
 				));
-			if (state.workspace?.root !== root) return;
+			if (snapshot(state).workspace?.root !== root) return;
 			if (!existsNow) {
 				await backend.write(full, final);
-				if (state.workspace?.root !== root) return;
+				if (snapshot(state).workspace?.root !== root) return;
 				setState((s) => {
 					s.treeVersion += 1;
 				});
@@ -434,7 +434,7 @@ export async function reviewBuild(path: string) {
 				await openFile(full);
 			} else {
 				await openFile(full);
-				if (state.workspace?.root !== root) return;
+				if (snapshot(state).workspace?.root !== root) return;
 				applyText(monaco.Uri.file(full).fsPath, final);
 			}
 			if (snapshot(state).workspace?.root !== root) return;
@@ -447,9 +447,9 @@ export async function reviewBuild(path: string) {
 			if (after && scriptsToReview(after, latestPlan).length) void reviewBuild(path);
 		},
 		onReject: async () => {
-			if (state.workspace?.root !== root) return;
+			if (snapshot(state).workspace?.root !== root) return;
 			const reason = await askUser(`What is wrong with ${script}? It goes back to the agent with your reason. Empty keeps it for later.`);
-			if (state.workspace?.root !== root || !reason?.trim()) return;
+			if (snapshot(state).workspace?.root !== root || !reason?.trim()) return;
 			mutate(path, (r) => {
 				for (const unit of r.units) {
 					if (unit.status === "passed" && scriptOf(unit, plan) === script) {

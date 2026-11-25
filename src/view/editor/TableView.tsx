@@ -4375,6 +4375,7 @@ export function TableView(props: { path: string; group?: number }) {
 
 	// Honor pending reveals on mount, live `revealSignal` updates from Search / Outline / Nav history, and scroll viewport observer.
 	onSettled(() => {
+		let disposed = false;
 		let ro: ResizeObserver | undefined;
 		if (scrollEl) {
 			const el = scrollEl;
@@ -4385,13 +4386,18 @@ export function TableView(props: { path: string; group?: number }) {
 			}
 		}
 		const pending = takeReveal(props.path);
-		if (pending) revealAt(pending);
+		if (pending) {
+			queueMicrotask(() => {
+				if (!disposed) revealAt(pending);
+			});
+		}
 		const stopReveal = revealSignal.listen((path) => {
 			if (canonical(path) !== canonical(props.path)) return;
 			const r = takeReveal(path) ?? takeReveal(props.path);
 			if (r) revealAt(r);
 		});
 		return () => {
+			disposed = true;
 			ro?.disconnect();
 			stopReveal();
 		};
@@ -7355,31 +7361,31 @@ export function TableView(props: { path: string; group?: number }) {
 
 								<div class="table-filter-list" role="group" aria-label={`Values in ${colName()}`}>
 									<Show when={visibleOptions().length} fallback={<p class="table-filter-empty">No matching values.</p>}>
-										<For each={visibleOptions()}>
+										<For each={visibleOptions()} keyed={(o) => o.key}>
 											{(opt) => {
-												const tone = () => badgeToneForValue(rule(), opt.label);
+												const tone = () => badgeToneForValue(rule(), opt().label);
 												return (
-													<div class={["table-filter-item", { zero: opt.count === 0 }]}>
+													<div class={["table-filter-item", { zero: opt().count === 0 }]}>
 														<label class="table-filter-check">
-															<input type="checkbox" checked={isChecked(opt.key)} onChange={() => toggleKey(opt.key)} />
+															<input type="checkbox" checked={isChecked(opt().key)} onChange={() => toggleKey(opt().key)} />
 															<Show
-																when={opt.label}
+																when={opt().label}
 																fallback={<span class="table-filter-blank">(empty)</span>}
 															>
-																<Show when={tone()} fallback={<span class="table-filter-val" title={opt.label}>{opt.label}</span>}>
-																	{(t) => <span class={`doc-status tone-${t()}`}>{opt.label}</span>}
+																<Show when={tone()} fallback={<span class="table-filter-val" title={opt().label}>{opt().label}</span>}>
+																	{(t) => <span class={`doc-status tone-${t()}`}>{opt().label}</span>}
 																</Show>
 															</Show>
 														</label>
 														<button
 															type="button"
 															class="table-filter-only"
-															title={`Show only ${opt.label || "(empty)"}`}
-															onClick={() => selectOnly(opt.key)}
+															title={`Show only ${opt().label || "(empty)"}`}
+															onClick={() => selectOnly(opt().key)}
 														>
 															Only
 														</button>
-														<span class="table-filter-count">{opt.count}</span>
+														<span class="table-filter-count">{opt().count}</span>
 													</div>
 												);
 											}}

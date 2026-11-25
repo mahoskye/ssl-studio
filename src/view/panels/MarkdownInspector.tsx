@@ -180,6 +180,7 @@ export function MarkdownInspector() {
 		return p && isMarkdown(p) ? canonical(p) : "";
 	});
 	const activeMdDoc = createMemo(() => {
+		void state.kindVersion;
 		const p = path();
 		if (!p) return undefined;
 		const d = documents.get(p);
@@ -245,8 +246,25 @@ export function MarkdownInspector() {
 		},
 	);
 
+	const yamlSpan = createMemo(() => frontMatterInnerSpan(text()), {
+		equals: (a, b) =>
+			a === b ||
+			(Boolean(a && b) && a!.start === b!.start && a!.end === b!.end && a!.inner === b!.inner && a!.eol === b!.eol),
+	});
+	const frontRaw = createMemo(() => {
+		const t = text();
+		const span = yamlSpan();
+		if (!span) return "";
+		const closeNl = t.indexOf("\n", span.end);
+		const closeEnd = closeNl < 0 ? t.length : t[closeNl - 1] === "\r" ? closeNl - 1 : closeNl;
+		return t.slice(0, closeEnd);
+	});
+	const front = createMemo(() => frontMatter(frontRaw()));
+	const facts = createMemo(() => extractDisplayProperties(front().values));
+	const groupedFacts = createMemo(() => groupPropertiesForInspector(facts()));
+
 	// Publish YAML editor open state so Live-mode Replace All knows whether frontmatter is being edited.
-	const yamlOpenForEdit = createMemo(() => editYaml() && !isRead());
+	const yamlOpenForEdit = createMemo(() => !isRead() && propsOpen() && editYaml() && Boolean(yamlSpan()));
 	createEffect(
 		() => yamlOpenForEdit(),
 		(open) => {
@@ -322,12 +340,7 @@ export function MarkdownInspector() {
 		el.style.height = `${Math.max(48, el.scrollHeight)}px`;
 	};
 
-	const front = createMemo(() => frontMatter(text()));
-	const yamlSpan = createMemo(() => frontMatterInnerSpan(text()));
-	const facts = createMemo(() => extractDisplayProperties(front().values));
-	const groupedFacts = createMemo(() => groupPropertiesForInspector(facts()));
-
-	const yamlSync = createMemo(() => (editYaml() ? (yamlSpan()?.inner ?? "") : null));
+	const yamlSync = createMemo(() => (yamlOpenForEdit() ? (yamlSpan()?.inner ?? "") : null));
 	createEffect(
 		() => yamlSync(),
 		(inner) => {
@@ -341,7 +354,7 @@ export function MarkdownInspector() {
 	);
 
 	createEffect(
-		() => editYaml(),
+		() => yamlOpenForEdit(),
 		(open) => {
 			if (!open || typeof ResizeObserver === "undefined") return;
 			let ro: ResizeObserver | undefined;
@@ -614,16 +627,25 @@ export function MarkdownInspector() {
 		return p && root ? `${root}\0${p}` : null;
 	});
 
-	const [linked] = createAsyncQuery(
+	const linkedQuerySource = createMemo(
 		() => {
 			const p = path();
 			const root = state.workspace?.root;
 			return p && root ? { path: p, sig: docsFingerprint(), root, rev: linksRefresh() } : null;
 		},
+		{
+			equals: (a, b) =>
+				a === b ||
+				(Boolean(a && b) && a!.path === b!.path && a!.sig === b!.sig && a!.root === b!.root && a!.rev === b!.rev),
+		},
+	);
+
+	const [linked] = createAsyncQuery(
+		linkedQuerySource,
 		async (src) => {
 			if (!src) return { key: "", path: "", root: "", value: [] as (ReturnType<typeof linkedFrom>[number] & { snippet: string })[] };
 			const key = `${src.root}\0${src.path}`;
-			const files = docs();
+			const files = untrack(docs);
 			try {
 				const [byPath, byName] = await Promise.all([backend.linksTo(src.path), backend.namesIn()]);
 				const hits = linkedFrom(
@@ -659,7 +681,7 @@ export function MarkdownInspector() {
 	});
 	const brokenOutgoingCount = createMemo(() => outgoingLinks().filter((o) => o.broken).length);
 
-	const [unlinkedMentions] = createAsyncQuery(
+	const unlinkedQuerySource = createMemo(
 		() => {
 			const p = path();
 			const root = state.workspace?.root;
@@ -671,8 +693,35 @@ export function MarkdownInspector() {
 			const tKey = ticket();
 			const stem = baseName(p).replace(/\.(md|markdown)$/i, "");
 			const linkedPaths = backlinksRes.value.map((b) => canonical(b.path));
-			return { path: p, root, title, ticket: tKey, stem, sig: docsFingerprint(), linkedPaths, rev: linksRefresh() };
+			return {
+				path: p,
+				root,
+				title,
+				ticket: tKey,
+				stem,
+				sig: docsFingerprint(),
+				linkedPaths,
+				linkedKey: linkedPaths.join("\0"),
+				rev: linksRefresh(),
+			};
 		},
+		{
+			equals: (a, b) =>
+				a === b ||
+				(Boolean(a && b) &&
+					a!.path === b!.path &&
+					a!.root === b!.root &&
+					a!.title === b!.title &&
+					a!.ticket === b!.ticket &&
+					a!.stem === b!.stem &&
+					a!.sig === b!.sig &&
+					a!.linkedKey === b!.linkedKey &&
+					a!.rev === b!.rev),
+		},
+	);
+
+	const [unlinkedMentions] = createAsyncQuery(
+		unlinkedQuerySource,
 		async (src) => {
 			if (!src) return { key: "", path: "", root: "", value: [] as UnlinkedMentionItem[] };
 			const key = `${src.root}\0${src.path}`;
@@ -680,7 +729,7 @@ export function MarkdownInspector() {
 			if (!terms.length) return { key, path: src.path, root: src.root, value: [] as UnlinkedMentionItem[] };
 			const linkedSet = new Set(src.linkedPaths.map((p) => canonical(p)));
 			const allMd = new Map<string, { path: string; name: string; title?: string }>();
-			for (const d of docs()) {
+			for (const d of untrack(docs)) {
 				if (!d.exists || !/\.(md|markdown)$/i.test(d.path)) continue;
 				const k = canonical(d.path);
 				if (k === canonical(src.path) || linkedSet.has(k)) continue;
@@ -1685,83 +1734,94 @@ export function MarkdownInspector() {
 						}
 					>
 						<dl class="md-insp-props-list">
-							<For each={groupedFacts().primary}>{(fact) => <PropertyRow fact={fact} />}</For>
+							<For each={groupedFacts().primary} keyed={(f) => f.key}>
+								{(fact) => <PropertyRow fact={fact()} />}
+							</For>
 							<Show when={groupedFacts().governance.length > 0}>
 								<Show when={groupedFacts().primary.length > 0}>
 									<div class="md-insp-subkicker">Governance</div>
 								</Show>
-								<For each={groupedFacts().governance}>{(fact) => <PropertyRow fact={fact} />}</For>
+								<For each={groupedFacts().governance} keyed={(f) => f.key}>
+									{(fact) => <PropertyRow fact={fact()} />}
+								</For>
 							</Show>
 						</dl>
 					</Show>
 					<Show when={!isRead() && editYaml() && yamlSpan()}>
-						{(span) => (
-							<div class="cm-md-props-yaml-wrap">
-								<div class="cm-md-props-yaml-fence" aria-hidden="true">---</div>
-								<textarea
-									ref={(el) => {
-										yamlCompleter?.dispose();
-										yamlInputEl = el;
-										el.value = untrack(() => span().inner);
-										yamlCompleter = createTextareaCompleter(el, {
-											mode: "yaml",
-											filePath: () => path(),
-											getListedDoc: () => listed(),
-											onApply: () => {
-												resizeYamlInput(el);
-												applyYamlInnerEdit(el.value);
-											},
-										});
-										queueMicrotask(() => resizeYamlInput(el));
-									}}
-									class="cm-md-props-yaml"
-									aria-label="Raw YAML frontmatter"
-									spellcheck="false"
-									rows={3}
-									onInput={(e) => {
-										const el = e.currentTarget;
-										resizeYamlInput(el);
-										applyYamlInnerEdit(el.value);
-										yamlCompleter?.update();
-									}}
-									onBlur={() => {
-										yamlCompleter?.close();
-									}}
-									onKeyDown={(e) => {
-										if (yamlCompleter?.handleKeyDown(e)) return;
-										if (e.key === "Escape") {
-											e.preventDefault();
-											e.stopPropagation();
+						{(span) => {
+							onCleanup(() => {
+								yamlCompleter?.dispose();
+								yamlCompleter = undefined;
+								yamlInputEl = undefined;
+							});
+							return (
+								<div class="cm-md-props-yaml-wrap">
+									<div class="cm-md-props-yaml-fence" aria-hidden="true">---</div>
+									<textarea
+										ref={(el) => {
 											yamlCompleter?.dispose();
-											yamlCompleter = undefined;
-											setEditYaml(false);
-											yamlEditBtnEl?.focus();
-										} else if (e.key === "Tab" && !e.shiftKey) {
-											e.preventDefault();
+											yamlInputEl = el;
+											el.value = untrack(() => span().inner);
+											yamlCompleter = createTextareaCompleter(el, {
+												mode: "yaml",
+												filePath: () => path(),
+												getListedDoc: () => listed(),
+												onApply: () => {
+													resizeYamlInput(el);
+													applyYamlInnerEdit(el.value);
+												},
+											});
+											queueMicrotask(() => resizeYamlInput(el));
+										}}
+										class="cm-md-props-yaml"
+										aria-label="Raw YAML frontmatter"
+										spellcheck="false"
+										rows={3}
+										onInput={(e) => {
 											const el = e.currentTarget;
-											const s = el.selectionStart;
-											const end = el.selectionEnd;
-											const next = `${el.value.slice(0, s)}  ${el.value.slice(end)}`;
-											el.value = next;
-											el.setSelectionRange(s + 2, s + 2);
 											resizeYamlInput(el);
-											applyYamlInnerEdit(next);
-										} else if ((e.ctrlKey || e.metaKey) && !e.altKey) {
-											const k = e.key.toLowerCase();
-											const model = activeMdDoc()?.model;
-											if (k === "z" && !e.shiftKey) {
+											applyYamlInnerEdit(el.value);
+											yamlCompleter?.update();
+										}}
+										onBlur={() => {
+											yamlCompleter?.close();
+										}}
+										onKeyDown={(e) => {
+											if (yamlCompleter?.handleKeyDown(e)) return;
+											if (e.key === "Escape") {
 												e.preventDefault();
-												model?.undo();
-											} else if (k === "y" || (k === "z" && e.shiftKey)) {
+												e.stopPropagation();
+												yamlCompleter?.dispose();
+												yamlCompleter = undefined;
+												setEditYaml(false);
+												yamlEditBtnEl?.focus();
+											} else if (e.key === "Tab" && !e.shiftKey) {
 												e.preventDefault();
-												model?.redo();
+												const el = e.currentTarget;
+												const s = el.selectionStart;
+												const end = el.selectionEnd;
+												const next = `${el.value.slice(0, s)}  ${el.value.slice(end)}`;
+												el.value = next;
+												el.setSelectionRange(s + 2, s + 2);
+												resizeYamlInput(el);
+												applyYamlInnerEdit(next);
+											} else if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+												const k = e.key.toLowerCase();
+												const model = activeMdDoc()?.model;
+												if (k === "z" && !e.shiftKey) {
+													e.preventDefault();
+													model?.undo();
+												} else if (k === "y" || (k === "z" && e.shiftKey)) {
+													e.preventDefault();
+													model?.redo();
+												}
 											}
-										}
-									}}
-								/>
-								<div class="cm-md-props-yaml-fence" aria-hidden="true">---</div>
-							</div>
-						)}
+										}}
+									/>
+									<div class="cm-md-props-yaml-fence" aria-hidden="true">---</div>
+								</div>
+							);
+						}}
 					</Show>
 				</Show>
 			</section>

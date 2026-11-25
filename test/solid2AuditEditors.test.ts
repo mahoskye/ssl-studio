@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { createEffect, createRoot, createSignal, flush, untrack } from "solid-js";
+import { createEffect, createRoot, createSignal, flush, mapArray, onSettled, untrack } from "solid-js";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { KEEP, REPLACE, reviewFlow, type Reviewable } from "../src/view/editor/reviewFlow";
@@ -305,11 +305,125 @@ describe("Monaco 0.58.0 diagnostic hover severity & style.css regression", () =>
 		}
 	});
 
-	test("style.css targets Monaco 0.58.0 .marker-message children and never overrides .marker-severity with --ui-font", () => {
+	test("codicon-info never upgrades to error or warning even when sharing message text, while preserving hint vs info", () => {
+		const sharedMsg = "Duplicate symbol";
+		const markersWithErrWarn = [
+			{ message: sharedMsg, severity: 8, source: "starlims-lsp", code: "SSL010", startLineNumber: 12, endLineNumber: 12 },
+			{ message: sharedMsg, severity: 4, source: "starlims-lsp", code: "SSL011", startLineNumber: 12, endLineNumber: 12 },
+		];
+		const infoRow = makeMonaco058Row({
+			iconClasses: ["codicon", "codicon-info"],
+			ariaLabel: "Info",
+			message: sharedMsg,
+			detail: "starlims-lsp(SSL010)",
+		});
+		expect(resolveMarkerHoverSeverity(infoRow.markerEl, markersWithErrWarn, 12)).toBe("info");
+
+		const markersWithHintAndErr = [
+			{ message: sharedMsg, severity: 8, source: "starlims-lsp", code: "SSL010", startLineNumber: 12, endLineNumber: 12 },
+			{ message: sharedMsg, severity: 1, source: "starlims-lsp", code: "SSL012", startLineNumber: 12, endLineNumber: 12 },
+		];
+		const hintRow = makeMonaco058Row({
+			iconClasses: ["codicon", "codicon-info"],
+			message: sharedMsg,
+			detail: "starlims-lsp(SSL012)",
+		});
+		expect(resolveMarkerHoverSeverity(hintRow.markerEl, markersWithHintAndErr, 12)).toBe("hint");
+	});
+
+	test("observeMarkerHoverSeverity resets hoveredLine on onMouseLeave and onDidChangeCursorPosition and disposes subscriptions", () => {
+		const prevMO = (globalThis as any).MutationObserver;
+		let onMutate: (() => void) | null = null;
+		(globalThis as any).MutationObserver = class {
+			constructor(cb: () => void) {
+				onMutate = cb;
+			}
+			observe() {}
+			disconnect() {}
+		};
+		const uri = MockUri.parse("file:///ws/monaco58-stale-hover-line.ssl");
+		const fakeModel: any = { uri };
+		try {
+			// Line 2 has an info marker and line 8 has a hint marker with identical message text.
+			monaco.editor.setModelMarkers(fakeModel, "starlims-lsp", [
+				{ message: "Check declaration", severity: 2, source: "starlims-lsp", startLineNumber: 2, startColumn: 1, endLineNumber: 2, endColumn: 10 },
+				{ message: "Check declaration", severity: 1, source: "starlims-lsp", startLineNumber: 8, startColumn: 1, endLineNumber: 8, endColumn: 10 },
+			]);
+
+			const sharedRow = makeMonaco058Row({
+				iconClasses: ["codicon", "codicon-info"],
+				message: "Check declaration",
+			});
+
+			let cursorLine = 8;
+			let mouseMoveCb: ((e: any) => void) | undefined;
+			let mouseLeaveCb: (() => void) | undefined;
+			let cursorChangeCb: (() => void) | undefined;
+			const disposed: string[] = [];
+
+			const root: any = {
+				querySelector: () => root,
+				querySelectorAll: (sel: string) => (sel === ".monaco-hover .marker.hover-contents" ? [sharedRow.markerEl] : []),
+			};
+			const fakeEditor: any = {
+				getModel: () => fakeModel,
+				getDomNode: () => root,
+				getPosition: () => ({ lineNumber: cursorLine, column: 1 }),
+				onMouseMove: (cb: (e: any) => void) => {
+					mouseMoveCb = cb;
+					return { dispose: () => disposed.push("mouseMove") };
+				},
+				onMouseLeave: (cb: () => void) => {
+					mouseLeaveCb = cb;
+					return { dispose: () => disposed.push("mouseLeave") };
+				},
+				onDidChangeCursorPosition: (cb: () => void) => {
+					cursorChangeCb = cb;
+					return { dispose: () => disposed.push("cursor") };
+				},
+				onDidChangeModel: () => ({ dispose: () => disposed.push("model") }),
+			};
+
+			const stop = observeMarkerHoverSeverity(fakeEditor);
+			// Initially cursor is on line 8 (hint).
+			expect(sharedRow.row.dataset.severity).toBe("hint");
+
+			// Mouse moves over line 2 (info).
+			mouseMoveCb!({ target: { position: { lineNumber: 2 } } });
+			onMutate!();
+			expect(sharedRow.row.dataset.severity).toBe("info");
+
+			// Mouse leaves editor -> hoveredLine clears so keyboard Show Hover uses cursor line 8 (hint).
+			mouseLeaveCb!();
+			onMutate!();
+			expect(sharedRow.row.dataset.severity).toBe("hint");
+
+			// Mouse moves over line 2 again, then keyboard moves cursor -> hoveredLine clears to cursor line 8 (hint).
+			mouseMoveCb!({ target: { position: { lineNumber: 2 } } });
+			onMutate!();
+			expect(sharedRow.row.dataset.severity).toBe("info");
+
+			cursorLine = 8;
+			cursorChangeCb!();
+			onMutate!();
+			expect(sharedRow.row.dataset.severity).toBe("hint");
+
+			stop();
+			expect(disposed).toEqual(["mouseMove", "mouseLeave", "cursor", "model"]);
+		} finally {
+			monaco.editor.setModelMarkers(fakeModel, "starlims-lsp", []);
+			(globalThis as any).MutationObserver = prevMO;
+		}
+	});
+
+	test("style.css targets Monaco 0.58.0 .marker-message children, related-info spans, and .hover-row-with-copy padding", () => {
 		const css = readSrc("../src/view/style.css");
 		expect(css).toContain("> .marker.hover-contents > .marker-message > span:first-child");
 		expect(css).toContain("> .marker.hover-contents > .marker-message > span:nth-child(2)");
 		expect(css).toContain("> .marker.hover-contents > .marker-message > div");
+		expect(css).toContain("> .marker.hover-contents > .marker-message > div > span");
+		expect(css).toContain("> .marker.hover-contents > div:not(.marker-message) > span");
+		expect(css).toContain(".monaco-editor .monaco-hover .hover-row.hover-row-with-copy > .marker.hover-contents {\n\tpadding-right: 8px !important;\n}");
 		expect(css).toContain("> .marker.hover-contents > .marker-severity {\n\tdisplay: none;\n}");
 
 		// Must NOT have the broken legacy bare child selectors that hit .marker-severity or .marker-message.
@@ -548,5 +662,171 @@ describe("Solid 2 strict-read and TableView flush() audit guards", () => {
 		expect(tableView).toMatch(/changeCell\(row, column, value\);\s*flush\(\);/);
 		expect(tableView).toMatch(/pinRowIfFiltered\(match\.row\);\s*flush\(\);\s*const entryIdx = visEntryIdxForRow\(match\.row\);/);
 		expect(tableView).toMatch(/pinRowIfFiltered\(matchedRow\);\s*flush\(\);\s*const entryIdx = visEntryIdxForRow\(matchedRow\);/);
+	});
+});
+
+describe("Pass-2 adversarial audit fixes (Solid 2 keyed <For>, onSettled flush deferral, CM6 ImageWidget destroy, Review math hydration)", () => {
+	test("TableView.tsx defers initial revealAt(pending) out of onSettled via queueMicrotask and keys column filter <For> by o.key", async () => {
+		// Runtime verification: deferring a flush() out of onSettled via queueMicrotask runs cleanly without halting reactivity
+		// and respects unmount disposal before the microtask fires.
+		const ran: string[] = [];
+		const ctx = createRoot((dispose) => {
+			const [val, setVal] = createSignal("init");
+			onSettled(() => {
+				let disposed = false;
+				queueMicrotask(() => {
+					if (disposed) return;
+					setVal("revealed");
+					flush();
+					ran.push(untrack(val));
+				});
+				return () => {
+					disposed = true;
+				};
+			});
+			return { val, dispose };
+		});
+		try {
+			flush();
+			await Promise.resolve();
+			expect(ran).toEqual(["revealed"]);
+			expect(untrack(ctx.val)).toBe("revealed");
+		} finally {
+			ctx.dispose();
+		}
+
+		// Disposed before microtask: deferred reveal must be skipped.
+		const skipped: string[] = [];
+		const ctx2 = createRoot((dispose) => {
+			onSettled(() => {
+				let disposed = false;
+				queueMicrotask(() => {
+					if (!disposed) skipped.push("should-not-run");
+				});
+				return () => {
+					disposed = true;
+				};
+			});
+			return { dispose };
+		});
+		flush();
+		ctx2.dispose();
+		await Promise.resolve();
+		expect(skipped).toEqual([]);
+
+		// Source-level regression checks on TableView.tsx
+		const src = readSrc("../src/view/editor/TableView.tsx");
+		const settledIdx = src.indexOf("const pending = takeReveal(props.path);");
+		expect(settledIdx).toBeGreaterThan(0);
+		const settledBlock = src.slice(Math.max(0, settledIdx - 400), settledIdx + 450);
+		expect(settledBlock).toContain("let disposed = false;");
+		expect(settledBlock).toMatch(/if \(pending\)\s*\{\s*queueMicrotask\(\(\) => \{\s*if \(!disposed\) revealAt\(pending\);\s*\}\);\s*\}/);
+		expect(settledBlock).toContain("disposed = true;");
+		expect(settledBlock).not.toContain("if (pending) revealAt(pending);");
+
+		const filterForIdx = src.indexOf("<For each={visibleOptions()} keyed={(o) => o.key}>");
+		expect(filterForIdx).toBeGreaterThan(0);
+		const filterBlock = src.slice(filterForIdx, filterForIdx + 1200);
+		expect(filterBlock).toContain("badgeToneForValue(rule(), opt().label)");
+		expect(filterBlock).toContain("opt().count === 0");
+		expect(filterBlock).toContain("checked={isChecked(opt().key)} onChange={() => toggleKey(opt().key)}");
+		expect(filterBlock).toContain("onClick={() => selectOnly(opt().key)}");
+		expect(filterBlock).not.toMatch(/\bopt\.(key|label|count|total)\b/);
+	});
+
+	test("CsvFormatDialog.tsx keys both rules() and filteredEntries() <For> loops by id with lazy accessor reads", () => {
+		// Runtime verification: Solid 2 keyed mapArray keeps mapped nodes alive across immutable updates.
+		let created = 0;
+		const ctx = createRoot((dispose) => {
+			const [items, setItems] = createSignal([{ id: 1, value: "Open" }]);
+			const mapped = mapArray(
+				items,
+				(item, idx) => {
+					created++;
+					return { read: () => `${idx()}:${item().value}` };
+				},
+				{ keyed: (x) => x.id },
+			);
+			return { setItems, mapped, dispose };
+		});
+		try {
+			const first = untrack(ctx.mapped);
+			expect(created).toBe(1);
+			expect(first[0]!.read()).toBe("0:Open");
+
+			ctx.setItems([{ id: 1, value: "Open!" }]);
+			flush();
+			const second = untrack(ctx.mapped);
+			expect(created).toBe(1);
+			expect(second[0]).toBe(first[0]);
+			expect(second[0]!.read()).toBe("0:Open!");
+		} finally {
+			ctx.dispose();
+		}
+
+		// Source-level regression checks on CsvFormatDialog.tsx
+		const src = readSrc("../src/view/editor/CsvFormatDialog.tsx");
+		const outerIdx = src.indexOf("<For each={rules()} keyed={(r) => r.id}>");
+		expect(outerIdx).toBeGreaterThan(0);
+		const innerIdx = src.indexOf("<For each={filteredEntries()} keyed={(e) => e.id}>");
+		expect(innerIdx).toBeGreaterThan(outerIdx);
+
+		const outerBlock = src.slice(outerIdx, innerIdx);
+		// No top-level untracked `const r = rule()` before `return (` outside memos/functions.
+		expect(outerBlock).not.toMatch(/\{\(rule,\s*idx\)\s*=>\s*\{\s*const\s+\w+\s*=\s*rule\(\)/);
+		expect(outerBlock).toContain("rule().columnsText");
+		expect(outerBlock).toContain("rule().fallback");
+		expect(outerBlock).toContain("rule().search");
+		expect(outerBlock).toContain("rule().entries");
+		expect(outerBlock).toContain("idx() + 1");
+		expect(outerBlock).toContain("idx() === initialFocusIdx");
+		expect(outerBlock).not.toMatch(/\brule\.(id|columnsText|fallback|search|entries)\b/);
+
+		const innerBlock = src.slice(innerIdx, innerIdx + 1400);
+		expect(innerBlock).not.toMatch(/\{\(entry\)\s*=>\s*\{\s*const\s+\w+\s*=\s*entry\(\)/);
+		expect(innerBlock).toContain("entry().value");
+		expect(innerBlock).toContain("entry().tone");
+		expect(innerBlock).toContain("entry().id");
+		expect(innerBlock).not.toMatch(/\bentry\.(id|value|tone|label)\b/);
+	});
+
+	test("BlocksView.tsx keys procedureGroups <For> stably by procedure or first child key", () => {
+		const src = readSrc("../src/view/blocks/BlocksView.tsx");
+		const idx = src.indexOf("<For each={procedureGroups(props.node.children)} keyed={(g) => (g.find((c) => c.kind === \"procedure\") ?? g[0]!).key}>");
+		expect(idx).toBeGreaterThan(0);
+		const block = src.slice(idx, idx + 400);
+		expect(block).toContain("<Show when={group().length > 1} fallback={<Block node={group()[0]!} />}>");
+		expect(block).toContain("<For each={group()}>{(child) => <Block node={child} />}</For>");
+	});
+
+	test("cmLivePlugin.ts ImageWidget cleans up active resize listeners on destroy, blur, and detached wrap", () => {
+		const src = readSrc("../src/view/editor/cmLivePlugin.ts");
+		const widgetStart = src.indexOf("class ImageWidget extends WidgetType");
+		expect(widgetStart).toBeGreaterThan(0);
+		const widgetEnd = src.indexOf("class BulletWidget extends WidgetType", widgetStart);
+		expect(widgetEnd).toBeGreaterThan(widgetStart);
+		const widgetSrc = src.slice(widgetStart, widgetEnd);
+
+		expect(src).toContain("const activeImageResizeCleanup = new WeakMap<HTMLElement, () => void>();");
+		expect(widgetSrc).toContain('window.addEventListener("blur", onCancel)');
+		expect(widgetSrc).toContain('window.removeEventListener("blur", onCancel)');
+		expect(widgetSrc).toContain("activeImageResizeCleanup.set(wrap, cleanup)");
+		expect(widgetSrc).toContain("if (!wrap.isConnected)");
+		expect(widgetSrc).toContain("const connected = wrap.isConnected;");
+		expect(widgetSrc).toContain("destroy(dom: HTMLElement)");
+		expect(widgetSrc).toContain("activeImageResizeCleanup.get(dom)?.()");
+	});
+
+	test("Review.tsx imports and invokes hydrateMathInElement on rendered Markdown diff panes", () => {
+		const src = readSrc("../src/view/editor/Review.tsx");
+		expect(src).toMatch(/import\s+\{[^}]*\bhydrateMathInElement\b[^}]*\}\s+from\s+"\.\/markdownHtml"/);
+		const showIdx = src.indexOf('<Show when={diffLayout() === "rendered" && renderedDiff()}>');
+		expect(showIdx).toBeGreaterThan(0);
+		const renderedBlock = src.slice(showIdx, showIdx + 1200);
+		expect(renderedBlock).toContain('diffLayout() === "rendered" ? visibleRows() : null');
+		expect(renderedBlock).toContain("queueMicrotask(");
+		expect(renderedBlock).toContain("if (!alive) return;");
+		expect(renderedBlock).toContain("if (leftPaneEl?.isConnected) hydrateMathInElement(leftPaneEl);");
+		expect(renderedBlock).toContain("if (rightPaneEl?.isConnected) hydrateMathInElement(rightPaneEl);");
 	});
 });

@@ -18,7 +18,7 @@ import {
 	type ThemeMaterial,
 	type ThemeTone,
 } from "../shared/oklchTheme";
-import { createEffect, createMemo, createSignal, createUniqueId, For, Show, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, Show, untrack } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { isInside, resolvePath } from "../shared/paths";
 import type { Settings, SettingsPatch } from "../shared/protocol";
@@ -97,10 +97,15 @@ function DraftInput(props: {
 	placeholder?: string;
 	value: string;
 	onKeyDown?: (e: KeyboardEvent & { currentTarget: HTMLInputElement }) => void;
-	onCommit: (value: string, el: HTMLInputElement) => string | void;
+	onCommit: (value: string, el: HTMLInputElement) => Promise<string | false | void> | string | false | void;
 }) {
 	const committed = createMemo(() => props.value);
 	const [draft, setDraft] = createSignal(untrack(committed));
+	let seq = 0;
+	let disposed = false;
+	onCleanup(() => {
+		disposed = true;
+	});
 	createEffect(committed, (v) => {
 		setDraft(v);
 	});
@@ -118,12 +123,26 @@ function DraftInput(props: {
 			placeholder={props.placeholder}
 			value={draft()}
 			onKeyDown={props.onKeyDown}
-			onInput={(e) => setDraft(e.currentTarget.value)}
+			onInput={(e) => {
+				seq++;
+				setDraft(e.currentTarget.value);
+			}}
 			onChange={(e) => {
-				const normalized = props.onCommit(e.currentTarget.value, e.currentTarget);
-				if (typeof normalized === "string") {
-					setDraft(normalized);
-					e.currentTarget.value = normalized;
+				const el = e.currentTarget;
+				const mySeq = ++seq;
+				const apply = (result: string | false | void) => {
+					if (disposed || seq !== mySeq) return;
+					const next = result === false ? untrack(committed) : typeof result === "string" ? result : undefined;
+					if (next !== undefined) {
+						setDraft(next);
+						if (el.value !== next) el.value = next;
+					}
+				};
+				const res = props.onCommit(el.value, el);
+				if (res !== null && typeof res === "object") {
+					void res.then(apply, () => apply(false));
+				} else {
+					apply(res);
 				}
 			}}
 		/>
@@ -159,12 +178,13 @@ export function SettingsDialog() {
 	// A value this project's own settings file holds is changed there: yours
 	// would not be seen while the project's is in the way.
 	const scopeOf = (key: keyof Settings) => (state.workspace && key in layers().workspace ? "workspace" : "user");
-	const save = async <K extends keyof Settings>(key: K, value: Settings[K] | null) => {
-		const saved = await saveSetting({ [key]: value } as SettingsPatch, scopeOf(key));
+	const save = async <K extends keyof Settings>(key: K, value: Settings[K] | null): Promise<boolean> => {
+		const saved = Boolean(await saveSetting({ [key]: value } as SettingsPatch, scopeOf(key)));
 		await loadLayers();
 		if (key === "lspPath" && saved) await restartLsp();
+		return saved;
 	};
-	const saveRelFolder = (key: "attachmentsFolder" | "templatesFolder", input: HTMLInputElement): string => {
+	const saveRelFolder = (key: "attachmentsFolder" | "templatesFolder", input: HTMLInputElement): string | Promise<string | false> => {
 		const check = validateWorkspaceFolderSetting(input.value);
 		if (!check.ok) {
 			notify(check.error, "error");
@@ -174,8 +194,7 @@ export function SettingsDialog() {
 		}
 		const next = check.value ?? "";
 		input.value = next;
-		void save(key, check.value);
-		return next;
+		return save(key, check.value).then((saved) => (saved ? next : false));
 	};
 	const shown = (group: Group, ...text: (string | undefined)[]) => matchWords(query(), [group, ...text].filter(Boolean).join(" ")) > 0;
 
@@ -372,10 +391,12 @@ export function SettingsDialog() {
 						placeholder={p.placeholder}
 						value={current()}
 						onKeyDown={commitOnEnter}
-						onCommit={(raw) => {
+						onCommit={async (raw, el) => {
 							const val = raw.trim();
+							el.value = val;
+							const saved = await save(p.setting, val);
+							if (!saved) return false;
 							if (!val) setCustomizing(false);
-							void save(p.setting, val);
 							return val;
 						}}
 					/>
@@ -505,10 +526,11 @@ export function SettingsDialog() {
 									max={FONT.max}
 									value={String(state.settings.fontSize)}
 									onKeyDown={commitOnEnter}
-									onCommit={(raw) => {
+									onCommit={async (raw, el) => {
 										const next = clampNumericSetting(raw, FONT.min, FONT.max, FONT.normal);
-										void save("fontSize", next);
-										return String(next);
+										const text = String(next);
+										el.value = text;
+										return (await save("fontSize", next)) ? text : false;
 									}}
 								/>
 							)}
@@ -591,10 +613,11 @@ export function SettingsDialog() {
 									disabled={state.settings.rulers === false}
 									value={String(state.settings.rulerMargin ?? RULER_MARGIN)}
 									onKeyDown={commitOnEnter}
-									onCommit={(raw) => {
+									onCommit={async (raw, el) => {
 										const next = clampNumericSetting(raw, 0, 60, RULER_MARGIN);
-										void save("rulerMargin", next);
-										return String(next);
+										const text = String(next);
+										el.value = text;
+										return (await save("rulerMargin", next)) ? text : false;
 									}}
 								/>
 							)}
@@ -662,10 +685,10 @@ export function SettingsDialog() {
 									placeholder={state.info?.lsp.path ?? "Found automatically"}
 									value={state.settings.lspPath ?? ""}
 									onKeyDown={commitOnEnter}
-									onCommit={(raw) => {
+									onCommit={async (raw, el) => {
 										const trimmed = raw.trim();
-										void save("lspPath", trimmed);
-										return trimmed;
+										el.value = trimmed;
+										return (await save("lspPath", trimmed)) ? trimmed : false;
 									}}
 								/>
 							)}

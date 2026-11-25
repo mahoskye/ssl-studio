@@ -1,6 +1,6 @@
 import { registerMarkdownLinks } from "./editor/markdownLinks";
 import "./style.css";
-import { Errored } from "solid-js";
+import { Errored, snapshot } from "solid-js";
 import { render } from "@solidjs/web";
 import { App } from "./App";
 import { connect, backend, onConnectionLost } from "./backend";
@@ -11,7 +11,7 @@ import "./editor/opener";
 import { loadGrammar } from "./editor/textmate";
 import { registerProviders, session } from "./lsp/session";
 import { syncWorkspaceThreads } from "./agent/store";
-import { canonical, loadProject, loadSettings, log, notify, restoreTabs, setState, state, unsavedPaths } from "./state";
+import { canonical, loadProject, loadSettings, log, notify, restoreTabs, setState, snapshotUnsavedPaths, state } from "./state";
 import { applyFonts, applyTheme, resolveTheme, shapeEditorMenus } from "./themes/themes";
 
 export const errors: string[] = [];
@@ -59,7 +59,7 @@ async function start() {
 	window.addEventListener("drop", preventFileDropNavigation);
 	// Closing or reloading the window with edits that are not on disk asks first.
 	window.addEventListener("beforeunload", (e) => {
-		if (state.info?.selftest || !unsavedPaths().length) return;
+		if (snapshot(state).info?.selftest || !snapshotUnsavedPaths().length) return;
 		e.preventDefault();
 		e.returnValue = "";
 	});

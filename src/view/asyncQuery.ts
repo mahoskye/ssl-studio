@@ -1,7 +1,7 @@
 // Solid 2.0 async query primitive built on createSignal + two-phase createEffect.
 // Provides explicit loading/error/latest state and automatic stale-run cancellation
 // for panel/editor queries without requiring surrounding <Loading>/<Errored> boundaries.
-import { createEffect, createMemo, createSignal, type Accessor } from "solid-js";
+import { createEffect, createMemo, createSignal, untrack, type Accessor } from "solid-js";
 
 export type AsyncQuery<T> = Accessor<T | undefined> & {
 	readonly loading: boolean;
@@ -33,8 +33,9 @@ export function createAsyncQuery<S, T>(
 	const [bump, setBump] = createSignal(0);
 	let seq = 0;
 
-	if (maybeFetcher) {
-		const src = createMemo(() => (sourceOrFetcher as Accessor<S | false | null | undefined>)());
+	const src = maybeFetcher ? createMemo(() => (sourceOrFetcher as Accessor<S | false | null | undefined>)()) : null;
+
+	if (maybeFetcher && src) {
 		createEffect(
 			() => [src(), bump()] as const,
 			([key]) => {
@@ -127,7 +128,13 @@ export function createAsyncQuery<S, T>(
 	return [
 		read,
 		{
-			refetch: () => setBump((n) => n + 1),
+			refetch: () => {
+				if (src) {
+					const k = untrack(src);
+					if (k === false || k === null || k === undefined) return;
+				}
+				setBump((n) => n + 1);
+			},
 			mutate: (v) => {
 				++seq;
 				setLoading(false);

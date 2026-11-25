@@ -754,11 +754,11 @@ export function BlocksView(props: { path: string; group: number }) {
 
 	// A procedure is drawn with its doc block, and the annotation between them, as one card.
 	const Children = (props: { node: Node }) => (
-		<For each={procedureGroups(props.node.children)}>
+		<For each={procedureGroups(props.node.children)} keyed={(g) => (g.find((c) => c.kind === "procedure") ?? g[0]!).key}>
 			{(group) => (
-				<Show when={group.length > 1} fallback={<Block node={group[0]!} />}>
+				<Show when={group().length > 1} fallback={<Block node={group()[0]!} />}>
 					<div class="b-proc-group">
-						<For each={group}>{(child) => <Block node={child} />}</For>
+						<For each={group()}>{(child) => <Block node={child} />}</For>
 					</div>
 				</Show>
 			)}

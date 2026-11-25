@@ -1100,15 +1100,15 @@ export function Search() {
 		return new Map(entries);
 	};
 	/** Why "Replace all" cannot be pressed now; "" when it can. */
-	const noReplace = () => {
-		if (status() === "busy" || replaceActive()) return "The search is still running";
+	const noReplace = (ignoreReplaceActive = false) => {
+		if (status() === "busy" || (!ignoreReplaceActive && replaceActive())) return "The search is still running";
 		if (searched().syntheticQuery) return "Enter search text to replace — filter-only queries cannot replace";
 		if (status() !== "done" || !visibleHits().length) return "Search for something first: what is found is what is replaced";
 		if (truncated() || hits().length >= SEARCH_LIMIT) return `There are ${SEARCH_LIMIT} results or more, and only the first are listed: narrow the search before replacing`;
 		return "";
 	};
 	const executeReplace = async (skipConfirm: boolean) => {
-		if (replaceBusy || noReplace()) return;
+		if (replaceBusy || noReplace(true)) return;
 		const startRoot = state.workspace?.root;
 		const startSearchId = latest;
 		const query = effectiveAsked() || asked();
@@ -1125,7 +1125,7 @@ export function Search() {
 		setReplaceActive(true);
 		let handoffToPreview = false;
 		let ranReplace = false;
-		try {
+		replaceBody: try {
 			if (!skipConfirm) {
 				const safeTail = protect ? " Safe docs skips YAML keys, Markdown link targets, and invalid .plan.json edits." : "";
 				const prompt = `Replace ${count(total, "match", "matches")} in ${count(paths.length, "file")} with ${with_ ? `“${with_}”` : "nothing"}? Each file that is written is first kept as it was in its local history.${safeTail}`;
@@ -1136,7 +1136,7 @@ export function Search() {
 					if (state.workspace?.root !== startRoot || latest !== startSearchId) return;
 					if (answer === PREVIEW) {
 						handoffToPreview = true;
-						return;
+						break replaceBody;
 					}
 					if (answer !== REPLACE) return;
 				} else {
@@ -1271,7 +1271,7 @@ export function Search() {
 	};
 	const replaceAll = () => executeReplace(false);
 	const previewReplace = async () => {
-		if (replaceBusy || noReplace()) return;
+		if (replaceBusy || noReplace(true)) return;
 		const startRoot = state.workspace?.root;
 		const startSearchId = latest;
 		const options = searched();
@@ -1383,10 +1383,10 @@ export function Search() {
 			if (!picked) return;
 			if (picked === APPLY) {
 				applyAfter = true;
-				return;
+			} else {
+				const targetRow = rows.find((r) => r.path === picked);
+				if (targetRow) openTarget = { path: targetRow.path, line: targetRow.sampleLine };
 			}
-			const targetRow = rows.find((r) => r.path === picked);
-			if (targetRow) openTarget = { path: targetRow.path, line: targetRow.sampleLine };
 		} finally {
 			replaceBusy = false;
 			setReplaceActive(false);

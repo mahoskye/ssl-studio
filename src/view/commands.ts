@@ -30,6 +30,7 @@ import { startTidy } from "./agent/tidy";
 import { baseName, dirName, isInside, joinPath, relativePath, relativeTo } from "../shared/paths";
 import { defaultLayout, type DocFile, type Settings } from "../shared/protocol";
 import { menuForLetter, replaceErDiagramBlock, shouldLetEditorHandleKey } from "../shared/menuBar";
+import { resolveMarkdownMode, resolvePlanMode, resolveTableTextMode } from "../shared/viewModes";
 import { installRecentTabs, stepRecent } from "./recentTabs";
 import { goAlong } from "./navigation";
 import { isPlanPath, newPlan, printPlan, type Plan } from "./plan/model";
@@ -90,13 +91,11 @@ import {
 	heldFromBefore,
 	isUntitled,
 	keepTab,
-	markdownMode,
 	nextTab,
 	notify,
 	openFile,
 	openFolder,
 	openToSide,
-	planMode,
 	previousTab,
 	reopenClosedTab,
 	restartLsp,
@@ -113,10 +112,14 @@ import {
 	split,
 	state,
 	syncLivePreviewMode,
-	tableTextMode,
 	togglePin,
 	type PanelId,
 } from "./state";
+
+const activePathNow = () => {
+	const cur = snapshot(state);
+	return cur.groups[cur.activeGroup]?.active ?? null;
+};
 
 /** `label` is a verb phrase; `detail` is the quieter second line that explains it. */
 export type Command = { id: string; label: string; detail?: string; run: () => void };
@@ -216,11 +219,12 @@ function runMarkdownEdit(id: string) {
 
 /** Obsidian Ctrl+E: toggles a Markdown document between Live Preview (or Source) and Read view in the active group. */
 function toggleMarkdownMode() {
-	const path = activePath();
+	const cur = snapshot(state);
+	const g = cur.activeGroup;
+	const path = cur.groups[g]?.active ?? null;
 	if (!path || !isMarkdown(path)) return;
-	const g = state.activeGroup;
-	const currentMode = markdownMode(path, g);
-	const next = currentMode === "read" ? (state.settings.livePreview === false ? "source" : "live") : "read";
+	const currentMode = resolveMarkdownMode(cur.groups[g]?.mdMode, cur.mdViewMode, cur.settings.livePreview);
+	const next = currentMode === "read" ? (cur.settings.livePreview === false ? "source" : "live") : "read";
 	if (currentMode === "source" && next !== "source") {
 		const editor = activeEditor();
 		if (editor?.getModel()) {
@@ -298,7 +302,7 @@ export const commands: Command[] = [
 	// Files and tabs
 	{ id: "open-folder", label: "Open folder…", run: () => void openFolderCommand() },
 	{ id: "quick-open", label: "Go to file…", run: () => setState((s) => { s.quickPick = "files"; }) },
-	{ id: "quick-outline", label: "Go to symbol in file…", detail: "Procedures, regions, headings, or sections in the active file", run: () => (activePath() ? setState((s) => { s.quickPick = "outline"; }) : notify("Open a file first.")) },
+	{ id: "quick-outline", label: "Go to symbol in file…", detail: "Procedures, regions, headings, or sections in the active file", run: () => (activePathNow() ? setState((s) => { s.quickPick = "outline"; }) : notify("Open a file first.")) },
 	{ id: "symbols", label: "Go to symbol…", detail: "Anywhere in the workspace", run: () => setState((s) => { s.quickPick = "symbols"; }) },
 	{ id: "command-palette", label: "Show all commands", run: () => setState((s) => { s.quickPick = "commands"; }) },
 	{ id: "new-untitled", label: "New untitled file", detail: "A floating buffer that stays in memory until saved", run: () => void newUntitled() },
@@ -307,12 +311,12 @@ export const commands: Command[] = [
 	{ id: "trash-file", label: "Move to trash…", detail: "The Explorer's file, or the open one", run: () => void explorerDelete() },
 	{ id: "save", label: "Save", run: () => void save() },
 	{ id: "save-all", label: "Save all", run: () => void saveAll() },
-	{ id: "revert", label: "Revert file", detail: "Back to what is on disk", run: () => activePath() && void revert(activePath()!) },
-	{ id: "close", label: "Close tab", run: () => activePath() && void closeTab(activePath()!) },
+	{ id: "revert", label: "Revert file", detail: "Back to what is on disk", run: () => { const p = activePathNow(); if (p) void revert(p); } },
+	{ id: "close", label: "Close tab", run: () => { const p = activePathNow(); if (p) void closeTab(p); } },
 	{ id: "close-others", label: "Close other tabs", detail: "The pinned ones stay", run: () => void closeOtherTabs() },
 	{ id: "close-right", label: "Close tabs to the right", run: () => void closeTabsToRight() },
 	{ id: "close-all", label: "Close all tabs", detail: "The pinned ones stay", run: () => void closeAllTabs() },
-	{ id: "keep-tab", label: "Keep tab open", detail: "A tab opened for a look by one click, in italics: it stays when the next file is clicked", run: () => activePath() && keepTab(activePath()!, state.activeGroup) },
+	{ id: "keep-tab", label: "Keep tab open", detail: "A tab opened for a look by one click, in italics: it stays when the next file is clicked", run: () => { const cur = snapshot(state); const p = cur.groups[cur.activeGroup]?.active; if (p) keepTab(p, cur.activeGroup); } },
 	{ id: "pin-tab", label: "Pin or unpin tab", detail: "A pinned tab stays first, and is not closed with the others", run: () => togglePin() },
 	{ id: "reopen-tab", label: "Reopen closed tab", run: () => void reopenClosedTab() },
 	{ id: "recent-tab", label: "Go to the tab used before", detail: "And with Ctrl held, on through the ones before that", run: () => stepRecent(1) },
@@ -472,7 +476,7 @@ export const commands: Command[] = [
 	{ id: "palette", label: "Show Palette", detail: "Templates, process shapes and graph controls", run: () => showWorkspacePanel("palette") },
 	{ id: "reference", label: "Show Reference", detail: "Built-in functions, classes and keywords", run: () => showWorkspacePanel("reference") },
 	{ id: "search", label: "Show Search", run: () => showWorkspacePanel("search") },
-	{ id: "replace-in-files", label: "Replace in files…", detail: "In Search: what would change is shown first, and nothing is written until it is confirmed", run: () => (!state.workspace ? notify("Open a folder first.") : void import("./panels/Search").then((search) => search.showReplace())) },
+	{ id: "replace-in-files", label: "Replace in files…", detail: "In Search: what would change is shown first, and nothing is written until it is confirmed", run: () => (!snapshot(state).workspace ? notify("Open a folder first.") : void import("./panels/Search").then((search) => search.showReplace())) },
 	{ id: "git", label: "Show Source control", detail: "What has changed since the last commit, and the next commit", run: () => showWorkspacePanel("git") },
 	{ id: "history", label: "Show History", detail: "Local snapshots on save and Git commit history", run: () => showWorkspacePanel("history") },
 	{ id: "health", label: "Show Health", detail: "The script against the house style", run: () => showWorkspacePanel("health") },
@@ -492,12 +496,12 @@ export const commands: Command[] = [
 	{ id: "move-panel-back", label: "Move right panel to the left", detail: "The one that is open", run: () => { const cur = snapshot(state); if (cur.workspace && cur.settings.layout.right) movePanel(cur.rightView); } },
 	// The agent
 	{ id: "agent-ask", label: "Ask the agent…", detail: "About the selection", run: () => void askCommand() },
-	{ id: "attach-file-to-agent", label: "Agent: Attach active file to Agent", detail: "Attach the open workspace file to the next Agent turn context", run: () => { const p = activePath(); if (!p) return notify("Open a file first."); attachFileToAgent(p); } },
-	{ id: "show-in-explorer", label: "Explorer: Reveal active file in Explorer", detail: "Highlight and scroll to the open file in the Explorer tree", run: () => { const p = activePath(); if (!p) return notify("Open a file first."); showInExplorer(p); } },
-	{ id: "tidy", label: "Tidy file with the agent", run: () => (!state.workspace ? notify("Open a folder first.") : (startTidy(), showPanel("agent"))) },
+	{ id: "attach-file-to-agent", label: "Agent: Attach active file to Agent", detail: "Attach the open workspace file to the next Agent turn context", run: () => { const p = activePathNow(); if (!p) return notify("Open a file first."); attachFileToAgent(p); } },
+	{ id: "show-in-explorer", label: "Explorer: Reveal active file in Explorer", detail: "Highlight and scroll to the open file in the Explorer tree", run: () => { const p = activePathNow(); if (!p) return notify("Open a file first."); showInExplorer(p); } },
+	{ id: "tidy", label: "Tidy file with the agent", run: () => (!snapshot(state).workspace ? notify("Open a folder first.") : (startTidy(), showPanel("agent"))) },
 	// The IDE
 	{ id: "style-profile", label: "Edit style profile…", detail: "How the language server formats and checks", run: () => openStyleProfile() },
-	{ id: "lsp-restart", label: "Restart language server", run: () => (!state.workspace ? notify("Open a folder first.") : void restartLsp()) },
+	{ id: "lsp-restart", label: "Restart language server", run: () => (!snapshot(state).workspace ? notify("Open a folder first.") : void restartLsp()) },
 	{ id: "zoom-in", label: "Zoom in", detail: "A larger interface", run: () => zoom(1) },
 	{ id: "zoom-out", label: "Zoom out", detail: "A smaller interface", run: () => zoom(-1) },
 	{ id: "zoom-reset", label: "Reset zoom", run: () => zoom(0) },
@@ -621,14 +625,20 @@ function toggleVisual() {
 	const path = cur.groups[cur.activeGroup]?.active ?? null;
 	if (!cur.workspace || !path) return;
 	const g = cur.activeGroup;
-	if (isPlanPath(path)) setPlanMode(path, planMode(path, g) === "chart" ? "text" : "chart", g);
-	else if (isMarkdown(path)) toggleMarkdownMode();
-	else if (isTable(path)) setTableTextMode(path, !tableTextMode(path, g), g);
-	else
+	if (isPlanPath(path)) {
+		const curPlanMode = resolvePlanMode(cur.groups[g]?.planMode, cur.planViewMode);
+		setPlanMode(path, curPlanMode === "chart" ? "text" : "chart", g);
+	} else if (isMarkdown(path)) {
+		toggleMarkdownMode();
+	} else if (isTable(path)) {
+		const curTableText = resolveTableTextMode(cur.groups[g]?.tableText, cur.tableTextDefault);
+		setTableTextMode(path, !curTableText, g);
+	} else {
 		setState((s) => {
 			const grp = s.groups[g];
 			if (grp) grp.mode = grp.mode === "blocks" ? "text" : "blocks";
 		});
+	}
 }
 
 async function openProjectSettings() {

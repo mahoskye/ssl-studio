@@ -227,7 +227,7 @@ export async function goAlong(by: 1 | -1): Promise<void> {
 	const now = here();
 	if (now) noteCursor(now);
 	for (let tries = 0; tries <= TRAIL_LENGTH; tries++) {
-		if (state.workspace?.root !== startRoot) return;
+		if (snapshot(state).workspace?.root !== startRoot) return;
 		const from = trail;
 		const next = stepTrail(trail, by);
 		if (!next) return notify(by < 0 ? "There is nowhere to go back to." : "There is nowhere to go forward to.");
@@ -267,7 +267,7 @@ export async function goAlong(by: 1 | -1): Promise<void> {
 							? curState.activeGroup
 							: curState.groups.findIndex((group) => group.tabs.includes(next.place.path));
 						await openFile(next.place.path, { reveal: { line: next.place.line, column: next.place.column }, ...(groupIndex >= 0 ? { group: groupIndex } : {}) });
-						if (state.workspace?.root !== startRoot) return;
+						if (snapshot(state).workspace?.root !== startRoot) return;
 					}
 				}
 				restoreView(next.place.view);

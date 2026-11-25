@@ -64,7 +64,7 @@ function setOwnerDiagnostics(uri: string, owner: string, list: Diagnostic[] | nu
 		return;
 	}
 	const merged: Diagnostic[] = [];
-	for (const items of current.values()) merged.push(...items);
+	for (const items of current.values()) for (const item of items) merged.push({ ...item });
 	setDiagnostics((s) => {
 		if (s[uri]) reconcile(merged, null)(s[uri]);
 		else s[uri] = merged;

@@ -18,7 +18,7 @@ import { recall, remember } from "../graph/canvas";
 import { CenterTabStrip } from "./CenterTabStrip";
 import { observeMarkerHoverSeverity } from "./hoverSeverity";
 import { languageFor } from "./languages";
-import { finishMarkdown } from "./markdownHtml";
+import { finishMarkdown, hydrateMathInElement } from "./markdownHtml";
 import { monaco } from "./monaco";
 import { changeSize, reviewFlow } from "./reviewFlow";
 
@@ -652,6 +652,21 @@ export function ReviewView() {
 						const visibleRows = () => (mdOnlyChanged() ? diff().rows.filter((row) => row.kind !== "same") : diff().rows);
 						const showFm = () => Boolean((diff().fmBeforeHtml || diff().fmAfterHtml) && (!mdOnlyChanged() || diff().fmChanged));
 						const hasAnyVisible = () => visibleRows().length > 0 || showFm();
+						createEffect(
+							() => (diffLayout() === "rendered" ? visibleRows() : null),
+							(rows) => {
+								if (!rows?.length) return;
+								let alive = true;
+								queueMicrotask(() => {
+									if (!alive) return;
+									if (leftPaneEl?.isConnected) hydrateMathInElement(leftPaneEl);
+									if (rightPaneEl?.isConnected) hydrateMathInElement(rightPaneEl);
+								});
+								return () => {
+									alive = false;
+								};
+							},
+						);
 						return (
 							<div class="review-md-wrap">
 								<style>{`

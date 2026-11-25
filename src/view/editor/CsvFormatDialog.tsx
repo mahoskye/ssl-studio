@@ -157,6 +157,8 @@ export function CsvFormatDialog(props: {
 		});
 	};
 
+	const showValuesSearch = (rule: DraftRule) => rule.entries.length > 6 || rule.search.length > 0;
+
 	const unmappedFromTable = (rule: DraftRule): string[] => {
 		const cols = parseColumns(rule.columnsText);
 		if (!cols.length) return [];
@@ -243,13 +245,14 @@ export function CsvFormatDialog(props: {
 
 			<div class={["csv-fmt-body", { dimmed: !enabled() }]}>
 				<Show when={rules().length} fallback={<p class="hint">No column formatting rules configured. Every CSV column will display as plain text.</p>}>
-					<For each={rules()}>
+					<For each={rules()} keyed={(r) => r.id}>
 						{(rule, idx) => {
-							const filteredEntries = () => {
-								const q = rule.search.trim().toLowerCase();
-								return q ? rule.entries.filter((e) => e.value.toLowerCase().includes(q) || e.tone.includes(q)) : rule.entries;
-							};
-							const importable = () => unmappedFromTable(rule);
+							const filteredEntries = createMemo(() => {
+								const r = rule();
+								const q = r.search.trim().toLowerCase();
+								return q ? r.entries.filter((e) => e.value.toLowerCase().includes(q) || e.tone.includes(q)) : r.entries;
+							});
+							const importable = createMemo(() => unmappedFromTable(rule()));
 							return (
 								<section class="csv-fmt-rule" aria-label={`Formatting rule ${idx() + 1}`}>
 									<div class="csv-fmt-rule-head">
@@ -259,15 +262,15 @@ export function CsvFormatDialog(props: {
 												type="text"
 												data-autofocus={idx() === initialFocusIdx ? "" : undefined}
 												placeholder="e.g. status, state, sample_status"
-												value={rule.columnsText}
-												onInput={(e) => updateRule(rule.id, (r) => ({ ...r, columnsText: e.currentTarget.value }))}
+												value={rule().columnsText}
+												onInput={(e) => updateRule(rule().id, (r) => ({ ...r, columnsText: e.currentTarget.value }))}
 											/>
 										</label>
 										<label class="csv-fmt-field csv-fmt-fallback">
 											<span>Unlisted values</span>
 											<select
-												value={rule.fallback}
-												onChange={(e) => updateRule(rule.id, (r) => ({ ...r, fallback: e.currentTarget.value as BadgeTone | "none" }))}
+												value={rule().fallback}
+												onChange={(e) => updateRule(rule().id, (r) => ({ ...r, fallback: e.currentTarget.value as BadgeTone | "none" }))}
 											>
 												<option value="none">Plain text (no badge)</option>
 												<For each={BADGE_TONES}>{(t) => <option value={t.id}>{t.label}</option>}</For>
@@ -278,7 +281,7 @@ export function CsvFormatDialog(props: {
 											class="icon-btn csv-fmt-rule-del"
 											title="Remove this formatting rule"
 											aria-label="Remove formatting rule"
-											onClick={() => removeRule(rule.id)}
+											onClick={() => removeRule(rule().id)}
 										>
 											<Icon name="trash" />
 										</button>
@@ -286,57 +289,57 @@ export function CsvFormatDialog(props: {
 
 									<div class="csv-fmt-values-bar">
 										<span class="csv-fmt-values-count">
-											Value styles ({rule.entries.length})
+											Value styles ({rule().entries.length})
 										</span>
-										<Show when={rule.entries.length > 6 || rule.search.length > 0}>
+										<Show when={showValuesSearch(rule())}>
 											<input
 												type="search"
 												class="csv-fmt-values-search"
 												placeholder="Filter values…"
 												aria-label="Filter value styles"
-												value={rule.search}
-												onInput={(e) => updateRule(rule.id, (r) => ({ ...r, search: e.currentTarget.value }))}
+												value={rule().search}
+												onInput={(e) => updateRule(rule().id, (r) => ({ ...r, search: e.currentTarget.value }))}
 											/>
 										</Show>
 										<span class="spacer" />
 										<Show when={importable().length > 0}>
-											<button type="button" onClick={() => importFromTable(rule.id)} title={`Add ${importable().join(", ")} from this table`}>
+											<button type="button" onClick={() => importFromTable(rule().id)} title={`Add ${importable().join(", ")} from this table`}>
 												+ Import {importable().length} from table
 											</button>
 										</Show>
-										<button type="button" onClick={() => addEntry(rule.id)}>
+										<button type="button" onClick={() => addEntry(rule().id)}>
 											<Icon name="add" /> Value
 										</button>
 									</div>
 
-									<Show when={filteredEntries().length} fallback={<p class="csv-fmt-empty">{rule.entries.length ? "No values match your filter." : "No explicit value mappings yet — unlisted values use the style above."}</p>}>
+									<Show when={filteredEntries().length} fallback={<p class="csv-fmt-empty">{rule().entries.length ? "No values match your filter." : "No explicit value mappings yet — unlisted values use the style above."}</p>}>
 										<div class="csv-fmt-entries">
-											<For each={filteredEntries()}>
+											<For each={filteredEntries()} keyed={(e) => e.id}>
 												{(entry) => (
 													<div class="csv-fmt-entry">
 														<input
 															type="text"
 															placeholder="Value (e.g. Approved)"
 															aria-label="Cell value"
-															value={entry.value}
-															onInput={(e) => updateEntry(rule.id, entry.id, { value: e.currentTarget.value })}
+															value={entry().value}
+															onInput={(e) => updateEntry(rule().id, entry().id, { value: e.currentTarget.value })}
 														/>
 														<select
-															aria-label={`Tone for ${entry.value || "value"}`}
-															value={entry.tone}
-															onChange={(e) => updateEntry(rule.id, entry.id, { tone: e.currentTarget.value as BadgeTone })}
+															aria-label={`Tone for ${entry().value || "value"}`}
+															value={entry().tone}
+															onChange={(e) => updateEntry(rule().id, entry().id, { tone: e.currentTarget.value as BadgeTone })}
 														>
 															<For each={BADGE_TONES}>{(t) => <option value={t.id}>{t.label}</option>}</For>
 														</select>
 														<span class="csv-fmt-preview">
-															<span class={`doc-status tone-${entry.tone}`}>{entry.value.trim() || "sample"}</span>
+															<span class={`doc-status tone-${entry().tone}`}>{entry().value.trim() || "sample"}</span>
 														</span>
 														<button
 															type="button"
 															class="icon-btn"
 															title="Remove value"
-															aria-label={`Remove ${entry.value || "value"}`}
-															onClick={() => removeEntry(rule.id, entry.id)}
+															aria-label={`Remove ${entry().value || "value"}`}
+															onClick={() => removeEntry(rule().id, entry().id)}
 														>
 															<Icon name="close" />
 														</button>

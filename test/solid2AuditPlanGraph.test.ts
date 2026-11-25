@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createEffect, createMemo, createRoot, createSignal, flush, untrack } from "solid-js";
-import { buildNotices } from "../scripts/notices";
+import { buildNotices, FALLBACK_LICENSE, NOTICE_FILENAMES } from "../scripts/notices";
 import type { PreviewTarget } from "../src/view/plan/PlanCodeDrilldown";
 
 // Minimal headless browser & Monaco shims so pure exported helpers from .tsx views can be imported cleanly.
@@ -407,10 +407,176 @@ describe("Plan views — Solid 2 audit regression checks", () => {
 
 	test("PlanAssistant.tsx loads saved build runs inside the planPath effect rather than mount-only onSettled", () => {
 		const src = readRepo("src/view/plan/PlanAssistant.tsx");
-		expect(src).not.toContain("onSettled(");
+		expect(src).not.toMatch(/onSettled\(\(\) => \{[^}]*loadRun/);
 		expect(src).toMatch(
 			/createEffect\(\s*\(\) => planPath\(\),\s*\(p\) => \{\s*setDraftReq\(null\);\s*untrack\(\(\) => \{\s*void loadRun\(p\);\s*\}\);\s*\},\s*\);/,
 		);
+	});
+});
+
+// =============================================================================
+// 5. Pass-2 Adversarial Audit Regression Checks
+// =============================================================================
+describe("Pass-2 adversarial audit fixes — Plan, Graph, Backend & Notices", () => {
+	test("PlanTests.tsx uses one-shot untrack() signal initializers and keyed <For> loops", () => {
+		const src = readRepo("src/view/plan/PlanTests.tsx");
+
+		// 1. TestCaseForm uses createSignal(untrack(...)) rather than derived writable createSignal(() => ...)
+		expect(src).toContain('import { createEffect, createMemo, createSignal, For, Show, untrack } from "solid-js";');
+		expect(src).toContain("const [title, setTitle] = createSignal(untrack(() => props.initial?.title ?? \"\"));");
+		expect(src).toContain("const [nodeId, setNodeId] = createSignal(untrack(() => props.initial?.node ?? \"\"));");
+		expect(src).toContain("const [journey, setJourney] = createSignal(untrack(() => (props.initial?.journey ? String(props.initial.journey) : \"\")));");
+		expect(src).toContain("const [given, setGiven] = createSignal(untrack(() => props.initial?.given ?? \"\"));");
+		expect(src).toContain("const [expect, setExpect] = createSignal(untrack(() => props.initial?.expect ?? \"\"));");
+		expect(src).toContain("const [notes, setNotes] = createSignal(untrack(() => props.initial?.notes ?? \"\"));");
+		expect(src).toContain("const [notesOpen, setNotesOpen] = createSignal(untrack(() => Boolean(props.initial?.notes?.trim())));");
+		expect(src).not.toContain("createSignal(() => props.initial");
+
+		// 2. Keyed <For> loops for cases, nodes, and paths, reading accessors lazily
+		expect(src).toContain("<For each={props.cases} keyed={(item) => item.id}>");
+		expect(src).toContain("<For each={props.nodes} keyed={(n) => n.id}>");
+		expect(src).toMatch(/<For each=\{props\.paths\} keyed=\{\(p\) => /);
+		expect(src).toContain("const isEditing = () => editingId() === item().id;");
+		expect(src).toContain("const isOpen = () => expandedId() === item().id;");
+		expect(src).toContain("initial={item()}");
+	});
+
+	test("PlanView.tsx keys activeHandles, avoids redundant setEdge on same edge, guards inline edit blur with settled, removes keyed on dynamic Show overlays, and fits via ResizeObserver", () => {
+		const src = readRepo("src/view/plan/PlanView.tsx");
+
+		// 1. Keyed activeHandles + redundant setEdge guard in startRouteDrag
+		expect(src).toContain("<For each={activeHandles()} keyed={(item) => item.h.key}>");
+		expect(src).toContain("onMouseDown={(e) => startRouteDrag(e, item().line, item().h)}");
+		expect(src).toContain("resetEdgeRoute({ from: item().line.from, to: item().line.to }, item().h.key);");
+		expect(src).toMatch(
+			/const curEdge = edge\(\);\s*if \(!curEdge \|\| curEdge\.from !== line\.from \|\| curEdge\.to !== line\.to\) \{\s*select\(null\);\s*setEdge\(\{ from: line\.from, to: line\.to \}\);\s*\}/,
+		);
+
+		// 2. Inline edit synchronous settled guard prevents Escape/Enter double-commit or escaped commit on blur
+		expect(src).toContain("let settled = false;");
+		expect(src).toMatch(/if \(e\.key === "Enter"\) \{\s*settled = true;\s*commitEdit\(e\.currentTarget\.value\);\s*\}/);
+		expect(src).toMatch(/if \(e\.key === "Escape"\) \{\s*settled = true;\s*setEditing\(null\);\s*refocus\(\);\s*\}/);
+		expect(src).toMatch(/onBlur=\{\(e\) => \{\s*if \(!settled && editing\(\) === target\) \{\s*settled = true;\s*commitEdit\(e\.currentTarget\.value, false\);\s*\}\s*\}\}/);
+
+		// 3. Remove keyed on marquee(), floatBarPos(), and activePathInfo()
+		expect(src).toContain("<Show when={marquee()}>");
+		expect(src).not.toContain("<Show when={marquee()} keyed>");
+		expect(src).toContain("<Show when={floatBarPos()}>");
+		expect(src).not.toContain("<Show when={floatBarPos()} keyed>");
+		expect(src).toContain("<Show when={!linking() && activePathInfo()}>");
+		expect(src).not.toContain("<Show when={!linking() && activePathInfo()} keyed>");
+
+		// 4. Live Source -> Chart ResizeObserver auto-fit when !fitted
+		expect(src).toContain("if (!untrack(isTextMode) && width >= 10 && height >= 10)");
+		expect(src).toContain("if (!fitted && w >= 10 && h >= 10 && !untrack(isTextMode) && untrack(layout))");
+		expect(src).toContain("ref={bindCanvas}");
+	});
+
+	test("PlanAssistant.tsx uses DraftAnswerInput with onSettled snap-back and keyed <For> loops", () => {
+		const src = readRepo("src/view/plan/PlanAssistant.tsx");
+
+		expect(src).toContain("function DraftAnswerInput(");
+		expect(src).toContain("const [draft, setDraft] = createSignal(untrack(() => props.value));");
+		expect(src).toMatch(/onSettled\(\(\) => \{[\s\S]*?const cur = untrack\(\(\) => props\.value\);[\s\S]*?setDraft\(cur\);/);
+		expect(src).toContain("<DraftAnswerInput");
+		expect(src).toContain("<For each={open()} keyed={(q) => q.question}>");
+		expect(src).toContain("<For each={closed()} keyed={(q) => q.question}>");
+		expect(src).toContain('<For each={r().units.filter((u) => u.status !== "kept")} keyed={(u) => u.name}>');
+	});
+
+	test("GraphView.tsx removes keyed from Impact Analysis <Show> and resyncs hopsDraft/depthDraft on open and blur", () => {
+		const src = readRepo("src/view/graph/GraphView.tsx");
+
+		expect(src).toContain("<Show when={impactOpen() && impactReport()}>");
+		expect(src).not.toContain("<Show when={impactOpen() && impactReport()} keyed>");
+		expect(src).toContain("aria-label={`Impact analysis for ${report().targetLabel || \"selection\"}`}");
+		expect(src).toContain('() => (filter().mode === "around" ? String(filter().depth) : null)');
+		expect(src).toContain("() => (impactOpen() ? String(impactHops()) : null)");
+		expect(src).toContain("onChange={(e) => commitDepth(e.currentTarget)}");
+		expect(src).toContain("onBlur={(e) => commitDepth(e.currentTarget)}");
+		expect(src).toContain("onChange={(e) => commitHops(e.currentTarget)}");
+		expect(src).toContain("onBlur={(e) => commitHops(e.currentTarget)}");
+
+		// Runtime proof: opening/re-entering resyncs dirty draft value cleanly in Solid 2.
+		const ctx = createRoot((dispose) => {
+			const [open, setOpen] = createSignal(false);
+			const [hops, setHops] = createSignal(4);
+			const [draft, setDraft] = createSignal(String(untrack(hops)));
+			createEffect(
+				() => (open() ? String(hops()) : null),
+				(v) => {
+					if (v !== null) setDraft(v);
+				},
+			);
+			return { setOpen, setHops, draft, setDraft, dispose };
+		});
+		try {
+			flush();
+			ctx.setOpen(true);
+			flush();
+			expect(ctx.draft()).toBe("4");
+
+			// User types garbage and closes without committing.
+			ctx.setDraft("999");
+			flush();
+			expect(ctx.draft()).toBe("999");
+			ctx.setOpen(false);
+			flush();
+
+			// Reopening resyncs draft to canonical hops value.
+			ctx.setOpen(true);
+			flush();
+			expect(ctx.draft()).toBe("4");
+		} finally {
+			ctx.dispose();
+		}
+	});
+
+	test("PlanCodeDrilldown.tsx snaps Target scripts draft back via onSettled on change and blur", () => {
+		const src = readRepo("src/view/plan/PlanCodeDrilldown.tsx");
+
+		expect(src).toContain('import { createEffect, createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";');
+		expect(src).toMatch(
+			/onSettled\(\(\) => \{[\s\S]*?const cur = untrack\(scriptsText\);[\s\S]*?setScriptsDraft\(cur\);[\s\S]*?if \(el\.value !== cur\) el\.value = cur;[\s\S]*?props\.fitTextarea\(el\);/,
+		);
+		expect(src).toContain("onBlur={(e) => {");
+		expect(src).toContain("resyncScripts(e.currentTarget);");
+	});
+
+	test("src/bun/backend.ts importDocFile strips case-sensitive extname(src) so uppercase extensions do not leave double extensions", () => {
+		const src = readRepo("src/bun/backend.ts");
+		expect(src).toContain('const rawStem = basename(src, extname(src)).replace(/[\\\\/:*?"<>|]+/g, "-").trim() || "imported";');
+		expect(src).not.toContain("basename(src, ext).replace(");
+	});
+
+	test("scripts/notices.ts includes THIRD-PARTY-LICENSE, fallback MIT licenses for solid-js/@solidjs/web, mermaid deps, and full text in THIRD-PARTY-NOTICES.md", async () => {
+		expect(NOTICE_FILENAMES).toContain("THIRD-PARTY-LICENSE");
+		expect(FALLBACK_LICENSE["solid-js"]).toBe("third-party/solid-MIT-LICENSE");
+		expect(FALLBACK_LICENSE["@solidjs/web"]).toBe("third-party/solid-MIT-LICENSE");
+
+		const solidLicense = readRepo("third-party/solid-MIT-LICENSE");
+		expect(solidLicense).toContain("MIT License");
+		expect(solidLicense).toContain("Ryan Carniato");
+
+		const built = await buildNotices(root);
+		const committed = readRepo("src/view/public/THIRD-PARTY-NOTICES.md");
+		expect(committed).toBe(built.text);
+
+		const sectionOf = (pkg: string) => {
+			const idx = committed.indexOf(`## ${pkg} `);
+			expect(idx, `missing heading for ${pkg}`).toBeGreaterThan(-1);
+			const next = committed.indexOf("\n## ", idx + 1);
+			return committed.slice(idx, next === -1 ? undefined : next);
+		};
+
+		for (const pkg of ["solid-js", "@solidjs/web", "rolldown", "katex", "cytoscape", "d3", "dagre-d3-es", "roughjs"]) {
+			const sec = sectionOf(pkg);
+			expect(sec, `${pkg} should include fenced license text`).toContain("```");
+		}
+		expect(sectionOf("solid-js")).toContain("Ryan Carniato");
+		expect(sectionOf("@solidjs/web")).toContain("Ryan Carniato");
+		expect(sectionOf("rolldown")).toContain("### THIRD-PARTY-LICENSE");
+		expect(sectionOf("katex")).toContain("### LICENSE");
 	});
 });
 

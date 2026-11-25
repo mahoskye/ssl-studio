@@ -2,7 +2,7 @@
 // five-state code status breakdown, open questions/suggestions, flowchart test
 // walkthroughs, and spec status. Answers and accepted suggestions are undoable
 // text edits on the plan (ADR 0002).
-import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, Show, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, onSettled, Show, untrack } from "solid-js";
 import { createAsyncQuery } from "../asyncQuery";
 import { Icon } from "../Icon";
 import { agent, currentModel } from "../agent/store";
@@ -71,6 +71,34 @@ export function resolveDriftOpenAction(
 	if (d.node && nodeIds.has(d.node)) return { kind: "node", nodeId: d.node };
 	if (d.kind !== "gone" && targets.length > 0) return { kind: "script", script: targets[0]! };
 	return null;
+}
+
+/** Local draft input for decided answers so unrelated plan edits never overwrite in-progress typing, while unchanged commits snap back after flush. */
+function DraftAnswerInput(props: { value: string; ariaLabel: string; onCommit: (value: string) => void }) {
+	const [draft, setDraft] = createSignal(untrack(() => props.value));
+	createEffect(
+		() => props.value,
+		(v) => {
+			setDraft(v);
+		},
+	);
+	return (
+		<input
+			value={draft()}
+			aria-label={props.ariaLabel}
+			onInput={(e) => setDraft(e.currentTarget.value)}
+			onChange={(e) => {
+				const el = e.currentTarget;
+				props.onCommit(el.value);
+				onSettled(() => {
+					if (!el.isConnected) return;
+					const cur = untrack(() => props.value);
+					setDraft(cur);
+					if (el.value !== cur) el.value = cur;
+				});
+			}}
+		/>
+	);
 }
 
 /** Mounted while its plan shows, and hidden when collapsed: a build under way is not lost from sight for good. */
@@ -393,17 +421,17 @@ export function PlanAssistant(props: {
 
 						<Show when={open().length}>
 							<h4 class="pa-subhead">{open().length === 1 ? "A question for you" : `${open().length} questions for you`}</h4>
-							<For each={open()}>
+							<For each={open()} keyed={(q) => q.question}>
 								{(q) => (
 									<div class="plan-question">
 										<p>
-											{q.question} <Node id={q.node} />
+											{q().question} <Node id={q().node} />
 										</p>
-										<Show when={q.suggested?.length}>
+										<Show when={q().suggested?.length}>
 											<div class="plan-answers">
-												<For each={q.suggested}>
+												<For each={q().suggested}>
 													{(s) => (
-														<button type="button" onClick={() => answer(props.path, q.question, s)}>
+														<button type="button" onClick={() => answer(props.path, q().question, s)}>
 															{s}
 														</button>
 													)}
@@ -412,12 +440,12 @@ export function PlanAssistant(props: {
 										</Show>
 										<input
 											placeholder="Your answer"
-											aria-label={q.question}
+											aria-label={q().question}
 											onKeyDown={(e) => {
-												if (e.key === "Enter" && e.currentTarget.value.trim()) answer(props.path, q.question, e.currentTarget.value);
+												if (e.key === "Enter" && e.currentTarget.value.trim()) answer(props.path, q().question, e.currentTarget.value);
 											}}
 											onChange={(e) => {
-												if (e.currentTarget.value.trim()) answer(props.path, q.question, e.currentTarget.value);
+												if (e.currentTarget.value.trim()) answer(props.path, q().question, e.currentTarget.value);
 											}}
 										/>
 										<div class="pa-promote-row">
@@ -427,7 +455,7 @@ export function PlanAssistant(props: {
 												title="Save this open question to docs/knowledge/questions/"
 												onClick={() =>
 													void promoteToKnowledge("questions", {
-														title: q.question,
+														title: q().question,
 														body: `Raised while refining plan "${props.plan.title || "Plan"}".`,
 														ticket: typeof props.plan.ticket === "string" ? props.plan.ticket : undefined,
 													})
@@ -474,13 +502,17 @@ export function PlanAssistant(props: {
 								<span>What you decided ({closed().length})</span>
 							</button>
 							<Show when={decidedOpen()}>
-								<For each={closed()}>
+								<For each={closed()} keyed={(q) => q.question}>
 									{(q) => (
 										<div class="plan-question decided">
 											<p class="hint">
-												{q.question} <Node id={q.node} />
+												{q().question} <Node id={q().node} />
 											</p>
-											<input value={q.answer} aria-label={q.question} onChange={(e) => answer(props.path, q.question, e.currentTarget.value)} />
+											<DraftAnswerInput
+												value={q().answer ?? ""}
+												ariaLabel={q().question}
+												onCommit={(val) => answer(props.path, q().question, val)}
+											/>
 											<div class="pa-promote-row">
 												<button
 													type="button"
@@ -488,9 +520,9 @@ export function PlanAssistant(props: {
 													title="Promote this settled answer to a numbered Decision ADR in docs/knowledge/decisions/"
 													onClick={() =>
 														void promoteToKnowledge("decisions", {
-															title: q.question.replace(/\?+$/, ""),
-															body: `Question from plan "${props.plan.title || "Plan"}": ${q.question}`,
-															decision: q.answer,
+															title: q().question.replace(/\?+$/, ""),
+															body: `Question from plan "${props.plan.title || "Plan"}": ${q().question}`,
+															decision: q().answer,
 															sourcePlan: props.path,
 															ticket: typeof props.plan.ticket === "string" ? props.plan.ticket : undefined,
 														})
@@ -616,33 +648,33 @@ export function PlanAssistant(props: {
 											<Show when={r().status === "budget"}> · stopped at its budget</Show>
 											<Show when={r().status === "stopped" && !a().running}> · stopped</Show>
 										</p>
-										<For each={r().units.filter((u) => u.status !== "kept")}>
+										<For each={r().units.filter((u) => u.status !== "kept")} keyed={(u) => u.name}>
 											{(unit) => (
-												<div class={`plan-unit ${unit.status}`}>
+												<div class={`plan-unit ${unit().status}`}>
 													<p>
-														<strong>{unit.name}</strong>{" "}
+														<strong>{unit().name}</strong>{" "}
 														<span class="hint">
-															{STATUS[unit.status]}
-															{unit.change ? ", an edit" : ""}
-															{unit.attempts > 1 && unit.status !== "pending" ? `, try ${unit.attempts}` : ""}
+															{STATUS[unit().status]}
+															{unit().change ? ", an edit" : ""}
+															{unit().attempts > 1 && unit().status !== "pending" ? `, try ${unit().attempts}` : ""}
 														</span>
 													</p>
-													<Show when={unit.problems?.length}>
+													<Show when={unit().problems?.length}>
 														<ul class="plan-problems">
-															<For each={unit.problems}>{(p) => <li>{p}</li>}</For>
+															<For each={unit().problems}>{(p) => <li>{p}</li>}</For>
 														</ul>
 													</Show>
-													<Show when={unit.status === "stuck" && unit.question && !unit.answer}>
+													<Show when={unit().status === "stuck" && unit().question && !unit().answer}>
 														<input
 															placeholder="Your answer"
-															aria-label={unit.question}
+															aria-label={unit().question}
 															onKeyDown={(e) => {
-																if (e.key === "Enter") answerUnit(props.path, unit.name, e.currentTarget.value);
+																if (e.key === "Enter") answerUnit(props.path, unit().name, e.currentTarget.value);
 															}}
 														/>
 													</Show>
-													<Show when={unit.status === "stuck" && !a().running && !(unit.question && !unit.answer)}>
-														<button type="button" onClick={() => retryUnit(props.path, unit.name)}>
+													<Show when={unit().status === "stuck" && !a().running && !(unit().question && !unit().answer)}>
+														<button type="button" onClick={() => retryUnit(props.path, unit().name)}>
 															Try again
 														</button>
 													</Show>

@@ -1145,7 +1145,7 @@ describe("R8C P1 — quickRank memoization, quickPrefix 1-char prefix, layout sa
 
 		const nav = readSrc("../src/view/navigation.ts");
 		expect(nav).toContain("if (modalOpen()) return");
-		expect(nav).toContain("if (state.workspace?.root !== startRoot) return");
+		expect(nav).toContain("if (snapshot(state).workspace?.root !== startRoot) return");
 	});
 });
 

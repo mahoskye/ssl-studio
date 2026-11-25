@@ -1,10 +1,10 @@
 // Writes src/view/public/THIRD-PARTY-NOTICES.md: the license texts of the
 // packages, files and runtime the app ships, so every build carries them.
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
-// Vite is here for the small helpers it copies into the bundle.
+// Vite and Rolldown are here for the small runtime helpers copied into the bundle.
 const packages = [
 	"monaco-editor",
 	"@codemirror/state",
@@ -24,6 +24,24 @@ const packages = [
 	"elkjs",
 	"marked",
 	"mermaid",
+	"@braintree/sanitize-url",
+	"@iconify/utils",
+	"@mermaid-js/parser",
+	"@upsetjs/venn.js",
+	"chevrotain",
+	"cytoscape",
+	"cytoscape-cose-bilkent",
+	"cytoscape-fcose",
+	"d3",
+	"d3-sankey",
+	"dagre-d3-es",
+	"dayjs",
+	"es-toolkit",
+	"katex",
+	"khroma",
+	"roughjs",
+	"stylis",
+	"ts-dedent",
 	"dompurify",
 	"prettier",
 	"@prettier/plugin-xml",
@@ -31,23 +49,65 @@ const packages = [
 	"vite",
 	"rolldown",
 ];
-export const NOTICE_FILENAMES = ["LICENSE", "LICENSE.md", "LICENSE.txt", "NOTICES.txt", "ThirdPartyNotices.txt", "THIRD-PARTY-NOTICES.md"] as const;
+export const NOTICE_FILENAMES = [
+	"LICENSE",
+	"LICENSE.md",
+	"LICENSE.txt",
+	"NOTICE",
+	"NOTICES.txt",
+	"ThirdPartyNotices.txt",
+	"THIRD-PARTY-LICENSE",
+	"THIRD-PARTY-NOTICES.md",
+] as const;
+export const FALLBACK_LICENSE: Record<string, string> = {
+	"solid-js": "third-party/solid-MIT-LICENSE",
+	"@solidjs/web": "third-party/solid-MIT-LICENSE",
+};
+const FALLBACK_SPDX: Record<string, string> = {
+	khroma: "MIT",
+};
 
-const fence = (text: string) => `\`\`\`\n${text.trim()}\n\`\`\`\n`;
+const fence = (text: string) => `\`\`\`\n${text.replace(/\r\n/g, "\n").trim()}\n\`\`\`\n`;
 
 export async function buildNotices(rootDir = root): Promise<{ text: string; packageCount: number; runtimeCount: number }> {
 	const parts = ["# Third-party notices\n", "SSL Studio is MIT licensed (LICENSE). It ships the following.\n"];
 	for (const name of packages) {
 		const dir = join(rootDir, "node_modules", name);
 		const pkg = await Bun.file(join(dir, "package.json")).json();
-		parts.push(`## ${name} ${pkg.version} (${pkg.license})\n`);
+		const licenseLabel = pkg.license ?? FALLBACK_SPDX[name] ?? "see license below";
+		parts.push(`## ${name} ${pkg.version} (${licenseLabel})\n`);
 		if (name === "elkjs") parts.push("Used under EPL-2.0 and included unmodified. Its source is at https://github.com/kieler/elkjs.\n");
+		const entriesByLower = new Map<string, string>();
+		for (const entry of readdirSync(dir)) {
+			const lower = entry.toLowerCase();
+			if (!entriesByLower.has(lower)) entriesByLower.set(lower, entry);
+		}
+		let found = 0;
 		for (const file of NOTICE_FILENAMES) {
-			if (!existsSync(join(dir, file))) continue;
-			let text = await Bun.file(join(dir, file)).text();
+			const actual = entriesByLower.get(file.toLowerCase());
+			if (!actual) continue;
+			let text = await Bun.file(join(dir, actual)).text();
 			// Vite's file goes on to its own build-time dependencies, which the app does not ship.
 			if (name === "vite") text = text.split("# Licenses of bundled dependencies")[0];
-			parts.push(`### ${file}\n\n${fence(text)}`);
+			if (!text.trim()) continue;
+			parts.push(`### ${actual}\n\n${fence(text)}`);
+			found++;
+		}
+		if (found === 0) {
+			const fallbackRel = FALLBACK_LICENSE[name];
+			if (fallbackRel) {
+				const fallbackPath = join(rootDir, fallbackRel);
+				if (existsSync(fallbackPath)) {
+					const text = await Bun.file(fallbackPath).text();
+					if (text.trim()) {
+						parts.push(`### LICENSE\n\n${fence(text)}`);
+						found++;
+					}
+				}
+			}
+		}
+		if (found === 0) {
+			throw new Error(`No license or notice file found for package "${name}" in ${dir}`);
 		}
 	}
 	parts.push(

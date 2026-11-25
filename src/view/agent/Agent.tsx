@@ -3,7 +3,7 @@
 import { Icon, type IconName } from "../Icon";
 import { Menu, type MenuItem } from "../Menu";
 import { showPanel } from "../panels/registry";
-import { createEffect, createMemo, createSignal, For, onSettled, Show, snapshot, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, createStore, For, onCleanup, onSettled, Show, snapshot, untrack } from "solid-js";
 import { createAsyncQuery } from "../asyncQuery";
 import { activeEditor } from "../editor/EditorGroup";
 import { activeLiveEditor, liveSelectionVersion } from "../editor/liveBridge";
@@ -27,7 +27,7 @@ import { notePath, proposalOf, runStep, showReview, startTidy, STEPS, tidy } fro
 import { isAllowedContextPath } from "../plan/assist";
 import { parseCsv } from "../../shared/csv";
 import { checkTables } from "../../shared/docTables";
-import { frontMatter, withFrontMatter } from "../../shared/frontMatter";
+import { frontMatter, many, withFrontMatter } from "../../shared/frontMatter";
 import { extractPlanTestCasesFromMarkdown, formatAgentThreadMarkdown, planMarkdownReviewExtraction, type ExtractedPlanTestCase } from "../../shared/menuBar";
 import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
 import { summarizePlanForPrompt } from "../../shared/planSummary";
@@ -36,7 +36,7 @@ import type { DocFile } from "../../shared/protocol";
 import { keysIn, ticketColumn } from "../../shared/registryTickets";
 import { extractSchemaPreview, referencedSchemaTables } from "../../shared/schemaIndex";
 import { renderTemplate } from "../../shared/templater";
-import { cut, docsGoverningFile, MAX_WORK_PROMPT_CHARS, ticketForFile, ticketWork, workFor, type WorkTextOptions } from "../../shared/workContext";
+import { cut, docsGoverningFile, MAX_WORK_PROMPT_CHARS, ticketAtHand as listedTicketAtHand, ticketForFile, ticketWork, workFor, type WorkTextOptions } from "../../shared/workContext";
 import { backend } from "../backend";
 import { ask as askDialog, browseWorkspaceFile, choose, quickPick, quickPickMany } from "../dialogs";
 import { refreshDocAudit } from "../docAudit";
@@ -60,26 +60,44 @@ export function openAgentWithDraft(text: string, opts?: { cleanContext?: boolean
 /** Attaches a workspace text file to the next Agent turn context and focuses the Agent panel. */
 export function attachFileToAgent(path: string) {
 	ensureAgentWorkspace();
-	const root = state.workspace?.root;
+	const root = snapshot(state).workspace?.root;
 	if (!root || !isInside(root, path)) return notify("That file is not in this workspace.", "error");
 	const rel = relativeTo(root, path).replace(/\\/g, "/");
 	if (!isAllowedContextPath(rel)) return notify("Hidden files and dotfiles cannot be attached to Agent context.", "error");
 	const key = canonical(path);
-	setAttachedFiles((prev) => (prev.some((f) => canonical(f.path) === key) ? prev : [...prev, { path, rel }]));
+	setAgentCtx((s) => {
+		if (!s.attachedFiles.some((f) => canonical(f.path) === key)) {
+			s.attachedFiles.push({ path, rel });
+		}
+	});
 	showPanel("agent");
 	notify(`Attached ${baseName(path)} to Agent context.`);
 }
 
 // Module-level Agent context controls so `Ctrl+Shift+H` (`commands.ts`) and `AgentPanel` share the exact same selections.
 const [withWork, setWithWork] = createSignal(recall("agent.withWork") !== "no");
-const [pickedTicket, setPickedTicket] = createSignal<string | null>(null);
-const [withSchema, setWithSchema] = createSignal(false);
-const [withRefTables, setWithRefTables] = createSignal(false);
-const [withRegistries, setWithRegistries] = createSignal(false);
-const [withState, setWithState] = createSignal(false);
-const [withGitDiff, setWithGitDiff] = createSignal(false);
-const [withGoverningDocs, setWithGoverningDocs] = createSignal(false);
-const [attachedFiles, setAttachedFiles] = createSignal<{ path: string; rel: string }[]>([]);
+type AgentContextState = {
+	root: string | null;
+	pickedTicket: string | null;
+	withSchema: boolean;
+	withRefTables: boolean;
+	withRegistries: boolean;
+	withState: boolean;
+	withGitDiff: boolean;
+	withGoverningDocs: boolean;
+	attachedFiles: { path: string; rel: string }[];
+};
+const [agentCtx, setAgentCtx] = createStore<AgentContextState>({
+	root: null,
+	pickedTicket: null,
+	withSchema: false,
+	withRefTables: false,
+	withRegistries: false,
+	withState: false,
+	withGitDiff: false,
+	withGoverningDocs: false,
+	attachedFiles: [],
+});
 const [sentTick, setSentTick] = createSignal(0);
 /** Synchronous preparing lock held across async context assembly before `ask()` sets `agent.busy`. */
 const [preparing, setPreparing] = createSignal(false);
@@ -94,55 +112,81 @@ let sentContext: { session: string | null; root: string | null; hashes: Map<stri
 	hashes: new Map(),
 };
 let lastWorkspaceRoot: string | null = null;
-const [workspaceResetEpoch, setWorkspaceResetEpoch] = createSignal(0);
-let targetWorkspaceResetEpoch = 0;
 
-/** Resets all workspace-scoped Agent context & session state whenever the user opens a different folder. Returns true if a reset occurred (or is still pending flush). */
+/** Resets all workspace-scoped Agent context & session state whenever the user opens a different folder. */
 function ensureAgentWorkspace(): boolean {
 	const rawRoot = snapshot(state).workspace?.root;
 	const curRoot = rawRoot ? canonical(rawRoot) : null;
-	if (curRoot === lastWorkspaceRoot) return untrack(workspaceResetEpoch) !== targetWorkspaceResetEpoch;
+	if (curRoot === lastWorkspaceRoot) return false;
 	lastWorkspaceRoot = curRoot;
-	targetWorkspaceResetEpoch++;
-	setWorkspaceResetEpoch(targetWorkspaceResetEpoch);
-	setPickedTicket(null);
-	setWithSchema(false);
-	setWithRefTables(false);
-	setWithRegistries(false);
-	setWithState(false);
-	setWithGitDiff(false);
-	setWithGoverningDocs(false);
-	setAttachedFiles([]);
+	setAgentCtx((s) => {
+		s.root = curRoot;
+		s.pickedTicket = null;
+		s.withSchema = false;
+		s.withRefTables = false;
+		s.withRegistries = false;
+		s.withState = false;
+		s.withGitDiff = false;
+		s.withGoverningDocs = false;
+		s.attachedFiles = [];
+	});
 	sentContext = { session: null, root: curRoot, hashes: new Map() };
 	syncWorkspaceThreads(curRoot);
 	setSentTick((n) => n + 1);
 	return true;
 }
 
-/** Auto-detected ticket: explicit workspace activeTicket > file-specific ticket > single in-progress ticket. */
+/** Auto-detected ticket (reactive): explicit workspace activeTicket > file-specific ticket > single in-progress ticket. */
 function resolvedAutoTicket(): string {
 	return state.settings.activeTicket?.trim() || ticketForFile(docs(), activePath(), state.workspace?.root) || ticketAtHand();
 }
 
+/** Auto-detected ticket (imperative): reads unflushed `snapshot(state)` so workspace/tab/setting switches are seen immediately. */
+function resolvedAutoTicketNow(): string {
+	const cur = snapshot(state);
+	const root = cur.workspace?.root;
+	const curPath = cur.groups[cur.activeGroup]?.active ?? null;
+	const explicit = cur.settings.activeTicket?.trim();
+	if (explicit) return explicit;
+	const allDocs = untrack(docs);
+	const scopedDocs = root ? allDocs.filter((d) => isInside(root, d.path)) : allDocs;
+	const byFile = ticketForFile(scopedDocs, curPath, root);
+	if (byFile) return byFile;
+	if (curPath) {
+		const openDoc = documents.get(curPath);
+		if (openDoc && !openDoc.binary) {
+			if (curPath.toLowerCase().endsWith(".plan.json")) {
+				const t = parsePlan(openDoc.model.getValue()).plan?.ticket;
+				if (typeof t === "string" && t.trim()) return t.trim();
+			} else if (/\.(md|markdown)$/i.test(curPath)) {
+				const { values } = frontMatter(openDoc.model.getValue());
+				const fromOpen = many(values.ticket)[0] ?? many(values.tickets)[0] ?? "";
+				if (fromOpen) return fromOpen;
+			}
+		}
+	}
+	return listedTicketAtHand(scopedDocs, curPath);
+}
+
 /** Current ticket & extra-context options configured in the Agent panel (honored by `Ctrl+Shift+H` too). */
 export function currentAgentContext(): { includeWork: boolean; ticket: string; workOptions: WorkTextOptions } {
-	const didReset = ensureAgentWorkspace();
-	const picked = didReset ? null : pickedTicket();
-	const auto = resolvedAutoTicket();
+	ensureAgentWorkspace();
+	const ctx = snapshot(agentCtx);
+	const picked = ctx.pickedTicket;
+	const auto = resolvedAutoTicketNow();
 	const ticket = picked === null ? auto : picked;
-	const includeWork = Boolean(ticket) && (picked !== null || withWork());
+	const includeWork = Boolean(ticket) && (picked !== null || untrack(withWork));
 	const root = snapshot(state).workspace?.root ?? "";
-	const safeFiles =
-		didReset || !root
-			? []
-			: attachedFiles().filter((f) => isInside(root, f.path) && isAllowedContextPath(relativeTo(root, f.path)));
+	const safeFiles = !root
+		? []
+		: ctx.attachedFiles.filter((f) => isInside(root, f.path) && isAllowedContextPath(relativeTo(root, f.path)));
 	return {
 		includeWork,
 		ticket,
 		workOptions: {
-			includeSchema: didReset ? false : withSchema(),
-			includeRegistries: didReset ? false : withRegistries(),
-			includeState: didReset ? false : withState(),
+			includeSchema: ctx.withSchema,
+			includeRegistries: ctx.withRegistries,
+			includeState: ctx.withState,
 			ticketFiles: safeFiles,
 		},
 	};
@@ -171,7 +215,7 @@ export function selectionContext(): { label: string; code: string } | null {
 }
 
 async function readForPrompt(path: string): Promise<string | null> {
-	const root = state.workspace?.root;
+	const root = snapshot(state).workspace?.root;
 	if (!root || !isInside(root, path)) return null;
 	const rel = relativeTo(root, path).replace(/\\/g, "/");
 	if (!isAllowedContextPath(rel)) return null;
@@ -233,6 +277,7 @@ function collectGoverningDocsForContext(
 	allDocs: readonly DocFile[],
 	root: string,
 	activeFile: string | null | undefined,
+	gitStatusOverride?: ReturnType<typeof gitStatus>,
 ): GoverningContextItem[] {
 	if (!root) return [];
 	const candidates: string[] = [];
@@ -245,7 +290,7 @@ function collectGoverningDocsForContext(
 		candidates.push(p);
 	};
 	if (activeFile && CODE_FILE_RE.test(activeFile)) addCode(activeFile);
-	const st = gitStatus();
+	const st = gitStatusOverride !== undefined ? gitStatusOverride : gitStatus();
 	if (st) {
 		for (const f of st.files) {
 			if (CODE_FILE_RE.test(f.path)) addCode(f.path);
@@ -307,6 +352,14 @@ type ExtraContextFlags = {
 	withRefTables: boolean;
 };
 
+type PreparedContextSnapshot = {
+	root?: string;
+	allDocs?: readonly DocFile[];
+	activePath?: string | null;
+	activeDoc?: ReturnType<typeof activeDoc>;
+	gitStatus?: ReturnType<typeof gitStatus>;
+};
+
 /**
  * Computes the exact pending context delta (ticket work, Git diff, governing docs, schema,
  * referenced tables, registries, STATE.md, attached files) with content-hash change detection
@@ -316,20 +369,28 @@ async function prepareContextDelta(
 	ticket: string,
 	workOpts: WorkTextOptions,
 	alreadySent: ReadonlyMap<string, string>,
-	flags: ExtraContextFlags = {
-		withGitDiff: withGitDiff(),
-		withGoverningDocs: withGoverningDocs(),
-		withRefTables: withRefTables(),
-	},
+	flags: ExtraContextFlags = (() => {
+		const ctx = snapshot(agentCtx);
+		return {
+			withGitDiff: ctx.withGitDiff,
+			withGoverningDocs: ctx.withGoverningDocs,
+			withRefTables: ctx.withRefTables,
+		};
+	})(),
+	contextSnapshot?: PreparedContextSnapshot,
 ): Promise<PreparedContext> {
-	const root = snapshot(state).workspace?.root ?? "";
-	const all = docs().filter((d) => d.exists && !isCatalog(d));
+	const curState = snapshot(state);
+	const root = contextSnapshot?.root ?? (curState.workspace?.root ?? "");
+	const all = (contextSnapshot?.allDocs ?? untrack(docs)).filter((d) => d.exists && !isCatalog(d));
+	const activePathNow = contextSnapshot !== undefined ? (contextSnapshot.activePath ?? null) : (curState.groups[curState.activeGroup]?.active ?? null);
+	const activeDocNow = contextSnapshot !== undefined ? contextSnapshot.activeDoc : (activePathNow ? documents.get(activePathNow) : undefined);
+	const gitStatusNow = contextSnapshot !== undefined ? contextSnapshot.gitStatus : untrack(gitStatus);
 	const { addSlice, finish } = createContextAccumulator(alreadySent, MAX_WORK_PROMPT_CHARS, cut);
 
 	// 1. Core ticket work (without standalone toggles so each slice is independently hash-tracked across Turn 1 and Turn 2+).
 	const sentByTicket = new Set<string>();
 	if (ticket) {
-		const work = await workPrompt(ticket, { includeSchema: false, includeRegistries: false, includeState: false, ticketFiles: [] });
+		const work = await untrack(() => workPrompt(ticket, { includeSchema: false, includeRegistries: false, includeState: false, ticketFiles: [] }));
 		if (work) {
 			if (addSlice(`ticket:${ticket.toLowerCase()}`, work.label, work.text)) {
 				const wf = workFor(all, ticket);
@@ -350,7 +411,7 @@ async function prepareContextDelta(
 
 	// 1c. Governing docs for active / changed code & SQL files (even across tickets or with Ticket=None).
 	if (flags.withGoverningDocs && root) {
-		const govItems = collectGoverningDocsForContext(all, root, activePath());
+		const govItems = collectGoverningDocsForContext(all, root, activePathNow, gitStatusNow);
 		for (const item of govItems) {
 			const dk = canonical(item.file.path);
 			if (sentByTicket.has(dk)) continue;
@@ -395,7 +456,7 @@ async function prepareContextDelta(
 	// 3b. Targeted schema column tables referenced in the active SSL/SQL editor or selection (Wave 3.1).
 	if (flags.withRefTables) {
 		const sel = selectionContext();
-		const activeModelText = sel?.code || activeDoc()?.model.getValue() || "";
+		const activeModelText = sel?.code || activeDocNow?.model.getValue() || "";
 		const refTables = referencedSchemaTables(activeModelText, all, 6);
 		if (refTables.length) {
 			const blocks: string[] = [];
@@ -444,12 +505,14 @@ async function runAskAbout(
 	includeWork = false,
 	extra?: { ticket?: string; workOptions?: WorkTextOptions },
 ) {
-	const didReset = ensureAgentWorkspace();
-	const path = activePath();
-	const root = snapshot(state).workspace?.root ?? "";
+	ensureAgentWorkspace();
+	const curState = snapshot(state);
+	const path = curState.groups[curState.activeGroup]?.active ?? null;
+	const root = curState.workspace?.root ?? "";
+	const ctx = snapshot(agentCtx);
 	const context = includeSelection ? selectionContext() : null;
 	const file = path ? relativeTo(root, path) : "";
-	const ticket = includeWork ? (extra?.ticket ?? resolvedAutoTicket()) : "";
+	const ticket = includeWork ? (extra?.ticket ?? resolvedAutoTicketNow()) : "";
 	const workOpts = extra?.workOptions ?? {};
 
 	// Reset delta tracker whenever starting a brand-new conversation session or switching workspaces.
@@ -463,11 +526,23 @@ async function runAskAbout(
 		sentContext = { session: chatSession, root: curRoot, hashes: new Map() };
 	}
 
-	const prepared = await prepareContextDelta(ticket, workOpts, sentContext.hashes, {
-		withGitDiff: didReset ? false : withGitDiff(),
-		withGoverningDocs: didReset ? false : withGoverningDocs(),
-		withRefTables: didReset ? false : withRefTables(),
-	});
+	const prepared = await prepareContextDelta(
+		ticket,
+		workOpts,
+		sentContext.hashes,
+		{
+			withGitDiff: ctx.withGitDiff,
+			withGoverningDocs: ctx.withGoverningDocs,
+			withRefTables: ctx.withRefTables,
+		},
+		{
+			root,
+			allDocs: untrack(docs),
+			activePath: path,
+			activeDoc: path ? documents.get(path) : undefined,
+			gitStatus: untrack(gitStatus),
+		},
+	);
 	if (!sameWorkspace()) return;
 	const text = composeQuestion(question, context && { ...context, file }, prepared.text || undefined);
 	const withWhat = [context ? `${file} ${context.label}` : "", ...prepared.labels].filter(Boolean).join("; ");
@@ -508,7 +583,7 @@ export async function askAbout(
 	includeWork = false,
 	extra?: { ticket?: string; workOptions?: WorkTextOptions },
 ) {
-	if (agent.busy || preparingLock) {
+	if (snapshot(agent).busy || preparingLock) {
 		notify("The agent is still working on the last request.");
 		return;
 	}
@@ -746,7 +821,7 @@ function EntryView(props: { entry: Entry }) {
 	const activeTicketForReply = () =>
 		entryTicket() ||
 		state.settings.activeTicket?.trim() ||
-		(pickedTicket() || "").trim() ||
+		(agentCtx.pickedTicket || "").trim() ||
 		ticketForFile(docs(), entryCode(), state.workspace?.root) ||
 		"";
 	const openQuestionsForTicket = createMemo(() => {
@@ -1014,6 +1089,10 @@ async function wordsOf(file: DocFile): Promise<string> {
 const STARTERS = ["Explain what this does, step by step.", "What could go wrong here, and with which input?", "Which cases should a test of this cover?", "Is anything here against the house style?"];
 
 export function AgentPanel() {
+	let unmounted = false;
+	onCleanup(() => {
+		unmounted = true;
+	});
 	onSettled(() => {
 		void resume();
 	});
@@ -1030,29 +1109,42 @@ export function AgentPanel() {
 		() => pendingDraft(),
 		(handed) => {
 			if (!handed) return;
-			setPendingDraft(null);
+			let cancelled = false;
 			void (async () => {
-				const existing = draft().trim();
+				const existing = untrack(draft).trim();
 				if (existing && existing !== handed.text.trim()) {
 					const REPLACE = "Replace draft";
 					const picked = await choose("Replace your current Agent draft?", [REPLACE]);
-					if (picked !== REPLACE) return;
+					if (cancelled) return;
+					if (picked !== REPLACE) {
+						setPendingDraft((cur) => (cur?.seq === handed.seq ? null : cur));
+						return;
+					}
 				}
+				if (cancelled) return;
+				setPendingDraft((cur) => (cur?.seq === handed.seq ? null : cur));
 				if (handed.cleanContext) {
 					setWithSelection(false);
-					setPickedTicket("");
-					setWithSchema(false);
-					setWithRefTables(false);
-					setWithRegistries(false);
-					setWithState(false);
-					setWithGitDiff(false);
-					setWithGoverningDocs(false);
-					setAttachedFiles([]);
+					setAgentCtx((s) => {
+						s.pickedTicket = "";
+						s.withSchema = false;
+						s.withRefTables = false;
+						s.withRegistries = false;
+						s.withState = false;
+						s.withGitDiff = false;
+						s.withGoverningDocs = false;
+						s.attachedFiles = [];
+					});
 				}
 				setDraft(handed.text);
 				setNotSent("");
-				queueMicrotask(() => box?.focus());
+				queueMicrotask(() => {
+					if (!unmounted) box?.focus();
+				});
 			})();
+			return () => {
+				cancelled = true;
+			};
 		},
 	);
 	const [notSent, setNotSent] = createSignal("");
@@ -1080,7 +1172,7 @@ export function AgentPanel() {
 			.sort((a, b) => (a.ticket ?? "").localeCompare(b.ticket ?? "", undefined, { numeric: true })),
 	);
 	const ticket = createMemo(() => {
-		const picked = pickedTicket();
+		const picked = agentCtx.pickedTicket;
 		return picked === null ? autoTicket() : picked;
 	});
 	const activeTicketDoc = createMemo(() => {
@@ -1108,21 +1200,34 @@ export function AgentPanel() {
 	});
 	// Real measured next-turn delta size & token budget (approx 1 token ≈ 4 chars), debounced (350ms) and decoupled from cursor-selection moves.
 	const rawDeltaSrc = createMemo(() => {
+		const rawRoot = state.workspace?.root;
+		if (!rawRoot) return null;
+		const curRoot = canonical(rawRoot);
+		// Wait for ensureAgentWorkspace() to reset agentCtx before kicking off an initial or cross-workspace query.
+		if (agentCtx.root !== curRoot) return null;
 		const targetTicket = ticket();
-		const sendWork = Boolean(targetTicket) && (pickedTicket() !== null || withWork());
-		const files = attachedFiles();
+		const sendWork = Boolean(targetTicket) && (agentCtx.pickedTicket !== null || withWork());
+		const files = agentCtx.attachedFiles.map((f) => ({ path: f.path, rel: f.rel }));
+		const allDocs = docs();
+		const curPath = activePath() ?? "";
+		const curDoc = activeDoc();
+		const gitSt = gitStatus();
 		return {
-			root: state.workspace?.root ?? "",
+			root: rawRoot,
 			ticket: sendWork ? targetTicket : "",
-			schema: withSchema(),
-			refTables: withRefTables(),
-			refTableKey: withRefTables() ? detectedRefTables().map((d) => canonical(d.path)).join(",") : "",
-			regs: withRegistries(),
-			st: withState(),
-			gitDiff: withGitDiff(),
-			govDocs: withGoverningDocs(),
+			schema: agentCtx.withSchema,
+			refTables: agentCtx.withRefTables,
+			refTableKey: agentCtx.withRefTables ? detectedRefTables().map((d) => canonical(d.path)).join(",") : "",
+			regs: agentCtx.withRegistries,
+			st: agentCtx.withState,
+			gitDiff: agentCtx.withGitDiff,
+			govDocs: agentCtx.withGoverningDocs,
 			gitVer: gitVersion(),
-			curPath: activePath() ?? "",
+			gitStatusSnapshot: gitSt,
+			docsSnapshot: allDocs,
+			docsSig: `${allDocs.length}:${allDocs.map((d) => `${d.path}|${d.exists ? 1 : 0}|${d.status ?? ""}|${d.rows ?? ""}`).join("\n")}`,
+			curPath,
+			activeDocSnapshot: curDoc,
 			files,
 			filesKey: files.map((f) => `${f.path}|${f.rel}`).join("\n"),
 			tree: state.treeVersion,
@@ -1131,11 +1236,16 @@ export function AgentPanel() {
 			session: agent.chatSession ?? "",
 		};
 	});
-	const [debouncedDeltaSrc, setDebouncedDeltaSrc] = createSignal<ReturnType<typeof rawDeltaSrc> | null>(null);
+	const [debouncedDeltaSrc, setDebouncedDeltaSrc] = createSignal<ReturnType<typeof rawDeltaSrc>>(null);
 	let deltaSrcInitialized = false;
 	createEffect(
 		() => rawDeltaSrc(),
 		(next) => {
+			if (!next) {
+				deltaSrcInitialized = false;
+				setDebouncedDeltaSrc(null);
+				return;
+			}
 			if (!deltaSrcInitialized) {
 				deltaSrcInitialized = true;
 				setDebouncedDeltaSrc(next);
@@ -1145,27 +1255,36 @@ export function AgentPanel() {
 			return () => clearTimeout(timer);
 		},
 	);
-	const [measuredDelta] = createAsyncQuery(debouncedDeltaSrc, async (src) => {
-		if (!src.root) return { chars: 0, breakdown: [] as PreparedContext["breakdown"] };
-		const curRoot = canonical(src.root);
-		const already = sentContext.session === (src.session || null) && sentContext.root === curRoot ? sentContext.hashes : new Map<string, string>();
-		const prepared = await prepareContextDelta(
-			src.ticket,
-			{
-				includeSchema: src.schema,
-				includeRegistries: src.regs,
-				includeState: src.st,
-				ticketFiles: src.files,
-			},
-			already,
-			{
-				withGitDiff: src.gitDiff,
-				withGoverningDocs: src.govDocs,
-				withRefTables: src.refTables,
-			},
-		);
-		return { chars: prepared.text.length, breakdown: prepared.breakdown };
-	});
+	const [measuredDelta] = createAsyncQuery(debouncedDeltaSrc, (src) =>
+		untrack(async () => {
+			if (!src.root) return { chars: 0, breakdown: [] as PreparedContext["breakdown"] };
+			const curRoot = canonical(src.root);
+			const already = sentContext.session === (src.session || null) && sentContext.root === curRoot ? sentContext.hashes : new Map<string, string>();
+			const prepared = await prepareContextDelta(
+				src.ticket,
+				{
+					includeSchema: src.schema,
+					includeRegistries: src.regs,
+					includeState: src.st,
+					ticketFiles: src.files,
+				},
+				already,
+				{
+					withGitDiff: src.gitDiff,
+					withGoverningDocs: src.govDocs,
+					withRefTables: src.refTables,
+				},
+				{
+					root: src.root,
+					allDocs: src.docsSnapshot,
+					activePath: src.curPath || null,
+					activeDoc: src.activeDocSnapshot,
+					gitStatus: src.gitStatusSnapshot,
+				},
+			);
+			return { chars: prepared.text.length, breakdown: prepared.breakdown };
+		}),
+	);
 	const preSendEstimate = createMemo(() => {
 		contentEdited();
 		selectionMoved();
@@ -1195,9 +1314,10 @@ export function AgentPanel() {
 		return { tokens, chars, warn, summary: parts.length ? parts.join(" + ") : "No context attached yet" };
 	});
 	const pickContextFile = async () => {
-		const root = state.workspace?.root;
+		const root = snapshot(state).workspace?.root;
 		if (!root) return notify("Open a folder first.");
-		const already = new Set(attachedFiles().map((f) => canonical(f.path)));
+		const curAttached = snapshot(agentCtx).attachedFiles;
+		const already = new Set(curAttached.map((f) => canonical(f.path)));
 		const ticketFiles = (activeTicketDoc()?.ticketFiles ?? []).filter(
 			(f) => !already.has(canonical(f.path)) && isInside(root, f.path) && isAllowedContextPath(relativeTo(root, f.path)),
 		);
@@ -1206,17 +1326,19 @@ export function AgentPanel() {
 			root,
 			pinned: ticketFiles.map((f) => ({ path: f.path, rel: f.rel, detail: f.rel })),
 			pinnedLabel: ticket() || "Ticket",
-			exclude: attachedFiles().map((f) => f.path),
+			exclude: curAttached.map((f) => f.path),
 		});
-		if (!picked || !isInside(root, picked.path)) return;
+		if (!picked || snapshot(state).workspace?.root !== root || !isInside(root, picked.path)) return;
 		const rel = relativeTo(root, picked.path).replace(/\\/g, "/");
 		if (!isAllowedContextPath(rel)) {
 			notify("Hidden files and dotfiles cannot be attached to Agent context.", "error");
 			return;
 		}
-		setAttachedFiles((prev) =>
-			prev.some((f) => canonical(f.path) === canonical(picked.path)) ? prev : [...prev, { path: picked.path, rel }],
-		);
+		setAgentCtx((s) => {
+			if (!s.attachedFiles.some((f) => canonical(f.path) === canonical(picked.path))) {
+				s.attachedFiles.push({ path: picked.path, rel });
+			}
+		});
 	};
 	const modelOf = (ref: string) => agent.models.find((m) => modelRef(m) === ref);
 	const usable = () => agent.models.filter((m) => m.tools);
@@ -1243,24 +1365,25 @@ export function AgentPanel() {
 	);
 
 	const send = () => {
-		const result = composerSend(draft(), agent.busy || preparingLock);
+		const result = composerSend(untrack(draft), snapshot(agent).busy || preparingLock);
 		setDraft(result.draft);
 		setNotSent(result.why ?? "");
 		if (result.send === null) return;
 		preparingLock = true;
 		setPreparing(true);
 		toEnd();
-		const didReset = ensureAgentWorkspace();
-		const targetTicket = didReset ? resolvedAutoTicket() : ticket();
-		const sendWork = Boolean(targetTicket) && ((!didReset && pickedTicket() !== null) || withWork());
+		ensureAgentWorkspace();
+		const ctx = snapshot(agentCtx);
+		const targetTicket = ctx.pickedTicket === null ? resolvedAutoTicketNow() : ctx.pickedTicket;
+		const sendWork = Boolean(targetTicket) && (ctx.pickedTicket !== null || untrack(withWork));
 		void safely("The question was not sent", () =>
-			runAskAbout(result.send!, withSelection(), sendWork, {
+			runAskAbout(result.send!, untrack(withSelection), sendWork, {
 				ticket: targetTicket,
 				workOptions: {
-					includeSchema: didReset ? false : withSchema(),
-					includeRegistries: didReset ? false : withRegistries(),
-					includeState: didReset ? false : withState(),
-					ticketFiles: didReset ? [] : attachedFiles(),
+					includeSchema: ctx.withSchema,
+					includeRegistries: ctx.withRegistries,
+					includeState: ctx.withState,
+					ticketFiles: ctx.attachedFiles,
 				},
 			}),
 		).finally(() => {
@@ -1468,8 +1591,10 @@ export function AgentPanel() {
 	const runDocDriftStarter = () => {
 		const text = docDriftStarterPrompt();
 		if (!text) return;
-		setWithGitDiff(true);
-		setWithGoverningDocs(true);
+		setAgentCtx((s) => {
+			s.withGitDiff = true;
+			s.withGoverningDocs = true;
+		});
 		setWithSelection(false);
 		setDraft(text);
 		setNotSent("");
@@ -1483,8 +1608,10 @@ export function AgentPanel() {
 	const runReleaseNotesStarter = async () => {
 		const key = ticket();
 		if (!key) return;
-		setWithGitDiff(true);
-		setWithState(true);
+		setAgentCtx((s) => {
+			s.withGitDiff = true;
+			s.withState = true;
+		});
 		const commits = await backend.gitTicketLog(key, 25).catch(() => []);
 		const basePrompt = releaseNotesStarterPrompt();
 		let fullPrompt = basePrompt;
@@ -1538,7 +1665,7 @@ export function AgentPanel() {
 			contextual.push({
 				label: "Review active SSL against spec & decisions",
 				run: () => {
-					if (govDocs.length > 0) setWithGoverningDocs(true);
+					if (govDocs.length > 0) setAgentCtx((s) => { s.withGoverningDocs = true; });
 					setDraft(
 						`Review \`${relSsl}\` against its governing spec, plan, and settled project decisions. List any behavioral mismatches, missing guardrails, or house-style issues with exact line references.`,
 					);
@@ -1566,7 +1693,7 @@ export function AgentPanel() {
 			contextual.push({
 				label: "Generate test cases from active spec / ticket",
 				run: () => {
-					if (!ticket() && govDocs.length > 0) setWithGoverningDocs(true);
+					if (!ticket() && govDocs.length > 0) setAgentCtx((s) => { s.withGoverningDocs = true; });
 					const targetLabel = ticket()
 						? `${ticket()} and its linked specs`
 						: activeDocMeta?.title || baseName(curPath) || "the active spec";
@@ -1820,19 +1947,19 @@ export function AgentPanel() {
 							<select
 								class="agent-ticket-select"
 								aria-label="Ticket context for the agent"
-								value={pickedTicket() === null ? "__auto__" : pickedTicket()!}
+								value={agentCtx.pickedTicket === null ? "__auto__" : agentCtx.pickedTicket}
 								onChange={(e) => {
 									const v = e.currentTarget.value;
 									if (v === "__auto__") {
-										setPickedTicket(null);
+										setAgentCtx((s) => { s.pickedTicket = null; });
 										setWithWork(true);
 										remember("agent.withWork", "yes");
 									} else if (v === "") {
-										setPickedTicket("");
+										setAgentCtx((s) => { s.pickedTicket = ""; });
 										setWithWork(false);
 										remember("agent.withWork", "no");
 									} else {
-										setPickedTicket(v);
+										setAgentCtx((s) => { s.pickedTicket = v; });
 										setWithWork(true);
 										remember("agent.withWork", "yes");
 									}
@@ -1850,7 +1977,7 @@ export function AgentPanel() {
 								</For>
 							</select>
 						</label>
-						<Show when={pickedTicket() === null && autoTicket()}>
+						<Show when={agentCtx.pickedTicket === null && autoTicket()}>
 							<label class="check agent-work-toggle" title={`Include ${autoTicket()} context on the first turn`}>
 								<input
 									type="checkbox"
@@ -1864,71 +1991,71 @@ export function AgentPanel() {
 				</Show>
 				<Show when={Boolean(state.workspace)}>
 					<div class="agent-ctx-chips" role="group" aria-label="Optional extra project context">
-						<Show when={detectedRefTables().length > 0 || withRefTables()}>
+						<Show when={detectedRefTables().length > 0 || agentCtx.withRefTables}>
 							<button
 								type="button"
-								class={["agent-ctx-chip", { active: withRefTables() }]}
-								aria-pressed={withRefTables() ? "true" : "false"}
+								class={["agent-ctx-chip", { active: agentCtx.withRefTables }]}
+								aria-pressed={agentCtx.withRefTables ? "true" : "false"}
 								title={
 									detectedRefTables().length
 										? `Inject exact column definitions for schema tables referenced in this file: ${detectedRefTables().map((d) => d.title || d.name).join(", ")}`
 										: "Table schema injection is active (0 tables detected on the current tab). Click to disable."
 								}
-								onClick={() => setWithRefTables((v) => !v)}
+								onClick={() => setAgentCtx((s) => { s.withRefTables = !s.withRefTables; })}
 							>
 								+ Tables ({detectedRefTables().length})
 							</button>
 						</Show>
 						<button
 							type="button"
-							class={["agent-ctx-chip", { active: withSchema() }]}
-							aria-pressed={withSchema() ? "true" : "false"}
+							class={["agent-ctx-chip", { active: agentCtx.withSchema }]}
+							aria-pressed={agentCtx.withSchema ? "true" : "false"}
 							title="Include project schema summaries in the next turn"
-							onClick={() => setWithSchema((v) => !v)}
+							onClick={() => setAgentCtx((s) => { s.withSchema = !s.withSchema; })}
 						>
 							+ Schema
 						</button>
 						<button
 							type="button"
-							class={["agent-ctx-chip", { active: withRegistries() }]}
-							aria-pressed={withRegistries() ? "true" : "false"}
+							class={["agent-ctx-chip", { active: agentCtx.withRegistries }]}
+							aria-pressed={agentCtx.withRegistries ? "true" : "false"}
 							title={ticket() ? `Include CSV registry rows mentioning ${ticket()}` : "Include project CSV registry summary"}
-							onClick={() => setWithRegistries((v) => !v)}
+							onClick={() => setAgentCtx((s) => { s.withRegistries = !s.withRegistries; })}
 						>
 							+ Registries
 						</button>
 						<button
 							type="button"
-							class={["agent-ctx-chip", { active: withState() }]}
-							aria-pressed={withState() ? "true" : "false"}
+							class={["agent-ctx-chip", { active: agentCtx.withState }]}
+							aria-pressed={agentCtx.withState ? "true" : "false"}
 							title="Include project STATE.md summary"
-							onClick={() => setWithState((v) => !v)}
+							onClick={() => setAgentCtx((s) => { s.withState = !s.withState; })}
 						>
 							+ STATE.md
 						</button>
 						<button
 							type="button"
-							class={["agent-ctx-chip", { active: withGitDiff() }]}
-							aria-pressed={withGitDiff() ? "true" : "false"}
+							class={["agent-ctx-chip", { active: agentCtx.withGitDiff }]}
+							aria-pressed={agentCtx.withGitDiff ? "true" : "false"}
 							title={
 								gitStatus()
 									? `Include compact staged + unstaged Git diff (${gitStatus()!.files.length} changed ${gitStatus()!.files.length === 1 ? "file" : "files"})`
 									: "Include compact staged + unstaged Git diff (no git repository detected)"
 							}
-							onClick={() => setWithGitDiff((v) => !v)}
+							onClick={() => setAgentCtx((s) => { s.withGitDiff = !s.withGitDiff; })}
 						>
 							+ Git diff
 						</button>
 						<button
 							type="button"
-							class={["agent-ctx-chip", { active: withGoverningDocs() }]}
-							aria-pressed={withGoverningDocs() ? "true" : "false"}
+							class={["agent-ctx-chip", { active: agentCtx.withGoverningDocs }]}
+							aria-pressed={agentCtx.withGoverningDocs ? "true" : "false"}
 							title={
 								detectedGoverningDocs().length
 									? `Include compact excerpts of governing docs for active/changed code files: ${detectedGoverningDocs().map((g) => g.file.title || g.file.name).join(", ")}`
 									: "Include compact excerpts of governing docs for active/changed code files (0 detected right now)"
 							}
-							onClick={() => setWithGoverningDocs((v) => !v)}
+							onClick={() => setAgentCtx((s) => { s.withGoverningDocs = !s.withGoverningDocs; })}
 						>
 							+ Governing docs{detectedGoverningDocs().length ? ` (${detectedGoverningDocs().length})` : ""}
 						</button>
@@ -1940,13 +2067,13 @@ export function AgentPanel() {
 						>
 							+ File…
 						</button>
-						<For each={attachedFiles()}>
+						<For each={agentCtx.attachedFiles}>
 							{(tf) => (
 								<button
 									type="button"
 									class="agent-ctx-chip active"
 									title={`Remove ${tf.rel} from prompt context`}
-									onClick={() => setAttachedFiles((prev) => prev.filter((x) => x.path !== tf.path))}
+									onClick={() => setAgentCtx((s) => { s.attachedFiles = s.attachedFiles.filter((x) => x.path !== tf.path); })}
 								>
 									<span>{tf.rel.split("/").pop()}</span>
 									<Icon name="close" />

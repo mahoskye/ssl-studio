@@ -173,11 +173,17 @@ export function GraphView() {
 	const [filter, setFilter] = createSignal<Filter>({ mode: "all", depth: 1 });
 	const [depthDraft, setDepthDraft] = createSignal(String(untrack(filter).depth));
 	createEffect(
-		() => filter().depth,
-		(d) => {
-			setDepthDraft(String(d));
+		() => (filter().mode === "around" ? String(filter().depth) : null),
+		(v) => {
+			if (v !== null) setDepthDraft(v);
 		},
 	);
+	const commitDepth = (el: HTMLInputElement) => {
+		const next = Math.max(1, Math.min(6, Math.floor(Number(el.value)) || 1));
+		setDepthDraft(String(next));
+		el.value = String(next);
+		setFilter((f) => (f.depth === next ? f : { ...f, depth: next }));
+	};
 	const [layout, setLayout] = createSignal<{ boxes: Box[]; lines: Line[]; width: number; height: number; key: string } | null>(null);
 	const [view, setView] = createSignal({ x: 20, y: 20, scale: 1 });
 	const [mode, setMode] = createSignal<Mode>(recall(MODE_KEY) === "list" ? "list" : "graph");
@@ -219,12 +225,26 @@ export function GraphView() {
 	const [impactOpen, setImpactOpen] = createSignal(false);
 	const [impactHops, setImpactHops] = createSignal(4);
 	const [hopsDraft, setHopsDraft] = createSignal(String(untrack(impactHops)));
+	let appliedHops = untrack(impactHops);
 	createEffect(
-		() => impactHops(),
-		(h) => {
-			setHopsDraft(String(h));
+		() => (impactOpen() ? String(impactHops()) : null),
+		(v) => {
+			if (v !== null) {
+				appliedHops = Number(v);
+				setHopsDraft(v);
+			}
 		},
 	);
+	const commitHops = (el: HTMLInputElement) => {
+		const next = Math.max(1, Math.min(6, Math.floor(Number(el.value)) || 4));
+		setHopsDraft(String(next));
+		el.value = String(next);
+		if (next === appliedHops) return;
+		appliedHops = next;
+		setImpactHops(next);
+		const seeds = impactSeeds();
+		if (seeds) runImpactAnalysis(seeds.ids, seeds.label, { ticketKey: seeds.ticketKey, hops: next });
+	};
 	const [impactSeeds, setImpactSeeds] = createSignal<{ ids: string[]; label: string; ticketKey?: string } | null>(null);
 	const [impactReport, setImpactReport] = createSignal<ImpactReport | null>(null);
 	const [impactScanning, setImpactScanning] = createSignal(false);
@@ -1768,12 +1788,8 @@ export function GraphView() {
 							max="6"
 							value={depthDraft()}
 							onInput={(e) => setDepthDraft(e.currentTarget.value)}
-							onChange={(e) => {
-								const next = Math.max(1, Math.min(6, Math.floor(Number(e.currentTarget.value)) || 1));
-								setDepthDraft(String(next));
-								e.currentTarget.value = String(next);
-								setFilter((f) => ({ ...f, depth: next }));
-							}}
+							onChange={(e) => commitDepth(e.currentTarget)}
+							onBlur={(e) => commitDepth(e.currentTarget)}
 						/>
 					</label>
 					<select aria-label="Which way from the focus" title="What the focus calls, what calls it, or both" value={filter().direction ?? "both"} onChange={(e) => setFilter({ ...filter(), direction: e.currentTarget.value as Direction })}>
@@ -2496,7 +2512,7 @@ export function GraphView() {
 					</div>
 				</Show>
 			</Show>
-			<Show when={impactOpen() && impactReport()} keyed>
+			<Show when={impactOpen() && impactReport()}>
 				{(report) => {
 					const targetTicket = () => impactSeeds()?.ticketKey?.trim() || state.settings.activeTicket?.trim() || ticketHighlightKey()?.trim() || "";
 					const renderImpactRow = (n: ImpactNode) => (
@@ -2562,7 +2578,7 @@ export function GraphView() {
 					return (
 						<aside
 							role="dialog"
-							aria-label={`Impact analysis for ${report.targetLabel || "selection"}`}
+							aria-label={`Impact analysis for ${report().targetLabel || "selection"}`}
 							onKeyDown={(e) => {
 								if (e.key === "Escape") {
 									e.stopPropagation();
@@ -2609,9 +2625,9 @@ export function GraphView() {
 											"text-overflow": "ellipsis",
 											"white-space": "nowrap",
 										}}
-										title={report.targetLabel}
+										title={report().targetLabel}
 									>
-										{report.targetLabel || plural(report.seedScripts.length, "script")}
+										{report().targetLabel || plural(report().seedScripts.length, "script")}
 									</div>
 								</div>
 								<label
@@ -2632,14 +2648,8 @@ export function GraphView() {
 										value={hopsDraft()}
 										style={{ width: "42px", padding: "2px 4px", "font-size": "var(--text-xs)" }}
 										onInput={(e) => setHopsDraft(e.currentTarget.value)}
-										onChange={(e) => {
-											const next = Math.max(1, Math.min(6, Math.floor(Number(e.currentTarget.value)) || 4));
-											setHopsDraft(String(next));
-											e.currentTarget.value = String(next);
-											setImpactHops(next);
-											const seeds = impactSeeds();
-											if (seeds) runImpactAnalysis(seeds.ids, seeds.label, { ticketKey: seeds.ticketKey, hops: next });
-										}}
+										onChange={(e) => commitHops(e.currentTarget)}
+										onBlur={(e) => commitHops(e.currentTarget)}
 									/>
 								</label>
 								<button
@@ -2696,16 +2706,16 @@ export function GraphView() {
 								}}
 							>
 								<span class="graph-list-ticket-badge">
-									{plural(report.upstream.length, "caller")} ({plural(report.entryPoints.length, "entry", "entries")})
+									{plural(report().upstream.length, "caller")} ({plural(report().entryPoints.length, "entry", "entries")})
 								</span>
 								<span class="graph-list-docs" style={{ "margin-left": "0" }}>
-									{plural(report.downstream.length, "callee")}
+									{plural(report().downstream.length, "callee")}
 								</span>
 								<span class="graph-list-docs" style={{ "margin-left": "0" }}>
-									{plural(report.dataSources.length, "data source")}
+									{plural(report().dataSources.length, "data source")}
 								</span>
 								<span class="graph-list-docs" style={{ "margin-left": "0" }}>
-									{plural(report.affectedScripts.length, "script")}
+									{plural(report().affectedScripts.length, "script")}
 								</span>
 							</div>
 
@@ -2713,10 +2723,10 @@ export function GraphView() {
 								<section>
 									<h4 style={{ margin: "0 0 6px", "font-size": "var(--text-sm)", "font-weight": "600", color: "var(--strong-fg)", display: "flex", "align-items": "center", gap: "5px" }}>
 										<Icon name="arrow-up" />
-										<span>Upstream Callers ({report.upstream.length})</span>
+										<span>Upstream Callers ({report().upstream.length})</span>
 									</h4>
-									<Show when={report.upstreamByHop.length > 0} fallback={<p class="hint" style={{ margin: "0" }}>No upstream callers in the call graph.</p>}>
-										<For each={report.upstreamByHop}>
+									<Show when={report().upstreamByHop.length > 0} fallback={<p class="hint" style={{ margin: "0" }}>No upstream callers in the call graph.</p>}>
+										<For each={report().upstreamByHop}>
 											{(group) => (
 												<div style={{ "margin-bottom": "6px" }}>
 													<div class="hint" style={{ "font-size": "var(--text-xs)", "font-weight": "600", "margin-bottom": "2px" }}>
@@ -2734,10 +2744,10 @@ export function GraphView() {
 								<section>
 									<h4 style={{ margin: "0 0 6px", "font-size": "var(--text-sm)", "font-weight": "600", color: "var(--strong-fg)", display: "flex", "align-items": "center", gap: "5px" }}>
 										<Icon name="arrow-down" />
-										<span>Downstream Callees ({report.downstream.length})</span>
+										<span>Downstream Callees ({report().downstream.length})</span>
 									</h4>
-									<Show when={report.downstreamByHop.length > 0} fallback={<p class="hint" style={{ margin: "0" }}>No downstream procedure callees.</p>}>
-										<For each={report.downstreamByHop}>
+									<Show when={report().downstreamByHop.length > 0} fallback={<p class="hint" style={{ margin: "0" }}>No downstream procedure callees.</p>}>
+										<For each={report().downstreamByHop}>
 											{(group) => (
 												<div style={{ "margin-bottom": "6px" }}>
 													<div class="hint" style={{ "font-size": "var(--text-xs)", "font-weight": "600", "margin-bottom": "2px" }}>
@@ -2752,14 +2762,14 @@ export function GraphView() {
 									</Show>
 								</section>
 
-								<Show when={report.dataSources.length > 0}>
+								<Show when={report().dataSources.length > 0}>
 									<section>
 										<h4 style={{ margin: "0 0 6px", "font-size": "var(--text-sm)", "font-weight": "600", color: "var(--strong-fg)", display: "flex", "align-items": "center", gap: "5px" }}>
 											<Icon name="database" />
-											<span>Data Sources ({report.dataSources.length})</span>
+											<span>Data Sources ({report().dataSources.length})</span>
 										</h4>
 										<ul style={{ "list-style": "none", margin: "0", padding: "0" }}>
-											<For each={report.dataSources}>{renderImpactRow}</For>
+											<For each={report().dataSources}>{renderImpactRow}</For>
 										</ul>
 									</section>
 								</Show>
@@ -2767,10 +2777,10 @@ export function GraphView() {
 								<section>
 									<h4 style={{ margin: "0 0 6px", "font-size": "var(--text-sm)", "font-weight": "600", color: "var(--strong-fg)", display: "flex", "align-items": "center", gap: "5px" }}>
 										<Icon name="table" />
-										<span>Schema Tables ({report.schemaTables?.length ?? 0})</span>
+										<span>Schema Tables ({report().schemaTables?.length ?? 0})</span>
 									</h4>
 									<Show
-										when={(report.schemaTables?.length ?? 0) > 0}
+										when={(report().schemaTables?.length ?? 0) > 0}
 										fallback={
 											<p class="hint" style={{ margin: "0" }}>
 												{impactScanning() ? "Scanning referenced schema tables…" : "No documented schema tables referenced."}
@@ -2778,7 +2788,7 @@ export function GraphView() {
 										}
 									>
 										<div style={{ display: "flex", "flex-wrap": "wrap", gap: "4px" }}>
-											<For each={report.schemaTables ?? []}>
+											<For each={report().schemaTables ?? []}>
 												{(tbl) => (
 													<button
 														type="button"
@@ -2799,11 +2809,11 @@ export function GraphView() {
 								<section>
 									<h4 style={{ margin: "0 0 6px", "font-size": "var(--text-sm)", "font-weight": "600", color: "var(--strong-fg)", display: "flex", "align-items": "center", gap: "5px" }}>
 										<Icon name="file" />
-										<span>Governing Docs &amp; Tickets ({report.governingDocs?.length ?? 0})</span>
+										<span>Governing Docs &amp; Tickets ({report().governingDocs?.length ?? 0})</span>
 									</h4>
-									<Show when={(report.governingDocs?.length ?? 0) > 0} fallback={<p class="hint" style={{ margin: "0" }}>No linked specs, decisions, or tickets.</p>}>
+									<Show when={(report().governingDocs?.length ?? 0) > 0} fallback={<p class="hint" style={{ margin: "0" }}>No linked specs, decisions, or tickets.</p>}>
 										<ul style={{ "list-style": "none", margin: "0", padding: "0", display: "flex", "flex-direction": "column", gap: "4px" }}>
-											<For each={report.governingDocs ?? []}>
+											<For each={report().governingDocs ?? []}>
 												{(doc) => (
 													<li style={{ display: "flex", "align-items": "center", gap: "6px", "font-size": "var(--text-sm)" }}>
 														<button
@@ -2811,7 +2821,7 @@ export function GraphView() {
 															class="link"
 															style={{ "min-width": "0", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap", "text-align": "left" }}
 															title={`Open ${rel(doc.path)}`}
-															onClick={() => void openGoverningDoc(doc.path, report.seedScripts[0])}
+															onClick={() => void openGoverningDoc(doc.path, report().seedScripts[0])}
 														>
 															{doc.label}
 														</button>
@@ -2827,14 +2837,14 @@ export function GraphView() {
 									</Show>
 								</section>
 
-								<Show when={(report.testScripts?.length ?? 0) > 0}>
+								<Show when={(report().testScripts?.length ?? 0) > 0}>
 									<section>
 										<h4 style={{ margin: "0 0 6px", "font-size": "var(--text-sm)", "font-weight": "600", color: "var(--strong-fg)", display: "flex", "align-items": "center", gap: "5px" }}>
 											<Icon name="beaker" />
-											<span>Linked Test Scripts ({report.testScripts!.length})</span>
+											<span>Linked Test Scripts ({report().testScripts?.length ?? 0})</span>
 										</h4>
 										<ul style={{ "list-style": "none", margin: "0", padding: "0", display: "flex", "flex-direction": "column", gap: "4px" }}>
-											<For each={report.testScripts!}>
+											<For each={report().testScripts ?? []}>
 												{(ts) => (
 													<li style={{ "font-size": "var(--text-sm)" }}>
 														<button

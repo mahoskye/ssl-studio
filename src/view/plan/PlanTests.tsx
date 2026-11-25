@@ -3,7 +3,7 @@
 // detail of a test case (scenario, step, linked journey, starting setup,
 // expected outcome, and sample data/notes — stored in `.plan.json`, undoable
 // via Ctrl+Z), and inspect or customize any flowchart journey.
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show, untrack } from "solid-js";
 import { baseName } from "../../shared/paths";
 import { Icon } from "../Icon";
 import { IconButton } from "../panels/Rows";
@@ -56,13 +56,27 @@ export function TestCaseForm(props: {
 	onCancel: () => void;
 	onDelete?: () => void;
 }) {
-	const [title, setTitle] = createSignal(() => props.initial?.title ?? "");
-	const [nodeId, setNodeId] = createSignal(() => props.initial?.node ?? "");
-	const [journey, setJourney] = createSignal(() => (props.initial?.journey ? String(props.initial.journey) : ""));
-	const [given, setGiven] = createSignal(() => props.initial?.given ?? "");
-	const [expect, setExpect] = createSignal(() => props.initial?.expect ?? "");
-	const [notes, setNotes] = createSignal(() => props.initial?.notes ?? "");
-	const [notesOpen, setNotesOpen] = createSignal(() => Boolean(props.initial?.notes?.trim()));
+	const [title, setTitle] = createSignal(untrack(() => props.initial?.title ?? ""));
+	const [nodeId, setNodeId] = createSignal(untrack(() => props.initial?.node ?? ""));
+	const [journey, setJourney] = createSignal(untrack(() => (props.initial?.journey ? String(props.initial.journey) : "")));
+	const [given, setGiven] = createSignal(untrack(() => props.initial?.given ?? ""));
+	const [expect, setExpect] = createSignal(untrack(() => props.initial?.expect ?? ""));
+	const [notes, setNotes] = createSignal(untrack(() => props.initial?.notes ?? ""));
+	const [notesOpen, setNotesOpen] = createSignal(untrack(() => Boolean(props.initial?.notes?.trim())));
+	let stepSelect: HTMLSelectElement | undefined;
+	let journeySelect: HTMLSelectElement | undefined;
+	createEffect(
+		() => [props.nodes, nodeId()] as const,
+		([, v]) => {
+			if (stepSelect && stepSelect.value !== v) stepSelect.value = v;
+		},
+	);
+	createEffect(
+		() => [props.paths, journey()] as const,
+		([, v]) => {
+			if (journeySelect && journeySelect.value !== v) journeySelect.value = v;
+		},
+	);
 
 	const selectedJourneySummary = createMemo(() => {
 		const n = journey() ? Number.parseInt(journey(), 10) : 0;
@@ -112,10 +126,14 @@ export function TestCaseForm(props: {
 						<Show when={props.nodes.length > 0}>
 							<label class="plan-test-attach-row">
 								<span>Step</span>
-								<select value={nodeId()} onChange={(e) => setNodeId(e.currentTarget.value)}>
+								<select
+									ref={(el) => (stepSelect = el)}
+									value={nodeId()}
+									onChange={(e) => setNodeId(e.currentTarget.value)}
+								>
 									<option value="">Whole plan</option>
-									<For each={props.nodes}>
-										{(n) => <option value={n.id}>{shortPhrase(n.text.trim() || n.id, 40)}</option>}
+									<For each={props.nodes} keyed={(n) => n.id}>
+										{(n) => <option value={n().id}>{shortPhrase(n().text.trim() || n().id, 40)}</option>}
 									</For>
 								</select>
 							</label>
@@ -123,12 +141,16 @@ export function TestCaseForm(props: {
 						<Show when={props.paths.length > 0}>
 							<label class="plan-test-attach-row">
 								<span>Journey</span>
-								<select value={journey()} onChange={(e) => setJourney(e.currentTarget.value)}>
+								<select
+									ref={(el) => (journeySelect = el)}
+									value={journey()}
+									onChange={(e) => setJourney(e.currentTarget.value)}
+								>
 									<option value="">None</option>
-									<For each={props.paths}>
+									<For each={props.paths} keyed={(p) => p.steps.map((s) => `${s.id}:${s.label ?? ""}`).join("->")}>
 										{(p, idx) => (
 											<option value={String(idx() + 1)}>
-												{journeyOptionLabel(p, props.paths, props.plan, idx())}
+												{journeyOptionLabel(p(), props.paths, props.plan, idx())}
 											</option>
 										)}
 									</For>
@@ -355,12 +377,15 @@ export function TestCaseList(props: {
 				}
 			>
 				<div class="plan-test-cases">
-					<For each={props.cases}>
+					<For each={props.cases} keyed={(item) => item.id}>
 						{(item) => {
-							const isEditing = () => editingId() === item.id;
-							const isOpen = () => expandedId() === item.id;
-							const stepName = () => nodeText(item.node);
-							const journeyIdx = () => (item.journey && item.journey >= 1 && item.journey <= props.paths.length ? item.journey - 1 : null);
+							const isEditing = () => editingId() === item().id;
+							const isOpen = () => expandedId() === item().id;
+							const stepName = () => nodeText(item().node);
+							const journeyIdx = () => {
+								const j = item().journey;
+								return j && j >= 1 && j <= props.paths.length ? j - 1 : null;
+							};
 							const journeyActive = () => journeyIdx() !== null && props.activePathIndex === journeyIdx();
 							return (
 								<Show
@@ -373,41 +398,45 @@ export function TestCaseList(props: {
 													class="plan-test-case-toggle"
 													aria-expanded={isOpen() ? "true" : "false"}
 													title={isOpen() ? "Hide test details" : "Click to inspect or modify test details"}
-													onClick={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
+													onClick={() => {
+														const id = item().id;
+														setExpandedId((cur) => (cur === id ? null : id));
+													}}
 												>
 													<Icon name={isOpen() ? "chevron-down" : "chevron-right"} class="plan-test-case-chev" />
-													<span class="plan-test-case-title">{item.title}</span>
+													<span class="plan-test-case-title">{item().title}</span>
 												</button>
 												<div class="plan-test-case-btns">
 													<IconButton
-														label={`Edit test case ${item.title}`}
+														label={`Edit test case ${item().title}`}
 														title="Edit test details"
 														icon="note"
 														onClick={() => {
+															const id = item().id;
 															setAdding(null);
-															setExpandedId(item.id);
-															setEditingId(item.id);
+															setExpandedId(id);
+															setEditingId(id);
 														}}
 													/>
 													<IconButton
-														label={`Remove test case ${item.title}`}
+														label={`Remove test case ${item().title}`}
 														title="Delete test case"
 														icon="trash"
-														onClick={() => props.onRemoveTestCase(item.id)}
+														onClick={() => props.onRemoveTestCase(item().id)}
 													/>
 												</div>
 											</div>
 
-											<Show when={!isOpen() && (item.expect || item.journey || (!props.hideStepBadge && stepName()))}>
-												<div class="plan-test-case-preview" onClick={() => setExpandedId(item.id)}>
+											<Show when={!isOpen() && (item().expect || item().journey || (!props.hideStepBadge && stepName()))}>
+												<div class="plan-test-case-preview" onClick={() => setExpandedId(item().id)}>
 													<Show when={!props.hideStepBadge && stepName()}>
 														<span class="plan-test-case-badge">{stepName()}</span>
 													</Show>
-													<Show when={item.journey}>
-														<span class="plan-test-case-badge journey">Journey #{item.journey}</span>
+													<Show when={item().journey}>
+														<span class="plan-test-case-badge journey">Journey #{item().journey}</span>
 													</Show>
-													<Show when={item.expect}>
-														<span class="plan-test-case-snippet">{item.expect}</span>
+													<Show when={item().expect}>
+														<span class="plan-test-case-snippet">{item().expect}</span>
 													</Show>
 												</div>
 											</Show>
@@ -416,7 +445,7 @@ export function TestCaseList(props: {
 												<div class="plan-test-case-details">
 													<Show when={stepName() || journeyIdx() !== null}>
 														<div class="plan-test-case-links">
-															<Show when={stepName() && item.node}>
+															<Show when={stepName() && item().node}>
 																<button
 																	type="button"
 																	class="plan-test-case-step"
@@ -425,12 +454,12 @@ export function TestCaseList(props: {
 																			? `Spotlight "${stepName()}" on chart (keeps current step selected)`
 																			: `Select "${stepName()}" on chart`
 																	}
-																	onMouseEnter={() => props.stepAction === "peek" && props.onPeekNode?.(item.node!, { pan: false })}
+																	onMouseEnter={() => props.stepAction === "peek" && props.onPeekNode?.(item().node!, { pan: false })}
 																	onMouseLeave={() => props.stepAction === "peek" && props.onPeekNode?.(null)}
 																	onClick={() =>
 																		props.stepAction === "peek" && props.onPeekNode
-																			? props.onPeekNode(item.node!, { pan: true })
-																			: props.onJumpToNode(item.node!)
+																			? props.onPeekNode(item().node!, { pan: true })
+																			: props.onJumpToNode(item().node!)
 																	}
 																>
 																	<Icon name={props.stepAction === "peek" ? "eye" : "play"} />
@@ -441,11 +470,11 @@ export function TestCaseList(props: {
 																<button
 																	type="button"
 																	class={["plan-test-case-step journey", { active: journeyActive() }]}
-																	title={journeyActive() ? "Hide journey on chart" : `Highlight Journey #${item.journey} on chart`}
+																	title={journeyActive() ? "Hide journey on chart" : `Highlight Journey #${item().journey} on chart`}
 																	onClick={() => props.onHighlightPath(journeyActive() ? null : journeyIdx())}
 																>
 																	<Icon name="eye" />
-																	<span>Journey #{item.journey}</span>
+																	<span>Journey #{item().journey}</span>
 																</button>
 															</Show>
 														</div>
@@ -454,10 +483,10 @@ export function TestCaseList(props: {
 													<div class="plan-test-detail-row">
 														<span class="plan-test-kw given">Given</span>
 														<Show
-															when={bulletLines(item.given)}
+															when={bulletLines(item().given)}
 															fallback={
-																<p class={["plan-test-detail-val", { muted: !item.given }]}>
-																	{item.given || "Not specified yet"}
+																<p class={["plan-test-detail-val", { muted: !item().given }]}>
+																	{item().given || "Not specified yet"}
 																</p>
 															}
 														>
@@ -470,14 +499,14 @@ export function TestCaseList(props: {
 													</div>
 													<div class="plan-test-detail-row">
 														<span class="plan-test-kw expect">Expect</span>
-														<p class={["plan-test-detail-val", { muted: !item.expect }]}>
-															{item.expect || "Not specified yet"}
+														<p class={["plan-test-detail-val", { muted: !item().expect }]}>
+															{item().expect || "Not specified yet"}
 														</p>
 													</div>
-													<Show when={item.notes}>
+													<Show when={item().notes}>
 														<div class="plan-test-detail-row">
 															<span class="plan-test-kw notes">Notes</span>
-															<p class="plan-test-detail-val">{item.notes}</p>
+															<p class="plan-test-detail-val">{item().notes}</p>
 														</div>
 													</Show>
 
@@ -487,7 +516,7 @@ export function TestCaseList(props: {
 															class="plan-test-edit-btn"
 															onClick={() => {
 																setAdding(null);
-																setEditingId(item.id);
+																setEditingId(item().id);
 															}}
 														>
 															<Icon name="note" />
@@ -496,7 +525,7 @@ export function TestCaseList(props: {
 														<button
 															type="button"
 															class="plan-test-delete-btn"
-															onClick={() => props.onRemoveTestCase(item.id)}
+															onClick={() => props.onRemoveTestCase(item().id)}
 														>
 															Delete
 														</button>
@@ -508,13 +537,14 @@ export function TestCaseList(props: {
 								>
 									<TestCaseForm
 										mode="edit"
-										initial={item}
+										initial={item()}
 										nodes={actionableNodes()}
 										plan={props.plan}
 										paths={props.paths}
 										saveLabel="Save changes"
 										onSave={(val, clearJourney) => {
-											props.onUpdateTestCase(item.id, {
+											const id = item().id;
+											props.onUpdateTestCase(id, {
 												title: val.title,
 												node: val.node ?? "",
 												journey: clearJourney ? null : val.journey,
@@ -523,12 +553,13 @@ export function TestCaseList(props: {
 												notes: val.notes ?? "",
 											});
 											setEditingId(null);
-											setExpandedId(item.id);
+											setExpandedId(id);
 										}}
 										onCancel={() => setEditingId(null)}
 										onDelete={() => {
+											const id = item().id;
 											setEditingId(null);
-											props.onRemoveTestCase(item.id);
+											props.onRemoveTestCase(id);
 										}}
 									/>
 								</Show>

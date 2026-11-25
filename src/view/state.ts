@@ -129,7 +129,7 @@ export function notify(text: string, kind: Message["kind"] = "info", action?: Me
 	// The log keeps what was said; the note says it as a person would, with the path as the project names it.
 	if (kind === "error") {
 		log(`error: ${text}`);
-		text = plainFileError(text, state.workspace?.root);
+		text = plainFileError(text, snapshot(state).workspace?.root);
 	}
 	setState((s) => {
 		s.messages = [...s.messages.filter((m) => m.text !== text).slice(-4), { id, kind, text, action }];
@@ -159,8 +159,9 @@ export const focusRequest = (() => {
 })();
 export const focusEditor = () => focusRequest.fire("editor");
 export const focusSidePanel = () => {
-	if (!state.workspace) return;
-	if (!state.settings.layout.left) setState((s) => { s.settings.layout.left = true; });
+	const cur = snapshot(state);
+	if (!cur.workspace) return;
+	if (!cur.settings.layout.left) setState((s) => { s.settings.layout.left = true; });
 	focusRequest.fire("side");
 };
 
@@ -181,15 +182,21 @@ async function guarded<T>(work: () => Promise<T>): Promise<T | undefined> {
 
 // --- workspace -------------------------------------------------------------
 
-/** Files with edits that are not on disk. */
+/** Files with edits that are not on disk (reactive). */
 export const unsavedPaths = () => Object.keys(state.dirty).filter((path) => state.dirty[path]);
+
+/** Files with edits that are not on disk (unflushed snapshot, for imperative guards and saves). */
+export const snapshotUnsavedPaths = () => {
+	const dirty = snapshot(state).dirty;
+	return Object.keys(dirty).filter((path) => dirty[path]);
+};
 
 /**
  * Before anything that would drop every open document. Says whether to go on:
  * nothing unsaved, everything saved, or the user chose to discard.
  */
 export async function settleUnsaved(what: string): Promise<boolean> {
-	const unsaved = unsavedPaths();
+	const unsaved = snapshotUnsavedPaths();
 	if (!unsaved.length) return true;
 	const names = unsaved.slice(0, 3).map(baseName).join(", ") + (unsaved.length > 3 ? ` and ${unsaved.length - 3} more` : "");
 	const answer = await choose(`${unsaved.length === 1 ? "1 file has" : `${unsaved.length} files have`} unsaved changes (${names}). ${what}`, ["Save all", "Discard changes"], { danger: "Discard changes" });
@@ -202,8 +209,9 @@ let openSeq = 0;
 export async function openFolder(path?: string) {
 	if (!(await settleUnsaved("Opening another folder closes them."))) return;
 	const seq = ++openSeq;
-	const prevRoot = state.workspace?.root ?? null;
-	const prevLspRunning = state.lsp.state === "running";
+	const curBeforeOpen = snapshot(state);
+	const prevRoot = curBeforeOpen.workspace?.root ?? null;
+	const prevLspRunning = curBeforeOpen.lsp.state === "running";
 	// Clear prior LSP session state before the backend restarts the server for the new folder,
 	// so an early `lspState: running` notification cannot re-initialize against the old root.
 	session.reset();
@@ -212,7 +220,7 @@ export async function openFolder(path?: string) {
 	if (!workspace) {
 		if (prevRoot) {
 			session.setRoot(prevRoot);
-			if (prevLspRunning || state.lsp.state === "running") {
+			if (prevLspRunning || snapshot(state).lsp.state === "running") {
 				// Spawn a fresh language server process: starlims-lsp ignores a second
 				// `initialize` on an already-initialized process, so calling
 				// `session.start(prevRoot)` directly would deadlock forever.
@@ -224,6 +232,8 @@ export async function openFolder(path?: string) {
 	closeReview();
 	resetTidy();
 	syncWorkspaceThreads(canonical(workspace.root));
+	settingsAsked++;
+	settingFailed = false;
 	setTabsReadyFlag(false);
 	closedTabs.length = 0;
 	pendingReveal.clear();
@@ -433,6 +443,7 @@ let settingFailed = false;
  * said): what to ask whether the setting took, since what is on screen may by then be a later save's.
  */
 export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspace" = "user"): Promise<Settings | undefined> {
+	const startRoot = snapshot(state).workspace?.root;
 	// Snapshot and clone before incrementing settingsOut so a proxy or uncloneable input never leaks settingsOut > 0.
 	const immediate: Partial<Record<(typeof WORKED_OUT_HERE)[number], unknown>> = {};
 	let hasImmediate = false;
@@ -468,11 +479,12 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 	} finally {
 		settingsOut--;
 	}
-	if (!effective) settingFailed = true;
+	const sameWorkspace = snapshot(state).workspace?.root === startRoot;
+	if (!effective && sameWorkspace) settingFailed = true;
 	// Saves land, and answer, in the order they were asked for, and each answer is the settings as they then are:
 	// the answer to a save asked for after this one holds this one's change too, and this older answer is not put
 	// over what has been shown since.
-	if (effective && mine === settingsAsked) {
+	if (effective && sameWorkspace && mine === settingsAsked) {
 		// What comes back is the settings as they are on disk. The layout is the view's own, and is saved a moment
 		// after it changes (App.tsx): the one on disk may be older, and must not come back over the one on screen.
 		const { layout: _onDisk, ...rest } = effective;
@@ -484,14 +496,14 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 	// or lack one from an answer passed over above: it is put back to what is on disk, once every save asked for
 	// has answered (sooner, and a save still on its way would land after the reading and be passed over). Not if
 	// another save is asked for while the disk is read: its own answer is the newer.
-	if (!settingsOut && settingFailed) {
+	if (!settingsOut && settingFailed && sameWorkspace) {
 		settingFailed = false;
 		const asked = settingsAsked;
 		const disk = await backend.settings().then(
 			(read) => read.effective,
 			() => undefined,
 		);
-		if (disk && asked === settingsAsked) {
+		if (disk && asked === settingsAsked && snapshot(state).workspace?.root === startRoot) {
 			const { layout: _onDisk, ...rest } = disk;
 			setState((s) => {
 				reconcile({ ...rest, layout: snapshot(s.settings.layout) }, null)(s.settings);
@@ -609,6 +621,8 @@ export function newUntitled(group = snapshot(state).activeGroup, language = "pla
 		s.centerView = "editors";
 	});
 	onFlush(() => {
+		const cur = snapshot(state);
+		if (cur.centerView !== "editors" || cur.groups[cur.activeGroup]?.active !== path) return;
 		focusEditor();
 	});
 	return path;
@@ -750,7 +764,8 @@ setFormattingHost({
 /** Models for files the language server points at (peek, rename) without opening a tab. */
 session.ensureModel = async (uri) => {
 	const path = monaco.Uri.parse(uri).fsPath;
-	if (!state.workspace || !isInside(state.workspace.root, path)) return null;
+	const ws = snapshot(state).workspace;
+	if (!ws || !isInside(ws.root, path)) return null;
 	try {
 		return (await loadDoc(path)).model;
 	} catch {
@@ -836,11 +851,14 @@ export async function openFile(path: string, options: { group?: number; reveal?:
 	// What was only looked at and has no tab left is let go. It has no unsaved changes: a tab that shows some never gives way.
 	if (replaced && !snapshot(state).groups.some((g) => g.tabs.includes(replaced!))) letGoIfOnlyRead(replaced);
 	onFlush(() => {
+		const wasLook = openedForALook(path);
 		if (lookedAt === path) lookedAt = null;
+		const cur = snapshot(state);
+		if (cur.centerView !== "editors" || cur.groups[cur.activeGroup]?.active !== path) return;
 		revealSignal.fire(path);
 		// Opened to stay (a double click, Enter in a list of files): the keyboard goes to it, also when it was already
 		// showing for a look and the editor had no change of file to hear of.
-		if (options.keep) focusEditor();
+		if (options.keep && !wasLook) focusEditor();
 	});
 }
 
@@ -937,6 +955,8 @@ function stepTab(by: number) {
 		if (s.groups[cur.activeGroup]) s.groups[cur.activeGroup]!.active = next;
 	});
 	onFlush(() => {
+		const cur = snapshot(state);
+		if (cur.centerView !== "editors" || cur.groups[cur.activeGroup]?.active !== next) return;
 		revealSignal.fire(next);
 		focusEditor();
 	});
@@ -1017,7 +1037,10 @@ export function moveTab(path: string, from: number, to: number, before: string |
 		s.activeGroup = next.active;
 	});
 	if (removedGroup) removeRecentGroup(from);
+	const targetActive = next.groups[next.active]?.active ?? null;
 	onFlush(() => {
+		const cur = snapshot(state);
+		if (!targetActive || cur.centerView !== "editors" || cur.groups[cur.activeGroup]?.active !== targetActive) return;
 		if (from !== to) revealSignal.fire(path);
 		focusEditor();
 	});
@@ -1056,7 +1079,7 @@ export function togglePin(path?: string | null, group?: number) {
 
 export async function reopenClosedTab() {
 	for (let path = closedTabs.pop(); path; path = closedTabs.pop()) {
-		if (state.groups.some((g) => g.tabs.includes(path!))) continue;
+		if (snapshot(state).groups.some((g) => g.tabs.includes(path!))) continue;
 		try {
 			await loadDoc(path);
 		} catch {
@@ -1095,10 +1118,17 @@ export function fileRenamed(oldPath: string, newPath: string) {
 	pathChanges.renamed.forEach((told) => told((path) => (path === oldPath ? newPath : isInside(oldPath, path) ? newPath + path.slice(oldPath.length) : path)));
 	// What was only read at the new path, or under it, before its file went is not what has come to be there.
 	for (const path of [...docs.keys()]) if (path === newPath || isInside(newPath, path)) letGoIfOnlyRead(path);
-	for (const [path, doc] of [...docs]) {
-		if (path !== oldPath && !isInside(oldPath, path)) continue;
+	const affected = [...docs].filter(([path]) => path === oldPath || isInside(oldPath, path));
+	if (!affected.length) {
+		invalidateImageCache(oldPath);
+		invalidateImageCache(newPath);
+		return;
+	}
+	const curDirty = snapshot(state).dirty;
+	const moves: { path: string; target: string; dirty: boolean; doc: Doc; staleTarget?: Doc; kindChanged: boolean; moved: Doc }[] = [];
+	for (const [path, doc] of affected) {
 		const target = path === oldPath ? newPath : newPath + path.slice(oldPath.length);
-		const dirty = Boolean(snapshot(state).dirty[path]);
+		const dirty = Boolean(curDirty[path]);
 		const text = doc.model.getValue();
 		docs.delete(path);
 		const prevTarget = docs.get(target);
@@ -1107,7 +1137,7 @@ export function fileRenamed(oldPath: string, newPath: string) {
 		let kindChanged = false;
 		if (prevTarget && prevTarget !== doc && !prevTarget.model.isDisposed()) {
 			// Reuse the live Monaco model at `target` in place so any editor displaying `target` never sees its model disposed.
-			kindChanged = Boolean(prevTarget.binary) !== Boolean(doc.binary);
+			kindChanged = Boolean(prevTarget.binary) !== Boolean(doc.binary) || Boolean(prevTarget.binary && doc.binary);
 			prevTarget.encoding = doc.encoding;
 			prevTarget.binary = doc.binary;
 			prevTarget.savedText = doc.savedText;
@@ -1127,20 +1157,33 @@ export function fileRenamed(oldPath: string, newPath: string) {
 			moved.encoding = doc.encoding;
 			moved.binary = doc.binary;
 		}
-		setState((s) => {
+		moves.push({ path, target, dirty, doc, staleTarget, kindChanged, moved });
+	}
+	const anyKindChanged = moves.some((m) => m.kindChanged);
+	setState((s) => {
+		for (const { path, target, dirty, moved } of moves) {
 			for (const g of s.groups) {
+				const hadPath = g.tabs.includes(path);
+				const hadTarget = g.tabs.includes(target);
 				g.tabs = [...new Set(g.tabs.map((tab) => (tab === path ? target : tab)))];
 				if (g.pinned) g.pinned = [...new Set(g.pinned.map((tab) => (tab === path ? target : tab)))];
-				if (g.preview === path) g.preview = target;
+				if (g.preview === path) g.preview = hadTarget ? null : target;
+				else if (hadPath && g.preview === target) g.preview = null;
 				if (g.active === path) g.active = target;
 			}
 			delete s.dirty[path];
 			delete s.conflicts[path];
+			delete s.conflicts[target];
 			s.dirty[target] = dirty || moved.savedVersion === -1;
-			if (kindChanged) s.kindVersion += 1;
-		});
-		// Commit updated tabs before disposing old Monaco models so editors detach first.
-		flush();
+		}
+		if (anyKindChanged) s.kindVersion += 1;
+	});
+	// Commit updated tabs before disposing old Monaco models so editors detach first.
+	flush();
+	for (const { path, target, doc, staleTarget } of moves) {
+		clearEditorViewStates(path);
+		invalidateImageCache(path);
+		invalidateImageCache(target);
 		if (staleTarget) disposeDoc(staleTarget);
 		disposeDoc(doc);
 	}
@@ -1173,8 +1216,9 @@ export async function scriptsCameTo(to: string, from?: string, kind: "file" | "d
 function heldAt(path: string): { kind: "tab" | "unsaved"; path: string } | null {
 	const at = canonical(path);
 	const there = (other: string) => other === at || isInside(at, other);
-	for (const group of state.groups) for (const tab of group.tabs) if (there(tab)) return { kind: "tab", path: tab };
-	for (const other of docs.keys()) if (there(other) && state.dirty[other]) return { kind: "unsaved", path: other };
+	const cur = snapshot(state);
+	for (const group of cur.groups) for (const tab of group.tabs) if (there(tab)) return { kind: "tab", path: tab };
+	for (const other of docs.keys()) if (there(other) && cur.dirty[other]) return { kind: "unsaved", path: other };
 	return null;
 }
 
@@ -1242,7 +1286,8 @@ export async function openToSide(path: string) {
 }
 
 export function split() {
-	const path = activePath();
+	const cur = snapshot(state);
+	const path = cur.groups[cur.activeGroup]?.active ?? null;
 	if (path) void openToSide(path);
 }
 
@@ -1288,7 +1333,7 @@ async function settleConflict(doc: Doc): Promise<boolean> {
 
 /** Says whether the file is on disk as it is in the editor. */
 export async function save(
-	path = activePath(),
+	path?: string | null,
 	options: {
 		/** False to leave the lines as they are, whatever the setting says. */
 		format?: boolean;
@@ -1296,12 +1341,15 @@ export async function save(
 		onPromoted?: (target: string) => void;
 	} = {},
 ): Promise<Saved> {
-	if (!path) return false;
+	const curStart = snapshot(state);
+	const resolvedPath = path === undefined ? (curStart.groups[curStart.activeGroup]?.active ?? null) : path;
+	if (!resolvedPath) return false;
+	path = resolvedPath;
 	const doc = docs.get(path);
 	if (!doc || doc.model.isDisposed()) return false;
 	// First save of a floating untitled buffer: ask for a path, write to disk, and promote the tab.
 	if (isUntitled(path)) {
-		const root = state.workspace?.root;
+		const root = snapshot(state).workspace?.root;
 		const suggested = `${displayName(path)}.ssl`;
 		const entered = (await ask(root ? "Save file as (relative to workspace, or absolute path)" : "Save file as (absolute path)", suggested))?.trim();
 		if (!entered) return false;
@@ -1316,7 +1364,7 @@ export async function save(
 		if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
 		const existingBefore = docs.get(target);
 		const isOpen = Boolean(existingBefore && !existingBefore.model.isDisposed());
-		const isDirtyTarget = Boolean(state.dirty[target]);
+		const isDirtyTarget = Boolean(snapshot(state).dirty[target]);
 		if (onDisk || isOpen || isDirtyTarget) {
 			const prompt = isDirtyTarget
 				? `${baseName(target)} is already open with unsaved edits. Overwriting it will replace both those edits and the file on disk.`
@@ -1370,7 +1418,7 @@ export async function save(
 				}
 				if (g.active === path) g.active = target;
 				if (g.pinned) g.pinned = [...new Set(g.pinned.map((p) => (p === path ? target : p)))];
-				if (g.preview === path) g.preview = null;
+				if (g.preview === path || (idx >= 0 && g.preview === target)) g.preview = null;
 			}
 			delete s.dirty[path];
 			s.dirty[target] = stillDirty;
@@ -1382,6 +1430,7 @@ export async function save(
 		flush();
 		pathChanges.renamed.forEach((told) => told((p) => (p === path ? target : p)));
 		clearEditorViewStates(path);
+		if (wasBinary) invalidateImageCache(target);
 		if (docs.get(path) === doc) docs.delete(path);
 		disposeDoc(doc);
 		session.saved(realDoc.model);
@@ -1393,7 +1442,8 @@ export async function save(
 	if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to save here.`), false;
 	if (!(await settleConflict(doc))) return false;
 	if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
-	if (options.format !== false && state.settings.formatOnSave && doc.model.getLanguageId() === "ssl" && state.lsp.state === "running") {
+	const curBeforeFormat = snapshot(state);
+	if (options.format !== false && curBeforeFormat.settings.formatOnSave && doc.model.getLanguageId() === "ssl" && curBeforeFormat.lsp.state === "running") {
 		await formatChanged(doc);
 		if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
 	}
@@ -1415,7 +1465,8 @@ export async function save(
 	session.saved(doc.model);
 	historyChanged.fire(path);
 	// project.toml chooses the docs folders, and the model and style for this project.
-	if (state.project && path === canonical(state.project.path)) await Promise.all([loadProject(), loadSettings()]);
+	const curProj = snapshot(state).project;
+	if (curProj && path === canonical(curProj.path)) await Promise.all([loadProject(), loadSettings()]);
 	return true;
 }
 
@@ -1509,7 +1560,7 @@ export function applyText(path: string, text: string): boolean {
 
 /** Says whether every file was saved: it stops at the first that could not be. */
 export async function saveAll(): Promise<Saved> {
-	for (const path of unsavedPaths()) if (!(await save(path))) return false;
+	for (const path of snapshotUnsavedPaths()) if (!(await save(path))) return false;
 	return true;
 }
 
@@ -1560,7 +1611,7 @@ export async function changingOnDisk<T>(path: string, change: () => Promise<T>):
 export async function fileChangedOnDisk(changed: string) {
 	const path = canonical(changed);
 	if (awaited.has(path)) return;
-	const startRoot = state.workspace?.root;
+	const startRoot = snapshot(state).workspace?.root;
 	invalidateImageCache(path);
 	setState((s) => {
 		s.treeVersion += 1;

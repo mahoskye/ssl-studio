@@ -882,7 +882,7 @@ export function GitPanel() {
 								<div class="git-ticket-scope" role="group" aria-label="Ticket commit filter source">
 									<button
 										type="button"
-										class={{ on: commitScope() === "active" || !fileTicketKey() }}
+										class={{ on: Boolean(activeTicketKey()) && (commitScope() === "active" || !fileTicketKey()) }}
 										disabled={!activeTicketKey()}
 										title={activeTicketKey() ? `Show commits mentioning active ticket ${activeTicketKey()}` : "No active ticket set"}
 										onClick={() => setCommitScope("active")}
@@ -891,7 +891,7 @@ export function GitPanel() {
 									</button>
 									<button
 										type="button"
-										class={{ on: commitScope() === "file" || !activeTicketKey() }}
+										class={{ on: Boolean(fileTicketKey()) && (commitScope() === "file" || !activeTicketKey()) }}
 										disabled={!fileTicketKey()}
 										title={fileTicketKey() ? `Show commits mentioning current file's ticket ${fileTicketKey()}` : "Current file is not linked to a ticket"}
 										onClick={() => setCommitScope("file")}

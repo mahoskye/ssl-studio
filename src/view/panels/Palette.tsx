@@ -2,7 +2,7 @@
 // the snippets the project keeps in its knowledge base (ADR 0012), inserted
 // as they are written. When a plan chart is open, Palette switches cleanly to
 // business-analyst process shapes and stage navigation (ADR 0027).
-import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onSettled, Show, untrack } from "solid-js";
 import { createAsyncQuery } from "../asyncQuery";
 import { snippetAsText, TEMPLATES, type Template } from "../../shared/houseStyle";
 import { CALLOUT_PRESETS } from "../../shared/markdownEdit";
@@ -573,6 +573,11 @@ export function Palette() {
 		onCommit: (value: string) => void;
 	}) => {
 		const [draft, setDraft] = createSignal(untrack(() => props.value));
+		let reverted = false;
+		let disposed = false;
+		onCleanup(() => {
+			disposed = true;
+		});
 		const syncVal = createMemo(
 			() => ({ key: props.resetKey ?? "", value: props.value }),
 			{ equals: (a, b) => a.key === b.key && a.value === b.value },
@@ -585,9 +590,41 @@ export function Palette() {
 				value={draft()}
 				placeholder={props.placeholder}
 				list={props.list}
-				onKeyDown={props.onKeyDown}
-				onInput={(e) => setDraft(e.currentTarget.value)}
-				onChange={(e) => props.onCommit(e.currentTarget.value)}
+				onFocus={() => {
+					reverted = false;
+				}}
+				onKeyDown={(e) => {
+					if (e.key === "Escape" && !e.isComposing && e.keyCode !== 229) {
+						e.preventDefault();
+						e.stopPropagation();
+						reverted = true;
+						const el = e.currentTarget;
+						const cur = untrack(() => props.value);
+						setDraft(cur);
+						el.value = cur;
+						el.blur();
+						return;
+					}
+					props.onKeyDown?.(e);
+				}}
+				onInput={(e) => {
+					reverted = false;
+					setDraft(e.currentTarget.value);
+				}}
+				onChange={(e) => {
+					if (reverted) {
+						reverted = false;
+						return;
+					}
+					const el = e.currentTarget;
+					props.onCommit(el.value);
+					onSettled(() => {
+						if (disposed) return;
+						const cur = untrack(() => props.value);
+						setDraft(cur);
+						if (el.value !== cur) el.value = cur;
+					});
+				}}
 			/>
 		);
 	};
@@ -599,6 +636,11 @@ export function Palette() {
 		onCommit: (value: string) => void;
 	}) => {
 		const [draft, setDraft] = createSignal(untrack(() => props.value));
+		let reverted = false;
+		let disposed = false;
+		onCleanup(() => {
+			disposed = true;
+		});
 		const syncVal = createMemo(
 			() => ({ key: props.resetKey ?? "", value: props.value }),
 			{ equals: (a, b) => a.key === b.key && a.value === b.value },
@@ -612,11 +654,44 @@ export function Palette() {
 				rows={props.rows}
 				value={draft()}
 				placeholder={props.placeholder}
+				onFocus={() => {
+					reverted = false;
+				}}
+				onKeyDown={(e) => {
+					if (e.key === "Escape" && !e.isComposing && e.keyCode !== 229) {
+						e.preventDefault();
+						e.stopPropagation();
+						reverted = true;
+						const el = e.currentTarget;
+						const cur = untrack(() => props.value);
+						setDraft(cur);
+						el.value = cur;
+						fitTextarea(el);
+						el.blur();
+					}
+				}}
 				onInput={(e) => {
+					reverted = false;
 					setDraft(e.currentTarget.value);
 					fitTextarea(e.currentTarget);
 				}}
-				onChange={(e) => props.onCommit(e.currentTarget.value)}
+				onChange={(e) => {
+					if (reverted) {
+						reverted = false;
+						return;
+					}
+					const el = e.currentTarget;
+					props.onCommit(el.value);
+					onSettled(() => {
+						if (disposed) return;
+						const cur = untrack(() => props.value);
+						setDraft(cur);
+						if (el.value !== cur) {
+							el.value = cur;
+							fitTextarea(el);
+						}
+					});
+				}}
 			/>
 		);
 	};
