@@ -2,7 +2,7 @@
 // workspace, the agent asks and suggests, then writes a spec for review. The code
 // is not touched here. As in the tidy steps, the agent has no file tools: what it
 // needs arrives in the prompt, and what it returns is applied after you agree.
-import { createStore } from "solid-js";
+import { createStore, snapshot } from "solid-js";
 import { backend } from "../backend";
 import { ask, agent, currentModel, interrupt, start } from "../agent/store";
 import { openReview, type Check } from "../editor/Review";
@@ -26,9 +26,11 @@ const [assists, setAssists] = createStore<Record<string, AssistState>>({});
 const newIds = new Map<string, Map<string, string>>();
 
 export const assistOf = (path: string): AssistState => assists[path] ?? blank();
+export const latestAssistOf = (path: string): AssistState => snapshot(assists)[path] ?? blank();
 const update = (path: string, patch: Partial<AssistState>) => {
 	setAssists((s) => {
-		s[path] = { ...(s[path] ?? blank()), ...patch };
+		const cur = (s[path] ??= blank());
+		Object.assign(cur, patch);
 	});
 };
 export const updateAssist = update;
@@ -166,15 +168,18 @@ async function planningSkills(path: string): Promise<string[]> {
 	return [];
 }
 
-function warn(path: string, text: string) {
-	const current = assistOf(path).warnings;
-	if (!current.includes(text)) update(path, { warnings: [...current, text] });
+export function warn(path: string, text: string) {
+	setAssists((s) => {
+		const cur = (s[path] ??= blank());
+		if (!cur.warnings.includes(text)) cur.warnings.push(text);
+	});
 }
 
 const CUT = "This prompt looks cut off: the model reported fewer tokens than it was sent, so it may have missed part of it. With Ollama, set a larger context (docs/INSTALL.md).";
 
 /** Plans whose refine, spec or test script was told to stop. A build has its own, in `buildRun.ts`. */
 const stopped = new Set<string>();
+const inFlight = new Set<string>();
 class Stopped extends Error {}
 
 /**
@@ -184,7 +189,7 @@ class Stopped extends Error {}
  * what the turn cost stays in the totals.
  */
 export function stopAssist(path: string) {
-	const running = assistOf(path).running;
+	const running = latestAssistOf(path).running;
 	if (!running || running === "build") return;
 	stopped.add(path);
 	update(path, { progress: "Stopping…" });
@@ -199,9 +204,14 @@ export async function askAgent(path: string, stage: string, text: string, skills
 		if (stopped.has(path)) throw new Stopped();
 		return null;
 	}
-	const soFar = assistOf(path);
 	const input = reply.tokens?.input ?? 0;
-	update(path, { tokens: soFar.tokens + input + (reply.tokens?.output ?? 0), cost: soFar.cost + (reply.cost ?? 0) });
+	const addedTokens = input + (reply.tokens?.output ?? 0);
+	const addedCost = reply.cost ?? 0;
+	setAssists((s) => {
+		const cur = (s[path] ??= blank());
+		cur.tokens += addedTokens;
+		cur.cost += addedCost;
+	});
 	if (stopped.has(path)) throw new Stopped();
 	if (reply.outcome !== "succeeded") {
 		notify(`The agent did not finish: ${reply.error ?? reply.outcome}`, "error");
@@ -212,15 +222,23 @@ export async function askAgent(path: string, stage: string, text: string, skills
 }
 
 export const begin = (path: string, running: AssistState["running"], work: () => Promise<void>) => {
-	if (assistOf(path).running) return Promise.resolve();
-	if (!state.workspace) return Promise.resolve(notify("Open a folder first."));
+	if (inFlight.has(path) || latestAssistOf(path).running) return Promise.resolve();
+	if (!snapshot(state).workspace) return Promise.resolve(notify("Open a folder first."));
+	inFlight.add(path);
 	stopped.delete(path);
 	// What the run finds is written into this document: its tab is not one to give up to the next file clicked.
 	keepTab(path);
 	update(path, { running, warnings: [], progress: "" });
-	return work()
+	let task: Promise<void>;
+	try {
+		task = work();
+	} catch (e) {
+		task = Promise.reject(e);
+	}
+	return task
 		.catch((e: any) => (e instanceof Stopped ? notify("Stopped. Nothing was changed.") : notify(`${e?.message ?? e}`, "error")))
 		.finally(() => {
+			inFlight.delete(path);
 			stopped.delete(path);
 			update(path, { running: "", progress: "" });
 		});
@@ -347,7 +365,10 @@ export function writeSpec(path: string) {
 				setState((s) => {
 					s.treeVersion += 1;
 				});
-				update(path, { specVersion: assistOf(path).specVersion + 1 });
+				setAssists((s) => {
+					const cur = (s[path] ??= blank());
+					cur.specVersion += 1;
+				});
 				notify("Plan doc approved and saved.");
 			},
 		});
@@ -372,12 +393,17 @@ export async function specState(path: string): Promise<"none" | "current" | "sta
 
 export function acceptSuggestion(path: string, key: string) {
 	const plan = planOf(path);
-	const s = assistOf(path).suggestions.find((x) => x.key === key);
+	const s = latestAssistOf(path).suggestions.find((x) => x.key === key);
 	if (!plan || !s) return;
 	const next = applySuggestion(plan, s, idsFor(path));
 	if (!next) return notify("Accept the new step it connects to first.");
 	savePlan(path, next);
-	update(path, { suggestions: assistOf(path).suggestions.filter((x) => x.key !== key) });
+	setAssists((st) => {
+		const cur = (st[path] ??= blank());
+		for (let i = cur.suggestions.length - 1; i >= 0; i--) {
+			if (cur.suggestions[i]?.key === key) cur.suggestions.splice(i, 1);
+		}
+	});
 }
 
 const idsFor = (path: string) => {
@@ -387,9 +413,19 @@ const idsFor = (path: string) => {
 
 /** Declining a new step declines what connects to it. */
 export function declineSuggestion(path: string, key: string) {
-	const s = assistOf(path).suggestions.find((x) => x.key === key);
-	if (!s) return;
-	update(path, { suggestions: assistOf(path).suggestions.filter((x) => x.key !== key && !(s.type === "node" && x.type === "edge" && (x.from === s.temp || x.to === s.temp))) });
+	setAssists((st) => {
+		const cur = st[path];
+		if (!cur) return;
+		const s = cur.suggestions.find((x) => x.key === key);
+		if (!s) return;
+		const dropTemp = s.type === "node" ? s.temp : null;
+		for (let i = cur.suggestions.length - 1; i >= 0; i--) {
+			const x = cur.suggestions[i]!;
+			if (x.key === key || (dropTemp !== null && x.type === "edge" && (x.from === dropTemp || x.to === dropTemp))) {
+				cur.suggestions.splice(i, 1);
+			}
+		}
+	});
 }
 
 /** Accepts everything as one undo step, new steps before what connects to them. */
@@ -397,11 +433,19 @@ export function acceptAll(path: string) {
 	let plan = planOf(path);
 	if (!plan) return;
 	const order: Suggestion["type"][] = ["node", "change", "remove-edge", "edge"];
-	const list = [...assistOf(path).suggestions].sort((a, b) => order.indexOf(a.type) - order.indexOf(b.type));
+	const list = [...latestAssistOf(path).suggestions].sort((a, b) => order.indexOf(a.type) - order.indexOf(b.type));
 	const ids = idsFor(path);
 	for (const s of list) plan = applySuggestion(plan, s, ids) ?? plan;
 	savePlan(path, plan);
 	update(path, { suggestions: [] });
 }
 
-export const dismissWarning = (path: string, text: string) => update(path, { warnings: assistOf(path).warnings.filter((w) => w !== text) });
+export const dismissWarning = (path: string, text: string) => {
+	setAssists((s) => {
+		const cur = s[path];
+		if (!cur) return;
+		for (let i = cur.warnings.length - 1; i >= 0; i--) {
+			if (cur.warnings[i] === text) cur.warnings.splice(i, 1);
+		}
+	});
+};

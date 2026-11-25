@@ -1,7 +1,7 @@
 // App state: the workspace, open documents, editor groups and panels.
 // Documents are Monaco models; the text in them is the source of truth
 // (ADR 0002).
-import { createSignal, createStore, flush, onFlush, snapshot } from "solid-js";
+import { createSignal, createStore, flush, onFlush, reconcile, snapshot } from "solid-js";
 import { DEFAULT_SETTINGS, type Info, type LspState, type Project, type Settings, type SettingsPatch, type ThemeFile, type Workspace } from "../shared/protocol";
 import { backend, on } from "./backend";
 import { removeRecentGroup, resetRecentTabs } from "./recentTabs";
@@ -259,7 +259,7 @@ export async function openFolder(path?: string) {
 	const lsp = await backend.lspState();
 	if (seq !== openSeq) return;
 	setState((s) => {
-		s.lsp = lsp;
+		reconcile(lsp, null)(s.lsp);
 	});
 	session.setRoot(workspace.root);
 	if (lsp.state === "running") void session.start(workspace.root).catch(() => {});
@@ -410,7 +410,7 @@ export async function loadSettings(fresh = false) {
 	if (snapshot(state).workspace?.root !== startRoot) return;
 	const { layout: _onDisk, ...rest } = effective;
 	setState((s) => {
-		s.settings = fresh ? effective : { ...rest, layout: snapshot(s.settings.layout) };
+		reconcile(fresh ? effective : { ...rest, layout: snapshot(s.settings.layout) }, null)(s.settings);
 		s.themes = themes;
 	});
 }
@@ -433,15 +433,41 @@ let settingFailed = false;
  * said): what to ask whether the setting took, since what is on screen may by then be a later save's.
  */
 export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspace" = "user"): Promise<Settings | undefined> {
+	// Snapshot and clone before incrementing settingsOut so a proxy or uncloneable input never leaks settingsOut > 0.
+	const immediate: Partial<Record<(typeof WORKED_OUT_HERE)[number], unknown>> = {};
+	let hasImmediate = false;
+	for (const key of WORKED_OUT_HERE) {
+		if (patch[key] !== undefined && patch[key] !== null) {
+			immediate[key] = structuredClone(snapshot(patch[key]));
+			hasImmediate = true;
+		}
+	}
+	const plainPatch = snapshot(patch);
 	const mine = ++settingsAsked;
 	settingsOut++;
-	setState((s) => {
-		for (const key of WORKED_OUT_HERE) {
-			if (patch[key] !== undefined && patch[key] !== null) (s.settings as any)[key] = structuredClone(patch[key]);
+	let effective: Settings | undefined;
+	try {
+		if (hasImmediate) {
+			setState((s) => {
+				for (const key of WORKED_OUT_HERE) {
+					if (key in immediate) {
+						const val = immediate[key];
+						const target = (s.settings as any)[key];
+						if (target && typeof target === "object" && val && typeof val === "object" && Array.isArray(target) === Array.isArray(val)) {
+							reconcile(val, null)(target);
+						} else {
+							(s.settings as any)[key] = val;
+						}
+					}
+				}
+			});
+			// Preserve the WORKED_OUT_HERE synchronous visibility contract across back-to-back writes in one tick.
+			flush();
 		}
-	});
-	const effective = await guarded(() => backend.saveSettings(scope, patch));
-	settingsOut--;
+		effective = await guarded(() => backend.saveSettings(scope, plainPatch));
+	} finally {
+		settingsOut--;
+	}
 	if (!effective) settingFailed = true;
 	// Saves land, and answer, in the order they were asked for, and each answer is the settings as they then are:
 	// the answer to a save asked for after this one holds this one's change too, and this older answer is not put
@@ -451,7 +477,7 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 		// after it changes (App.tsx): the one on disk may be older, and must not come back over the one on screen.
 		const { layout: _onDisk, ...rest } = effective;
 		setState((s) => {
-			s.settings = "layout" in patch ? effective : { ...rest, layout: snapshot(s.settings.layout) };
+			reconcile("layout" in patch ? effective : { ...rest, layout: snapshot(s.settings.layout) }, null)(s.settings);
 		});
 	}
 	// A save that failed has said so. What is on screen may then hold a value shown at once that was never saved,
@@ -468,7 +494,7 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 		if (disk && asked === settingsAsked) {
 			const { layout: _onDisk, ...rest } = disk;
 			setState((s) => {
-				s.settings = { ...rest, layout: snapshot(s.settings.layout) };
+				reconcile({ ...rest, layout: snapshot(s.settings.layout) }, null)(s.settings);
 			});
 		}
 	}
@@ -582,7 +608,9 @@ export function newUntitled(group = snapshot(state).activeGroup, language = "pla
 		s.activeGroup = targetGroup;
 		s.centerView = "editors";
 	});
-	focusEditor();
+	onFlush(() => {
+		focusEditor();
+	});
 	return path;
 }
 
@@ -692,7 +720,7 @@ async function loadDoc(path: string): Promise<Doc> {
 	return doc;
 }
 
-session.sslSettings = () => JSON.parse(JSON.stringify(state.settings.ssl ?? {}));
+session.sslSettings = () => snapshot(state).settings.ssl ?? {};
 
 setFormattingHost({
 	options: () => ({
@@ -805,17 +833,15 @@ export async function openFile(path: string, options: { group?: number; reveal?:
 		// A maximized bottom panel covers the editors too: opening a file restores it so the file is visible.
 		if (s.bottomMaximized) s.bottomMaximized = false;
 	});
-	if (lookedAt === path) {
-		onFlush(() => {
-			if (lookedAt === path) lookedAt = null;
-		});
-	}
 	// What was only looked at and has no tab left is let go. It has no unsaved changes: a tab that shows some never gives way.
 	if (replaced && !snapshot(state).groups.some((g) => g.tabs.includes(replaced!))) letGoIfOnlyRead(replaced);
-	revealSignal.fire(path);
-	// Opened to stay (a double click, Enter in a list of files): the keyboard goes to it, also when it was already
-	// showing for a look and the editor had no change of file to hear of.
-	if (options.keep) focusEditor();
+	onFlush(() => {
+		if (lookedAt === path) lookedAt = null;
+		revealSignal.fire(path);
+		// Opened to stay (a double click, Enter in a list of files): the keyboard goes to it, also when it was already
+		// showing for a look and the editor had no change of file to hear of.
+		if (options.keep) focusEditor();
+	});
 }
 
 /** Keeps a tab that was opened for a look: in one group, or in every group that has it so. */
@@ -910,29 +936,38 @@ function stepTab(by: number) {
 	setState((s) => {
 		if (s.groups[cur.activeGroup]) s.groups[cur.activeGroup]!.active = next;
 	});
-	revealSignal.fire(next);
-	focusEditor();
+	onFlush(() => {
+		revealSignal.fire(next);
+		focusEditor();
+	});
 }
 export const nextTab = () => stepTab(1);
 export const previousTab = () => stepTab(-1);
 
 /** Closes every tab of a group but one and the pinned. */
-export async function closeOtherTabs(keep = activePath(), group = state.activeGroup) {
-	const g = state.groups[group];
-	for (const path of othersOf(g?.tabs ?? [], g?.pinned ?? [], keep)) if (!(await closeTab(path, group))) return;
+export async function closeOtherTabs(keep?: string | null, group?: number) {
+	const cur = snapshot(state);
+	const targetGroup = group ?? cur.activeGroup;
+	const g = cur.groups[targetGroup];
+	const targetKeep = keep !== undefined ? keep : (g?.active ?? null);
+	for (const path of othersOf(g?.tabs ?? [], g?.pinned ?? [], targetKeep)) if (!(await closeTab(path, targetGroup))) return;
 }
 
 /** Closes the tabs after one in its row, the pinned left alone. */
-export async function closeTabsToRight(path = activePath(), group = state.activeGroup) {
-	const g = state.groups[group];
-	if (!path || !g) return;
-	for (const other of rightOf(g.tabs, g.pinned ?? [], path)) if (!(await closeTab(other, group))) return;
+export async function closeTabsToRight(path?: string | null, group?: number) {
+	const cur = snapshot(state);
+	const targetGroup = group ?? cur.activeGroup;
+	const g = cur.groups[targetGroup];
+	const targetPath = path !== undefined ? path : (g?.active ?? null);
+	if (!targetPath || !g) return;
+	for (const other of rightOf(g.tabs, g.pinned ?? [], targetPath)) if (!(await closeTab(other, targetGroup))) return;
 }
 
 /** Closes every tab that is not pinned: of one group, or of them all. */
 export async function closeAllTabs(only?: number) {
-	for (let group = only ?? state.groups.length - 1; group >= (only ?? 0); group--) {
-		const g = state.groups[group];
+	const cur = snapshot(state);
+	for (let group = only ?? cur.groups.length - 1; group >= (only ?? 0); group--) {
+		const g = snapshot(state).groups[group];
 		for (const path of othersOf(g?.tabs ?? [], g?.pinned ?? [], null)) if (!(await closeTab(path, group))) return;
 	}
 }
@@ -982,8 +1017,10 @@ export function moveTab(path: string, from: number, to: number, before: string |
 		s.activeGroup = next.active;
 	});
 	if (removedGroup) removeRecentGroup(from);
-	if (from !== to) revealSignal.fire(path);
-	focusEditor();
+	onFlush(() => {
+		if (from !== to) revealSignal.fire(path);
+		focusEditor();
+	});
 }
 
 /** The open tab one place along its row, left or right, among the pinned or among the others. */
@@ -1000,15 +1037,18 @@ export function shiftTab(by: 1 | -1, group = snapshot(state).activeGroup) {
 }
 
 /** Pins a tab, or lets a pinned one go. */
-export function togglePin(path = activePath(), group = snapshot(state).activeGroup) {
-	const g = snapshot(state).groups[group];
-	if (!path || !g?.tabs.includes(path)) return;
-	keepTab(path, group);
-	const next = withPin(g.tabs, g.pinned ?? [], path, !g.pinned?.includes(path));
+export function togglePin(path?: string | null, group?: number) {
+	const cur = snapshot(state);
+	const targetGroup = group ?? cur.activeGroup;
+	const g = cur.groups[targetGroup];
+	const targetPath = path !== undefined ? path : (g?.active ?? null);
+	if (!targetPath || !g?.tabs.includes(targetPath)) return;
+	keepTab(targetPath, targetGroup);
+	const next = withPin(g.tabs, g.pinned ?? [], targetPath, !g.pinned?.includes(targetPath));
 	setState((s) => {
-		if (s.groups[group]) {
-			s.groups[group]!.tabs = next.tabs;
-			s.groups[group]!.pinned = next.pinned;
+		if (s.groups[targetGroup]) {
+			s.groups[targetGroup]!.tabs = next.tabs;
+			s.groups[targetGroup]!.pinned = next.pinned;
 		}
 	});
 	rememberTabs();
@@ -1062,13 +1102,31 @@ export function fileRenamed(oldPath: string, newPath: string) {
 		const text = doc.model.getValue();
 		docs.delete(path);
 		const prevTarget = docs.get(target);
-		if (prevTarget && prevTarget !== doc) {
-			docs.delete(target);
-			disposeDoc(prevTarget);
+		let moved: Doc;
+		let staleTarget: Doc | undefined;
+		let kindChanged = false;
+		if (prevTarget && prevTarget !== doc && !prevTarget.model.isDisposed()) {
+			// Reuse the live Monaco model at `target` in place so any editor displaying `target` never sees its model disposed.
+			kindChanged = Boolean(prevTarget.binary) !== Boolean(doc.binary);
+			prevTarget.encoding = doc.encoding;
+			prevTarget.binary = doc.binary;
+			prevTarget.savedText = doc.savedText;
+			prevTarget.mtime = doc.mtime;
+			prevTarget.model.setEOL(doc.model.getEOL() === "\r\n" ? monaco.editor.EndOfLineSequence.CRLF : monaco.editor.EndOfLineSequence.LF);
+			if (prevTarget.model.getValue() !== text) {
+				prevTarget.model.pushEditOperations([], [{ range: prevTarget.model.getFullModelRange(), text }], () => null);
+			}
+			prevTarget.savedVersion = !dirty && text === doc.savedText ? prevTarget.model.getAlternativeVersionId() : -1;
+			moved = prevTarget;
+		} else {
+			if (prevTarget && prevTarget !== doc) {
+				docs.delete(target);
+				staleTarget = prevTarget;
+			}
+			moved = attach(target, text, { text: doc.savedText, mtime: doc.mtime });
+			moved.encoding = doc.encoding;
+			moved.binary = doc.binary;
 		}
-		const moved = attach(target, text, { text: doc.savedText, mtime: doc.mtime });
-		moved.encoding = doc.encoding;
-		moved.binary = doc.binary;
 		setState((s) => {
 			for (const g of s.groups) {
 				g.tabs = [...new Set(g.tabs.map((tab) => (tab === path ? target : tab)))];
@@ -1079,7 +1137,11 @@ export function fileRenamed(oldPath: string, newPath: string) {
 			delete s.dirty[path];
 			delete s.conflicts[path];
 			s.dirty[target] = dirty || moved.savedVersion === -1;
+			if (kindChanged) s.kindVersion += 1;
 		});
+		// Commit updated tabs before disposing old Monaco models so editors detach first.
+		flush();
+		if (staleTarget) disposeDoc(staleTarget);
 		disposeDoc(doc);
 	}
 }
@@ -1142,16 +1204,20 @@ export async function heldFromBefore(to: string): Promise<boolean> {
 /** A file or folder went to the trash: its tabs close, except those holding edits nobody saved. */
 export function fileRemoved(removed: string) {
 	removed = canonical(removed);
+	const dirtyNow = snapshot(state).dirty;
 	// A file whose unsaved edits stay open is still somewhere to go.
-	pathChanges.gone.forEach((told) => told((path) => (path === removed || isInside(removed, path)) && !state.dirty[path]));
+	pathChanges.gone.forEach((told) => told((path) => (path === removed || isInside(removed, path)) && !dirtyNow[path]));
 	for (const path of [...docs.keys()]) {
 		if (path !== removed && !isInside(removed, path)) continue;
-		if (state.dirty[path]) {
+		const cur = snapshot(state);
+		if (cur.dirty[path]) {
 			notify(`${baseName(path)} was moved to the trash. Its unsaved edits are still open: save to put the file back.`, "error");
 			continue;
 		}
 		// From the last group back: a group left empty goes, and those after it move up a place.
-		for (let i = state.groups.length - 1; i >= 0; i--) if (state.groups[i]?.tabs.includes(path)) void closeTab(path, i, { discard: true, pinned: true });
+		for (let i = cur.groups.length - 1; i >= 0; i--) {
+			if (snapshot(state).groups[i]?.tabs.includes(path)) void closeTab(path, i, { discard: true, pinned: true });
+		}
 		letGoIfOnlyRead(path);
 	}
 }
@@ -1312,6 +1378,8 @@ export async function save(
 			s.treeVersion += 1;
 			if (wasBinary) s.kindVersion += 1;
 		});
+		// Commit the promoted tab before disposing the untitled Monaco model so editors detach first.
+		flush();
 		pathChanges.renamed.forEach((told) => told((p) => (p === path ? target : p)));
 		clearEditorViewStates(path);
 		if (docs.get(path) === doc) docs.delete(path);
@@ -1566,7 +1634,7 @@ on("closeRequested", async () => {
 
 on("lspState", (lsp) => {
 	setState((s) => {
-		s.lsp = lsp;
+		reconcile(lsp, null)(s.lsp);
 	});
 	if (lsp.message) log(lsp.message);
 });

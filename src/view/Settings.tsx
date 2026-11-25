@@ -18,7 +18,7 @@ import {
 	type ThemeMaterial,
 	type ThemeTone,
 } from "../shared/oklchTheme";
-import { createSignal, createUniqueId, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, Show, untrack } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { isInside, resolvePath } from "../shared/paths";
 import type { Settings, SettingsPatch } from "../shared/protocol";
@@ -84,6 +84,52 @@ const commitOnEnter = (e: KeyboardEvent & { currentTarget: HTMLInputElement }) =
 	}
 };
 
+function DraftInput(props: {
+	id?: string;
+	"aria-label"?: string;
+	"aria-describedby"?: string;
+	type?: string;
+	min?: number | string;
+	max?: number | string;
+	disabled?: boolean;
+	autocomplete?: string;
+	spellcheck?: boolean | "false" | "true";
+	placeholder?: string;
+	value: string;
+	onKeyDown?: (e: KeyboardEvent & { currentTarget: HTMLInputElement }) => void;
+	onCommit: (value: string, el: HTMLInputElement) => string | void;
+}) {
+	const committed = createMemo(() => props.value);
+	const [draft, setDraft] = createSignal(untrack(committed));
+	createEffect(committed, (v) => {
+		setDraft(v);
+	});
+	return (
+		<input
+			id={props.id}
+			aria-label={props["aria-label"]}
+			aria-describedby={props["aria-describedby"]}
+			type={props.type}
+			min={props.min}
+			max={props.max}
+			disabled={props.disabled}
+			autocomplete={props.autocomplete}
+			spellcheck={props.spellcheck}
+			placeholder={props.placeholder}
+			value={draft()}
+			onKeyDown={props.onKeyDown}
+			onInput={(e) => setDraft(e.currentTarget.value)}
+			onChange={(e) => {
+				const normalized = props.onCommit(e.currentTarget.value, e.currentTarget);
+				if (typeof normalized === "string") {
+					setDraft(normalized);
+					e.currentTarget.value = normalized;
+				}
+			}}
+		/>
+	);
+}
+
 export function SettingsDialog() {
 	const [open, setOpen] = createSignal(false);
 	const [query, setQuery] = createSignal("");
@@ -118,15 +164,18 @@ export function SettingsDialog() {
 		await loadLayers();
 		if (key === "lspPath" && saved) await restartLsp();
 	};
-	const saveRelFolder = (key: "attachmentsFolder" | "templatesFolder", input: HTMLInputElement) => {
+	const saveRelFolder = (key: "attachmentsFolder" | "templatesFolder", input: HTMLInputElement): string => {
 		const check = validateWorkspaceFolderSetting(input.value);
 		if (!check.ok) {
 			notify(check.error, "error");
-			input.value = state.settings[key] ?? "";
-			return;
+			const fallback = state.settings[key] ?? "";
+			input.value = fallback;
+			return fallback;
 		}
-		input.value = check.value ?? "";
+		const next = check.value ?? "";
+		input.value = next;
 		void save(key, check.value);
+		return next;
 	};
 	const shown = (group: Group, ...text: (string | undefined)[]) => matchWords(query(), [group, ...text].filter(Boolean).join(" ")) > 0;
 
@@ -317,16 +366,17 @@ export function SettingsDialog() {
 					<option value="__custom__">Custom local font…</option>
 				</select>
 				<Show when={showInput()}>
-					<input
+					<DraftInput
 						type="text"
 						aria-label={`${ROWS[p.setting][0]} family name`}
 						placeholder={p.placeholder}
 						value={current()}
 						onKeyDown={commitOnEnter}
-						onChange={(e) => {
-							const val = e.currentTarget.value.trim();
+						onCommit={(raw) => {
+							const val = raw.trim();
 							if (!val) setCustomizing(false);
 							void save(p.setting, val);
+							return val;
 						}}
 					/>
 				</Show>
@@ -447,18 +497,18 @@ export function SettingsDialog() {
 						</Row>
 						<Row group="Appearance" label={ROWS.fontSize[0]} hint={ROWS.fontSize[1]} setting="fontSize">
 							{(ids) => (
-								<input
+								<DraftInput
 									id={ids.control}
 									aria-describedby={ids.hint}
 									type="number"
 									min={FONT.min}
 									max={FONT.max}
-									value={state.settings.fontSize}
+									value={String(state.settings.fontSize)}
 									onKeyDown={commitOnEnter}
-									onChange={(e) => {
-										const next = clampNumericSetting(e.currentTarget.value, FONT.min, FONT.max, FONT.normal);
-										e.currentTarget.value = String(next);
+									onCommit={(raw) => {
+										const next = clampNumericSetting(raw, FONT.min, FONT.max, FONT.normal);
 										void save("fontSize", next);
+										return String(next);
 									}}
 								/>
 							)}
@@ -532,19 +582,19 @@ export function SettingsDialog() {
 						</Row>
 						<Row group="Editor" label={ROWS.rulerMargin[0]} hint={ROWS.rulerMargin[1]} setting="rulerMargin">
 							{(ids) => (
-								<input
+								<DraftInput
 									id={ids.control}
 									aria-describedby={ids.hint}
 									type="number"
 									min="0"
 									max="60"
 									disabled={state.settings.rulers === false}
-									value={state.settings.rulerMargin ?? RULER_MARGIN}
+									value={String(state.settings.rulerMargin ?? RULER_MARGIN)}
 									onKeyDown={commitOnEnter}
-									onChange={(e) => {
-										const next = clampNumericSetting(e.currentTarget.value, 0, 60, RULER_MARGIN);
-										e.currentTarget.value = String(next);
+									onCommit={(raw) => {
+										const next = clampNumericSetting(raw, 0, 60, RULER_MARGIN);
 										void save("rulerMargin", next);
+										return String(next);
 									}}
 								/>
 							)}
@@ -576,27 +626,27 @@ export function SettingsDialog() {
 						</Row>
 						<Row group="Editor" label={ROWS.attachmentsFolder[0]} hint={ROWS.attachmentsFolder[1]} setting="attachmentsFolder" wide>
 							{(ids) => (
-								<input
+								<DraftInput
 									id={ids.control}
 									aria-describedby={ids.hint}
 									type="text"
 									placeholder="docs/attachments"
 									value={state.settings.attachmentsFolder ?? ""}
 									onKeyDown={commitOnEnter}
-									onChange={(e) => saveRelFolder("attachmentsFolder", e.currentTarget)}
+									onCommit={(_raw, el) => saveRelFolder("attachmentsFolder", el)}
 								/>
 							)}
 						</Row>
 						<Row group="Editor" label={ROWS.templatesFolder[0]} hint={ROWS.templatesFolder[1]} setting="templatesFolder" wide>
 							{(ids) => (
-								<input
+								<DraftInput
 									id={ids.control}
 									aria-describedby={ids.hint}
 									type="text"
 									placeholder="docs/templates"
 									value={state.settings.templatesFolder ?? ""}
 									onKeyDown={commitOnEnter}
-									onChange={(e) => saveRelFolder("templatesFolder", e.currentTarget)}
+									onCommit={(_raw, el) => saveRelFolder("templatesFolder", el)}
 								/>
 							)}
 						</Row>
@@ -604,7 +654,7 @@ export function SettingsDialog() {
 					<Section title="Language server" when={groups.server()}>
 						<Row group="Language server" label={ROWS.lspPath[0]} hint={ROWS.lspPath[1]} setting="lspPath" wide>
 							{(ids) => (
-								<input
+								<DraftInput
 									id={ids.control}
 									aria-describedby={ids.hint}
 									autocomplete="off"
@@ -612,7 +662,11 @@ export function SettingsDialog() {
 									placeholder={state.info?.lsp.path ?? "Found automatically"}
 									value={state.settings.lspPath ?? ""}
 									onKeyDown={commitOnEnter}
-									onChange={(e) => void save("lspPath", e.currentTarget.value.trim())}
+									onCommit={(raw) => {
+										const trimmed = raw.trim();
+										void save("lspPath", trimmed);
+										return trimmed;
+									}}
 								/>
 							)}
 						</Row>

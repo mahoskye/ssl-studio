@@ -73,11 +73,16 @@ export type ComparisonInput = {
 };
 
 const [review, setReview] = createSignal<Review | null>(null);
+/** Synchronous mirror of `review()` so Solid 2 deferred writes never cause stale read-after-write in `reviewFlow` or `closeComparison`. */
+let currentReview: Review | null = null;
 export { review };
 
 const flow = reviewFlow<Review>({
-	current: () => untrack(review),
-	show: setReview,
+	current: () => currentReview,
+	show: (r) => {
+		currentReview = r;
+		setReview(r);
+	},
 	// Looked up when asked, not when this module loads: state.ts and this file import each other.
 	choose: (title, buttons) => choose(title, buttons),
 	fail: (text) => notify(text, "error"),
@@ -98,7 +103,7 @@ export const openReview = (r: Review): Promise<boolean> => {
 /** Force-closes any open review without prompting, notifying its owner via `onReject`. */
 export const closeReview = () => flow.close();
 /** A comparison gives way to a file that is opened: it holds nothing to lose, and would otherwise stand in front of the file. */
-export const closeComparison = () => void (untrack(review)?.compare && flow.close());
+export const closeComparison = () => void (currentReview?.compare && flow.close());
 
 /** Opens a read-only side-by-side comparison (`before` on the left vs `after` on the right) in ReviewView. */
 export function openComparison(input: ComparisonInput): Promise<boolean> {
@@ -475,21 +480,30 @@ export function ReviewView() {
 
 	// Undoing every edit counts as not edited: the version id goes back with the text.
 	const edited = () => !isReadOnly && Boolean(proposedModel && !proposedModel.isDisposed() && proposedModel.getAlternativeVersionId() !== untouched);
+	let isBusy = false;
+	let isRejecting = false;
 	const accept = async () => {
-		if (busy() || rejecting() || r.blocked || !proposedModel) return;
+		if (isBusy || isRejecting || busy() || rejecting() || r.blocked || !proposedModel) return;
+		isBusy = true;
 		setBusy(true);
 		setError("");
-		const nextText = r.acceptSide === "original" ? r.original : proposedModel.getValue();
-		const failed = await flow.accept(r, nextText);
-		setBusy(false);
-		if (failed !== null) setError(failed);
+		try {
+			const nextText = r.acceptSide === "original" ? r.original : proposedModel.getValue();
+			const failed = await flow.accept(r, nextText);
+			if (failed !== null) setError(failed);
+		} finally {
+			isBusy = false;
+			setBusy(false);
+		}
 	};
 	const reject = async () => {
-		if (busy() || rejecting()) return;
+		if (isBusy || isRejecting || busy() || rejecting()) return;
+		isRejecting = true;
 		setRejecting(true);
 		try {
 			await flow.reject(r, edited());
 		} finally {
+			isRejecting = false;
 			setRejecting(false);
 		}
 	};

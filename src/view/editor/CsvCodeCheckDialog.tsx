@@ -1,7 +1,7 @@
 // Targeted "Check in code" dialog for CSV tables: lets the user pick the exact
 // column, row subset (selected, filtered, or all), file scope/globs, and match
 // options instead of blindly scanning the first 300 entries of column 1.
-import { createMemo, createSignal, createUniqueId, For, Show } from "solid-js";
+import { createMemo, createSignal, createUniqueId, For, Show, untrack } from "solid-js";
 import type { Cell, Table } from "../../shared/csv";
 import {
 	CODE_FILE_SCOPES,
@@ -47,14 +47,14 @@ export function CsvCodeCheckDialog(props: {
 				: initialScope;
 	};
 
-	const [column, setColumn] = createSignal(safeInitialCol);
-	const [rowScope, setRowScope] = createSignal<CodeCheckRowScope>(computeInitialScope);
-	const [fileScope, setFileScope] = createSignal<CodeFileScopeId>(() => props.lastSpec?.fileScope ?? "code");
-	const [include, setInclude] = createSignal(() => props.lastSpec?.include ?? "");
-	const [exclude, setExclude] = createSignal(() => props.lastSpec?.exclude ?? props.defaultExclude);
-	const [wholeWord, setWholeWord] = createSignal(() => props.lastSpec?.wholeWord ?? true);
-	const [caseSensitive, setCaseSensitive] = createSignal(() => props.lastSpec?.caseSensitive ?? false);
-	const [splitLists, setSplitLists] = createSignal(() => looksLikeListColumn(props.table.rows, safeInitialCol()));
+	const [column, setColumn] = createSignal(untrack(safeInitialCol));
+	const [rowScope, setRowScope] = createSignal<CodeCheckRowScope>(untrack(computeInitialScope));
+	const [fileScope, setFileScope] = createSignal<CodeFileScopeId>(untrack(() => props.lastSpec?.fileScope ?? "code"));
+	const [include, setInclude] = createSignal(untrack(() => props.lastSpec?.include ?? ""));
+	const [exclude, setExclude] = createSignal(untrack(() => props.lastSpec?.exclude ?? props.defaultExclude));
+	const [wholeWord, setWholeWord] = createSignal(untrack(() => props.lastSpec?.wholeWord ?? true));
+	const [caseSensitive, setCaseSensitive] = createSignal(untrack(() => props.lastSpec?.caseSensitive ?? false));
+	const [splitLists, setSplitLists] = createSignal(untrack(() => looksLikeListColumn(props.table.rows, safeInitialCol())));
 
 	const colName = (idx: number) => props.table.header[idx]?.text.trim() || `Column ${idx + 1}`;
 

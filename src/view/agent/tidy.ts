@@ -6,14 +6,14 @@
 // design/<name>.tidy.md. Each step's result is checked as the cleanup
 // runner did: no new findings, procedures and parameters unchanged, and the
 // comments step changing comments only.
-import { createStore } from "solid-js";
+import { createStore, snapshot } from "solid-js";
 import { localDay } from "../../shared/dates";
 import { backend } from "../backend";
 import { openReview, type Check, type Review } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { codeOnly } from "../editor/textmate";
 import { session } from "../lsp/session";
-import { activePath, applyText, canonical, documents, keepTab, notify, save, state } from "../state";
+import { applyText, canonical, documents, keepTab, notify, save, state } from "../state";
 import { isAllowedContextPath } from "../plan/assist";
 import { addEntry, ask, safely } from "./store";
 import type { StepState } from "./logic";
@@ -58,8 +58,9 @@ export const notePath = (path: string, root: string | undefined = state.workspac
 };
 
 export function startTidy() {
-	const path = activePath();
-	const root = state.workspace?.root;
+	const cur = snapshot(state);
+	const path = cur.groups[cur.activeGroup]?.active ?? null;
+	const root = cur.workspace?.root;
 	if (!path || documents.get(path)?.model.getLanguageId() !== "ssl") return notify("Open an SSL file to tidy.");
 	if (!root || !isInside(root, path)) return notify("Open an SSL file inside the workspace to tidy.");
 	generation++;
@@ -331,15 +332,18 @@ async function appendToNote(path: string, heading: string, entry: string, root: 
 
 /** Runs one step. Whatever goes wrong, the step ends in a state it can be run again from. */
 export async function runStep(index: number) {
-	const pinnedRoot = state.workspace?.root;
-	const path = tidy.path;
+	const pinnedRoot = snapshot(state).workspace?.root;
+	const path = snapshot(tidy).path;
 	const doc = path ? documents.get(path) : undefined;
 	if (!pinnedRoot || !path || !doc) return notify("The file being tidied is not open.");
 	if (!isInside(pinnedRoot, path)) return notify("The file being tidied is outside the open workspace.");
 	const pinnedRootCanon = canonical(pinnedRoot);
 	const startVersion = doc.model.getAlternativeVersionId();
 	const targetNote = notePath(path, pinnedRoot);
-	const stillSameWorkspace = () => Boolean(state.workspace?.root && canonical(state.workspace.root) === pinnedRootCanon);
+	const stillSameWorkspace = () => {
+		const root = snapshot(state).workspace?.root;
+		return Boolean(root && canonical(root) === pinnedRootCanon);
+	};
 	const step = STEPS[index]!;
 	const mine = generation;
 	/** Moves the step on, unless the tidy was restarted or the workspace changed meanwhile. */

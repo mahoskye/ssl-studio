@@ -15,7 +15,7 @@ import { lspReadyEpoch, session } from "../lsp/session";
 import { activeDoc, activePath, canonical, documents, markdownMode, notify, openFile, setState, state } from "../state";
 import { cycleRegionColor, isRegion, regionColor, symbolPath } from "../editor/regions";
 import { isPlanPath, PROCEDURE_DRAG } from "../plan/model";
-import { docs, isMarkdown, isTable } from "../project";
+import { docs, docsLoading, isMarkdown, isTable } from "../project";
 import { parseCsv } from "../../shared/csv";
 import { frontMatter } from "../../shared/frontMatter";
 import {
@@ -1269,18 +1269,31 @@ export function Objects() {
 	let mdOutlineTabEl: HTMLButtonElement | undefined;
 
 	const currentActivePath = createMemo(() => activePath());
+	const mdAutoDefault = createMemo(
+		() => {
+			const p = currentActivePath();
+			if (!p || !isMarkdown(p)) return null;
+			const key = canonical(p);
+			const loading = docsLoading();
+			const isTicketDoc = docs().some((f) => f.group === "tickets" && f.ticket && canonical(f.path) === key);
+			return { key, loading, isTicketDoc };
+		},
+		{
+			equals: (a, b) =>
+				a === b ||
+				(Boolean(a && b) && a!.key === b!.key && a!.loading === b!.loading && a!.isTicketDoc === b!.isTicketDoc),
+		},
+	);
 	// Default to Info for Markdown files with frontmatter or ticket metadata when user hasn't pinned a preference yet.
 	createEffect(
-		() => currentActivePath(),
-		(p) => {
-			if (!p || !isMarkdown(p) || hasSavedMarkdownTab()) return;
-			const key = canonical(p);
-			if (key === lastAutoDefaultMdPath) return;
-			lastAutoDefaultMdPath = key;
-			const d = documents.get(key);
+		mdAutoDefault,
+		(info) => {
+			if (!info || hasSavedMarkdownTab()) return;
+			if (info.key === lastAutoDefaultMdPath) return;
+			const d = documents.get(info.key);
 			const hasFm = Boolean(d && !d.binary && frontMatter(d.model.getValue()).lines > 0);
-			const isTicketDoc = docs().some((f) => f.group === "tickets" && f.ticket && canonical(f.path) === key);
-			setActiveMarkdownTab(defaultMarkdownPanelTab(hasFm || isTicketDoc, null));
+			setActiveMarkdownTab(defaultMarkdownPanelTab(hasFm || info.isTicketDoc, null));
+			if (!info.loading) lastAutoDefaultMdPath = info.key;
 		},
 	);
 

@@ -334,7 +334,7 @@ describe("R9C WCAG AA contrast & opacity fixes across all 27 themes", () => {
 	});
 
 	test("Monaco diagnostic hover pill, docs pill count, readiness badges, and primary-button pills enforce high-contrast tokens", () => {
-		const hoverPill = blockOf(styleCss, /\.monaco-editor \.monaco-hover \.hover-row > \.marker\.hover-contents > span:nth-child\(2\)\s*\{/);
+		const hoverPill = blockOf(styleCss, /\.monaco-editor \.monaco-hover \.hover-row > \.marker\.hover-contents > \.marker-message > span:nth-child\(2\),[\s\S]*?\{/);
 		expect(hoverPill).toContain("color: var(--editor-fg) !important;");
 		expect(hoverPill).toContain("opacity: 1 !important;");
 

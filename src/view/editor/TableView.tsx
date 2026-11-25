@@ -734,7 +734,7 @@ export function TableView(props: { path: string; group?: number }) {
 			rowHeights.clear();
 			setRowHeightVer((v) => v + 1);
 
-			const colCount = table().header.length;
+			const colCount = untrack(table).header.length;
 			const saved = getTableViewState(loadViewStore(storageKey), fileKey, colCount > 0 ? colCount : undefined);
 			if (saved) {
 				setColWidths(saved.colWidths);
@@ -881,7 +881,7 @@ export function TableView(props: { path: string; group?: number }) {
 				commitActiveEdit = null;
 				return;
 			}
-			const existingVal = ed.ghost ? "" : (table().rows[ed.row]?.[ed.column]?.text ?? "");
+			const existingVal = ed.ghost ? "" : (untrack(table).rows[ed.row]?.[ed.column]?.text ?? "");
 			const initVal = ed.seed !== undefined ? ed.seed : existingVal;
 			const isMultiline = Boolean(ed.forceMultiline) || (ed.seed === undefined && !ed.ghost && /[\r\n]/.test(existingVal));
 			setEditDraft(initVal);
@@ -968,9 +968,9 @@ export function TableView(props: { path: string; group?: number }) {
 	const [onlyTicket, setOnlyTicket] = createSignal<string | null>(null);
 	// Rows asked for from a ticket's page.
 	createEffect(
-		() => rowsAsked(),
-		(asked) => {
-			if (!asked || canonical(asked.path) !== canonical(props.path)) return;
+		() => ({ asked: rowsAsked(), path: props.path }),
+		({ asked, path }) => {
+			if (!asked || canonical(asked.path) !== canonical(path)) return;
 			setOnlyTicket(asked.ticket);
 			setPinnedRow(null);
 			rowsShown();
@@ -2827,6 +2827,7 @@ export function TableView(props: { path: string; group?: number }) {
 			return;
 		}
 		changeCell(row, column, value);
+		flush();
 		const cols = visibleColumns();
 		const visCol = cols.indexOf(column);
 		if (move === "next") {
@@ -4071,6 +4072,7 @@ export function TableView(props: { path: string; group?: number }) {
 	const revealMatch = (match: { row: number; visRow: number; column: number }) => {
 		expandGroupForRow(match.row);
 		pinRowIfFiltered(match.row);
+		flush();
 		const entryIdx = visEntryIdxForRow(match.row);
 		ensureVisRowInWindow(entryIdx >= 0 ? entryIdx : match.visRow, "center");
 		if (!findInSelection()) {
@@ -4205,6 +4207,7 @@ export function TableView(props: { path: string; group?: number }) {
 		if (hiddenCols().has(target.column)) showCol(target.column);
 		expandGroupForRow(target.row);
 		pinRowIfFiltered(target.row);
+		flush();
 		focusCell(target.row, target.column, { align: "center" });
 	};
 
@@ -4282,6 +4285,7 @@ export function TableView(props: { path: string; group?: number }) {
 		if (hiddenCols().has(matchedCol)) showCol(matchedCol);
 		expandGroupForRow(matchedRow);
 		pinRowIfFiltered(matchedRow);
+		flush();
 		const entryIdx = visEntryIdxForRow(matchedRow);
 		ensureVisRowInWindow(entryIdx, "center");
 		setCellAnchor(null);

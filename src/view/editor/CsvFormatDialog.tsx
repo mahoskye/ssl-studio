@@ -1,7 +1,7 @@
 // Configurable CSV column badge formatting modal: inspect, edit, disable,
 // or extend which CSV columns render values as colored badges and which
 // values map to which tones (with STARLIMS and registry presets).
-import { createMemo, createSignal, createUniqueId, For, onSettled, Show } from "solid-js";
+import { createMemo, createSignal, createUniqueId, For, onSettled, Show, untrack } from "solid-js";
 import type { Table } from "../../shared/csv";
 import {
 	BADGE_TONES,
@@ -86,8 +86,9 @@ export function CsvFormatDialog(props: {
 		return { cfg: base, focusIdx: 0 };
 	});
 
-	const [enabled, setEnabled] = createSignal(() => init().cfg.badgeFormatting);
-	const [rules, setRules] = createSignal<DraftRule[]>(() => toDraftRules(init().cfg.rules));
+	const [enabled, setEnabled] = createSignal(untrack(() => init().cfg.badgeFormatting));
+	const [rules, setRules] = createSignal<DraftRule[]>(untrack(() => toDraftRules(init().cfg.rules)));
+	const initialFocusIdx = untrack(() => init().focusIdx);
 	const [scope, setScope] = createSignal<SettingsScope>("user");
 	const [saving, setSaving] = createSignal(false);
 
@@ -256,7 +257,7 @@ export function CsvFormatDialog(props: {
 											<span>Column names (comma-separated)</span>
 											<input
 												type="text"
-												data-autofocus={idx() === init().focusIdx ? "" : undefined}
+												data-autofocus={idx() === initialFocusIdx ? "" : undefined}
 												placeholder="e.g. status, state, sample_status"
 												value={rule.columnsText}
 												onInput={(e) => updateRule(rule.id, (r) => ({ ...r, columnsText: e.currentTarget.value }))}

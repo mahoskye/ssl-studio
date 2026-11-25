@@ -29,6 +29,7 @@ const packages = [
 	"@prettier/plugin-xml",
 	"sql-formatter",
 	"vite",
+	"rolldown",
 ];
 export const NOTICE_FILENAMES = ["LICENSE", "LICENSE.md", "LICENSE.txt", "NOTICES.txt", "ThirdPartyNotices.txt", "THIRD-PARTY-NOTICES.md"] as const;
 

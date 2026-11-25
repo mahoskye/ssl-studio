@@ -18,7 +18,7 @@ import { quickPick, type QuickPickOption } from "../dialogs";
 import { findMatchingPlanNodeLine } from "../plan/assist";
 import { isPlanPath } from "../plan/model";
 import ELK from "elkjs/lib/elk.bundled.js";
-import { createEffect, createMemo, createSignal, createUniqueId, flush, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, flush, For, onCleanup, Show, untrack } from "solid-js";
 import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { regionColor } from "../editor/regions";
@@ -171,6 +171,13 @@ export function GraphView() {
 	const [progress, setProgress] = createSignal("");
 	const [failed, setFailed] = createSignal("");
 	const [filter, setFilter] = createSignal<Filter>({ mode: "all", depth: 1 });
+	const [depthDraft, setDepthDraft] = createSignal(String(untrack(filter).depth));
+	createEffect(
+		() => filter().depth,
+		(d) => {
+			setDepthDraft(String(d));
+		},
+	);
 	const [layout, setLayout] = createSignal<{ boxes: Box[]; lines: Line[]; width: number; height: number; key: string } | null>(null);
 	const [view, setView] = createSignal({ x: 20, y: 20, scale: 1 });
 	const [mode, setMode] = createSignal<Mode>(recall(MODE_KEY) === "list" ? "list" : "graph");
@@ -211,6 +218,13 @@ export function GraphView() {
 	const [legendOpen, setLegendOpen] = createSignal(false);
 	const [impactOpen, setImpactOpen] = createSignal(false);
 	const [impactHops, setImpactHops] = createSignal(4);
+	const [hopsDraft, setHopsDraft] = createSignal(String(untrack(impactHops)));
+	createEffect(
+		() => impactHops(),
+		(h) => {
+			setHopsDraft(String(h));
+		},
+	);
 	const [impactSeeds, setImpactSeeds] = createSignal<{ ids: string[]; label: string; ticketKey?: string } | null>(null);
 	const [impactReport, setImpactReport] = createSignal<ImpactReport | null>(null);
 	const [impactScanning, setImpactScanning] = createSignal(false);
@@ -336,28 +350,30 @@ export function GraphView() {
 			if (!req || !g || req.seq === handledFocusReq) return;
 			handledFocusReq = req.seq;
 			setGraphFocusRequest(null);
-			const targetCanon = canonical(req.scriptPath);
-			const root = state.workspace?.root;
-			const reqRel = root ? relativeTo(root, req.scriptPath).replace(/\\/g, "/").toLowerCase() : req.scriptPath.replace(/\\/g, "/").toLowerCase();
-			const matchedScript = g.scripts.find((s) => {
-				if (s.path === UNRESOLVED) return false;
-				if (canonical(s.path) === targetCanon) return true;
-				const sRel = rel(s.path).replace(/\\/g, "/").toLowerCase();
-				return sRel === reqRel || sRel.endsWith(`/${reqRel}`);
+			untrack(() => {
+				const targetCanon = canonical(req.scriptPath);
+				const root = state.workspace?.root;
+				const reqRel = root ? relativeTo(root, req.scriptPath).replace(/\\/g, "/").toLowerCase() : req.scriptPath.replace(/\\/g, "/").toLowerCase();
+				const matchedScript = g.scripts.find((s) => {
+					if (s.path === UNRESOLVED) return false;
+					if (canonical(s.path) === targetCanon) return true;
+					const sRel = rel(s.path).replace(/\\/g, "/").toLowerCase();
+					return sRel === reqRel || sRel.endsWith(`/${reqRel}`);
+				});
+				if (!matchedScript) {
+					notify(`Could not find ${baseName(req.scriptPath)} in the Call Graph yet.`);
+					return;
+				}
+				let targetId = `${matchedScript.path}#`;
+				if (req.procName) {
+					const want = req.procName.toLowerCase();
+					const matchedNode = g.nodes.find((n) => n.path === matchedScript.path && n.name.toLowerCase() === want);
+					if (matchedNode) targetId = matchedNode.id;
+				}
+				setMode("graph");
+				setCurrent(targetId);
+				focus(targetId);
 			});
-			if (!matchedScript) {
-				notify(`Could not find ${baseName(req.scriptPath)} in the Call Graph yet.`);
-				return;
-			}
-			let targetId = `${matchedScript.path}#`;
-			if (req.procName) {
-				const want = req.procName.toLowerCase();
-				const matchedNode = g.nodes.find((n) => n.path === matchedScript.path && n.name.toLowerCase() === want);
-				if (matchedNode) targetId = matchedNode.id;
-			}
-			setMode("graph");
-			setCurrent(targetId);
-			focus(targetId);
 		},
 	);
 
@@ -376,7 +392,7 @@ export function GraphView() {
 	createEffect(
 		() => activeTicketKey(),
 		(next, prev) => {
-			const cur = ticketHighlightKey()?.trim() || "";
+			const cur = untrack(ticketHighlightKey)?.trim() || "";
 			if (!cur) return;
 			if (prev && cur.toLowerCase() === prev.toLowerCase()) {
 				setGraphTicketHighlight(next || null);
@@ -414,8 +430,8 @@ export function GraphView() {
 		() => [ticketSubgraphOnly(), ticketHighlightKey()] as const,
 		([subOn]) => {
 			fittedFor = "";
-			if (subOn && filter().mode === "around") {
-				setFilter({ ...filter(), mode: "all" });
+			if (subOn) {
+				setFilter((f) => (f.mode === "around" ? { ...f, mode: "all" } : f));
 			}
 		},
 		{ defer: true },
@@ -602,7 +618,9 @@ export function GraphView() {
 			if (!req || req.seq === handledImpactReq) return;
 			handledImpactReq = req.seq;
 			setTicketImpactRequest(null);
-			void runTicketImpactAnalysis(req.key);
+			untrack(() => {
+				void runTicketImpactAnalysis(req.key);
+			});
 		},
 	);
 
@@ -661,8 +679,7 @@ export function GraphView() {
 		setTicketHighlightCount(0);
 	});
 
-	const refresh = async () => {
-		const startRoot = state.workspace?.root ?? "";
+	const refresh = async (startRoot = state.workspace?.root ?? "") => {
 		const run = ++refreshSeq;
 		refreshAbort?.abort();
 		const controller = new AbortController();
@@ -698,14 +715,14 @@ export function GraphView() {
 			if (run === refreshSeq && !controller.signal.aborted) setProgress("");
 		}
 	};
-	const rootAndLsp = createMemo(() => `${state.workspace?.root ?? ""}\u0000${state.lsp.state}`);
+	const rootAndLsp = createMemo(() => [state.workspace?.root ?? "", state.lsp.state] as const, {
+		equals: (a, b) => a[0] === b[0] && a[1] === b[1],
+	});
 	createEffect(
 		() => rootAndLsp(),
-		() => {
-			const root = state.workspace?.root;
-			const lsp = state.lsp.state;
+		([root, lsp]) => {
 			if (root && lsp === "running") {
-				void refresh();
+				void refresh(root);
 			} else {
 				refreshSeq++;
 				refreshAbort?.abort();
@@ -747,10 +764,10 @@ export function GraphView() {
 		const smallTicketSlice = ticketSubgraphOnly() && highlightedTicketPaths().size > 0 && keep.nodes.size <= FOLD_ABOVE;
 		return filter().mode === "around" || smallTicketSlice ? fold(keep, new Set()) : fold(keep, folded(), { folded: foldedDirs(), of: folderOf });
 	});
-	const sizeNote = (bytes: number) => {
+	const sizeNote = (bytes: number, byteLimit = state.settings.limits.bytes) => {
 		// A size that is not known (a data source's file, the box of unresolved targets) is not written as 0.
 		if (!bytes) return "";
-		const at = level(bytes, state.settings.limits.bytes);
+		const at = level(bytes, byteLimit);
 		return `${(bytes / 1024).toFixed(1)} KB${at === "over" ? " (over the limit)" : at === "near" ? " (near the limit)" : ""}`;
 	};
 
@@ -763,36 +780,53 @@ export function GraphView() {
 		return inside?.calls ? `${procedures}, ${plural(inside.calls, "call")} inside` : procedures;
 	};
 	/** A node's name in a sentence about a line: a procedure by its name, a script by its path. */
-	const nameOf = (g: Graph, id: string) => {
+	const nameOf = (g: Graph, id: string, relFn = rel) => {
 		if (isDir(id)) return id.slice(4);
 		if (isFolderEnd(id)) return id.slice(7);
-		if (isFold(id)) return scriptOf(id) === UNRESOLVED ? "a target that did not resolve" : rel(scriptOf(id));
+		if (isFold(id)) return scriptOf(id) === UNRESOLVED ? "a target that did not resolve" : relFn(scriptOf(id));
 		const node = g.nodes.find((n) => n.id === id);
 		if (node) return node.name;
 		const script = g.scripts.find((s) => s.path === scriptOf(id));
-		return `${topLabel(script)} of ${rel(scriptOf(id))}`;
+		return `${topLabel(script)} of ${relFn(scriptOf(id))}`;
 	};
 
 	/** A line in words. A gathered line says how many of the folder it stands for. */
-	const lineWords = (g: Graph, e: DrawnEdge, words: string) => {
+	const lineWords = (g: Graph, e: DrawnEdge, words: string, relFn = rel) => {
 		const some = (ids: string[], folder: string) => `${ids.length} in ${folder.slice(7)}`;
 		if (e.froms && e.tos) return `${some(e.froms, e.from)}: each ${words} several of ${some(e.tos, e.to)}`;
-		if (e.tos) return `${nameOf(g, e.from)} ${words} ${some(e.tos, e.to)}`;
-		if (e.froms) return `${some(e.froms, e.from)}: each ${words} ${nameOf(g, e.to)}`;
-		return `${nameOf(g, e.from)} ${words} ${nameOf(g, e.to)}`;
+		if (e.tos) return `${nameOf(g, e.from, relFn)} ${words} ${some(e.tos, e.to)}`;
+		if (e.froms) return `${some(e.froms, e.from)}: each ${words} ${nameOf(g, e.to, relFn)}`;
+		return `${nameOf(g, e.from, relFn)} ${words} ${nameOf(g, e.to, relFn)}`;
 	};
 
-	const govScriptKeys = createMemo(() => [...governingDocsByScript().keys()].sort().join("\n"));
+	/** Whether scripts can be folded now: around a focus (or a small ticket slice) they are not. */
+	const folding = () => {
+		const smallTicketSlice = ticketSubgraphOnly() && highlightedTicketPaths().size > 0 && (shown()?.nodes.size ?? 0) <= FOLD_ABOVE;
+		return filter().mode !== "around" && !smallTicketSlice;
+	};
+	const govScriptState = createMemo(
+		() => {
+			const map = governingDocsByScript();
+			return { key: [...map.keys()].sort().join("\n"), map };
+		},
+		{ equals: (a, b) => a.key === b.key },
+	);
 	const fitKey = () => JSON.stringify([filter(), ticketSubgraphOnly(), ticketSubgraphOnly() ? ticketHighlightKey() : null]);
 
 	createEffect(
-		() => [graph(), drawn(), mode(), gathered(), govScriptKeys()] as const,
-		([g, keep, as, gathering]) => {
+		() => [graph(), drawn(), mode(), gathered(), govScriptState().map, fitKey(), folding(), state.workspace?.root, state.settings.limits.bytes] as const,
+		([g, keep, as, gathering, govMap, layoutKey, canFold, root, byteLimit]) => {
 			// The list needs no layout, and a large one takes a while.
-			if (!g || !keep || as !== "graph") return;
+			if (!g || !keep || as !== "graph") {
+				++layoutRun;
+				return () => {
+					++layoutRun;
+				};
+			}
 			// A layout takes a while, and a later one may finish first: only the last one asked for is drawn.
 			const run = ++layoutRun;
-			const layoutKey = fitKey();
+			const relFrom = (path: string) => relativeTo(root, path);
+			const folderFrom = (path: string) => (path === UNRESOLVED ? "" : dirName(relFrom(path)));
 			const sized = (label: string, bold = false, extra = 56) => ({
 				"elk.nodeSize.constraints": "MINIMUM_SIZE",
 				"elk.nodeSize.options": "MINIMUM_SIZE_ACCOUNTS_FOR_PADDING",
@@ -803,9 +837,8 @@ export function GraphView() {
 			// carries the path once, and each script goes by its file's name.
 			const drawnScripts = g.scripts.filter((s) => keep.nodes.has(foldId(s.path)) || keep.nodes.has(`${s.path}#`) || g.nodes.some((n) => n.path === s.path && keep.nodes.has(n.id)));
 			const dirNodes = [...keep.nodes].filter(isDir).sort();
-			const inFolders = new Set([...drawnScripts.map((s) => folderOf(s.path)).filter(Boolean), ...dirNodes.map((id) => id.slice(4))]).size > 1;
-			const nameIn = (path: string) => (inFolders && folderOf(path) ? baseName(path) : rel(path));
-			const govMap = governingDocsByScript();
+			const inFolders = new Set([...drawnScripts.map((s) => folderFrom(s.path)).filter(Boolean), ...dirNodes.map((id) => id.slice(4))]).size > 1;
+			const nameIn = (path: string) => (inFolders && folderFrom(path) ? baseName(path) : relFrom(path));
 			const scriptNodes = g.scripts
 				.map((s) => {
 					const hasGov = (govMap.get(s.path)?.length ?? 0) > 0;
@@ -824,7 +857,7 @@ export function GraphView() {
 						id: `script:${s.path}`,
 						labels: [{ text: s.isClass ? `class  ${nameIn(s.path)}` : nameIn(s.path) }],
 						// Wide enough for its own name, size, fold button, and governing doc pill so labels never collide.
-						layoutOptions: { "elk.padding": "[top=34,left=14,bottom=14,right=14]", ...sized(`${s.isClass ? "class  " : ""}${nameIn(s.path)}  ${sizeNote(s.bytes)}`, true, hasGov ? 94 : 62) },
+						layoutOptions: { "elk.padding": "[top=34,left=14,bottom=14,right=14]", ...sized(`${s.isClass ? "class  " : ""}${nameIn(s.path)}  ${sizeNote(s.bytes, byteLimit)}`, true, hasGov ? 94 : 62) },
 						children: [
 							...(top ? [{ id: `${s.path}#`, width: textWidth(topLabel(s)), height: 28, labels: [{ text: topLabel(s) }] }] : []),
 							...procs.filter((p) => !p.region).map(leaf),
@@ -839,15 +872,15 @@ export function GraphView() {
 				})
 				.filter(Boolean) as any[];
 			const pathOfNode = (id: string) => (id.startsWith("script:") ? id.slice(7) : scriptOf(id));
-			const folders = inFolders ? [...new Set(scriptNodes.map((n) => folderOf(pathOfNode(n.id))).filter(Boolean))].sort() : [];
+			const folders = inFolders ? [...new Set(scriptNodes.map((n) => folderFrom(pathOfNode(n.id))).filter(Boolean))].sort() : [];
 			const scripts = [
 				...folders.map((folder) => ({
 					id: `folder:${folder}`,
 					labels: [{ text: folder }],
 					layoutOptions: { "elk.padding": "[top=34,left=16,bottom=16,right=16]", ...sized(folder, true) },
-					children: scriptNodes.filter((n) => folderOf(pathOfNode(n.id)) === folder),
+					children: scriptNodes.filter((n) => folderFrom(pathOfNode(n.id)) === folder),
 				})),
-				...scriptNodes.filter((n) => !inFolders || !folderOf(pathOfNode(n.id))),
+				...scriptNodes.filter((n) => !inFolders || !folderFrom(pathOfNode(n.id))),
 				// A folded folder: its path, and under it what is inside.
 				...dirNodes.map((id) => {
 					const inside = keep.inside.get(id);
@@ -864,8 +897,8 @@ export function GraphView() {
 			};
 			for (const s of scripts) collectElkIds(s);
 			// Around a focus every call is drawn: there are few, and each is what was asked for.
-			const openFolder = (id: string) => (isDir(id) ? undefined : folders.find((f) => f === folderOf(scriptOf(id))));
-			const rawDrawnEdges = gathering && folding() ? gather(keep.edges, openFolder) : keep.edges;
+			const openFolder = (id: string) => (isDir(id) ? undefined : folders.find((f) => f === folderFrom(scriptOf(id))));
+			const rawDrawnEdges = gathering && canFold ? gather(keep.edges, openFolder) : keep.edges;
 			const drawnEdges = rawDrawnEdges.filter((e) => elkNodeIds.has(e.from) && elkNodeIds.has(e.to));
 			const edges = drawnEdges.map((e, i) => ({ id: `e${i}`, sources: [e.from], targets: [e.to] }));
 			void (async () => {
@@ -875,7 +908,7 @@ export function GraphView() {
 					// there are scripts. Lines the layout sees and nobody else does set them out as a block
 					// instead, so many across and so many down.
 					const abreast = folders.flatMap((folder) => {
-						const own = scriptNodes.filter((n) => folderOf(pathOfNode(n.id)) === folder);
+						const own = scriptNodes.filter((n) => folderFrom(pathOfNode(n.id)) === folder);
 						const holder = new Map<string, string>();
 						const hold = (n: any, top: string) => (holder.set(n.id, top), (n.children ?? []).forEach((c: any) => hold(c, top)));
 						for (const n of own) hold(n, n.id);
@@ -978,7 +1011,7 @@ export function GraphView() {
 							relation,
 							froms: edge.froms,
 							tos: edge.tos,
-							title: `${lineWords(g, edge, RELATION_WORDS[relation])}${count > 1 ? `, from ${count} places` : ""}${edge.froms || edge.tos ? ". Point at it to see which." : ""}`,
+							title: `${lineWords(g, edge, RELATION_WORDS[relation], relFrom)}${count > 1 ? `, from ${count} places` : ""}${edge.froms || edge.tos ? ". Point at it to see which." : ""}`,
 						};
 					});
 					// The nodes are drawn afresh: the one the keyboard was on takes the focus again.
@@ -1004,10 +1037,13 @@ export function GraphView() {
 					setProgress(`Layout failed: ${e?.message ?? e}`);
 				}
 			})();
+			return () => {
+				++layoutRun;
+			};
 		},
 	);
 
-	const focus = (id: string) => setFilter({ mode: "around", focus: id, depth: filter().depth, direction: filter().direction });
+	const focus = (id: string) => setFilter((f) => ({ mode: "around", focus: id, depth: f.depth, direction: f.direction }));
 	const open = (at: { path?: string; line?: number }) => {
 		if (!at.path || at.path === UNRESOLVED) return;
 		// Let openFile switch centerView="editors" atomically with g.active so navigation history
@@ -1015,11 +1051,6 @@ export function GraphView() {
 		void openFile(at.path, { reveal: { line: (at.line ?? 0) + 1 } });
 	};
 	const procs = () => layout()?.boxes.filter((b) => b.kind === "proc" || b.kind === "top" || b.kind === "fold" || b.kind === "dir") ?? [];
-	/** Whether scripts can be folded now: around a focus (or a small ticket slice) they are not. */
-	const folding = () => {
-		const smallTicketSlice = ticketSubgraphOnly() && highlightedTicketPaths().size > 0 && (shown()?.nodes.size ?? 0) <= FOLD_ABOVE;
-		return filter().mode !== "around" && !smallTicketSlice;
-	};
 	/** Folds a script to one node, or unfolds it; the keyboard stays with it. */
 	const toggleFold = (path: string | undefined) => {
 		const g = graph();
@@ -1735,11 +1766,13 @@ export function GraphView() {
 							type="number"
 							min="1"
 							max="6"
-							value={filter().depth}
+							value={depthDraft()}
+							onInput={(e) => setDepthDraft(e.currentTarget.value)}
 							onChange={(e) => {
 								const next = Math.max(1, Math.min(6, Math.floor(Number(e.currentTarget.value)) || 1));
+								setDepthDraft(String(next));
 								e.currentTarget.value = String(next);
-								setFilter({ ...filter(), depth: next });
+								setFilter((f) => ({ ...f, depth: next }));
 							}}
 						/>
 					</label>
@@ -1904,9 +1937,10 @@ export function GraphView() {
 								dragging = null;
 								return;
 							}
-							const v = view();
-							panned += Math.abs(e.clientX - dragging.x) + Math.abs(e.clientY - dragging.y);
-							setView({ ...v, x: v.x + e.clientX - dragging.x, y: v.y + e.clientY - dragging.y });
+							const dx = e.clientX - dragging.x;
+							const dy = e.clientY - dragging.y;
+							panned += Math.abs(dx) + Math.abs(dy);
+							setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
 							dragging = { x: e.clientX, y: e.clientY };
 						}}
 						onMouseUp={() => (dragging = null)}
@@ -2595,10 +2629,13 @@ export function GraphView() {
 										type="number"
 										min="1"
 										max="6"
-										value={impactHops()}
+										value={hopsDraft()}
 										style={{ width: "42px", padding: "2px 4px", "font-size": "var(--text-xs)" }}
+										onInput={(e) => setHopsDraft(e.currentTarget.value)}
 										onChange={(e) => {
-											const next = Math.max(1, Math.min(6, Number(e.currentTarget.value) || 4));
+											const next = Math.max(1, Math.min(6, Math.floor(Number(e.currentTarget.value)) || 4));
+											setHopsDraft(String(next));
+											e.currentTarget.value = String(next);
 											setImpactHops(next);
 											const seeds = impactSeeds();
 											if (seeds) runImpactAnalysis(seeds.ids, seeds.label, { ticketKey: seeds.ticketKey, hops: next });

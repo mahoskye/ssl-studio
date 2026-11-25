@@ -2,7 +2,7 @@
 // through the ones before that. The order is kept for each editor group;
 // while Ctrl is held the tabs that pass by are looked at, not used, and the
 // one that is showing when Ctrl is let go is the one that was gone to.
-import { snapshot } from "solid-js";
+import { onFlush, snapshot } from "solid-js";
 import { ofOpen, stepped, used, walkHolds } from "../shared/tabOrder";
 import { focusEditor, pathChanges, revealSignal, setState, state } from "./state";
 
@@ -101,8 +101,10 @@ export function stepRecent(by: 1 | -1, hold?: boolean) {
 		if (s.centerView !== "editors") s.centerView = "editors";
 		if (s.bottomMaximized) s.bottomMaximized = false;
 	});
-	revealSignal.fire(next.path);
-	focusEditor();
+	onFlush(() => {
+		revealSignal.fire(next.path);
+		focusEditor();
+	});
 	// Run from the command list there is no key to let go: the step is the whole of it.
 	if (!(hold ?? modDown)) settle();
 }

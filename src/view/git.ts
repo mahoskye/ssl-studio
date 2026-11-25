@@ -22,6 +22,8 @@ export { failure as gitFailure, gitVersion, status as gitStatus };
 let asking = 0;
 let timer: ReturnType<typeof setTimeout> | undefined;
 let statusRoot: string | undefined;
+/** `state.treeVersion` value bumped by `discard()` right before its direct `refreshGit()` call, so the deferred effect does not trigger a duplicate status poll. */
+let suppressedTreeVersion = -1;
 
 /** Asks git again, now. Answers that come back out of order are dropped. */
 export async function refreshGit(): Promise<void> {
@@ -70,7 +72,13 @@ export function useGit() {
 	// A save, a new file, a rename, a change on disk: each moves the tree's version.
 	createEffect(
 		() => state.treeVersion,
-		() => refreshGitSoon(),
+		(version) => {
+			if (version === suppressedTreeVersion) {
+				suppressedTreeVersion = -1;
+				return;
+			}
+			refreshGitSoon();
+		},
 		{ defer: true },
 	);
 	// A commit made in a terminal is not heard of: coming back to the window asks again.
@@ -78,6 +86,7 @@ export function useGit() {
 		const focused = () => snapshot(state).workspace && refreshGitSoon();
 		window.addEventListener("focus", focused);
 		return () => {
+			suppressedTreeVersion = -1;
 			clearTimeout(timer);
 			window.removeEventListener("focus", focused);
 		};
@@ -176,6 +185,7 @@ export async function discard(file: GitFile): Promise<void> {
 	historyChanged.fire(canon);
 	setState((s) => {
 		s.treeVersion += 1;
+		suppressedTreeVersion = s.treeVersion;
 	});
 	await refreshGit();
 }

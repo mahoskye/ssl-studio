@@ -8,7 +8,7 @@ import { emitSplitScrollSync, liveEditorAt, saveMarkdownSyncAnchor, takeMarkdown
 import { MarkdownLiveEditor } from "./MarkdownLiveEditor";
 import { Icon } from "../Icon";
 import { tabShown } from "../recentTabs";
-import { createEffect, createMemo, createRoot, createSignal, flush, For, getOwner, onCleanup, onSettled, runWithOwner, Show } from "solid-js";
+import { createEffect, createMemo, createRoot, createSignal, flush, For, getOwner, onCleanup, onSettled, runWithOwner, Show, untrack } from "solid-js";
 import { createAsyncQuery } from "../asyncQuery";
 import { monaco } from "./monaco";
 import { activePath, canonical, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, documents, focusRequest, isUntitled, keepTab, markdownMode, moveTab, newUntitled, notify, openFile, openToSide, planMode, revealSignal, revert, save, saveAll, saveSetting, setMarkdownMode, setPlanMode, setState, setTableTextMode, split, state, tabLeaving, tableTextMode, takeReveal, togglePin, openedForALook } from "../state";
@@ -293,16 +293,17 @@ export function EditorGroup(props: { index: number }) {
 	createEffect(
 		() => ({
 			ed: mountedEditor(),
+			index: props.index,
 			isActive: state.activeGroup === props.index,
 			path: activePath(),
 			groupActive: group().active,
 			liveShown: showLive(),
 			monacoShown: isMonacoVisible(),
 		}),
-		({ ed, isActive, path, groupActive, liveShown, monacoShown }) => {
+		({ ed, index, isActive, path, groupActive, liveShown, monacoShown }) => {
 			if (!ed || !isActive || !path || path !== groupActive || disposed) return;
 			if (liveShown) {
-				const pos = liveEditorAt(props.index)?.getPosition();
+				const pos = liveEditorAt(index)?.getPosition();
 				if (pos)
 					setState((s) => {
 						s.cursor = { line: pos.lineNumber, column: pos.column };
@@ -511,6 +512,7 @@ export function EditorGroup(props: { index: number }) {
 	createEffect(
 		() => ({
 			ed: mountedEditor(),
+			index: props.index,
 			path: group().active,
 			monacoShown: isMonacoVisible(),
 			fontSize: state.settings.fontSize,
@@ -520,7 +522,7 @@ export function EditorGroup(props: { index: number }) {
 			inlayHints: state.settings.inlayHints,
 			rulerList: rulers(),
 		}),
-		({ ed, path, monacoShown, fontSize, codeFontSetting, minimapEnabled, wordWrap, inlayHints, rulerList }) => {
+		({ ed, index, path, monacoShown, fontSize, codeFontSetting, minimapEnabled, wordWrap, inlayHints, rulerList }) => {
 			if (!ed) return;
 			const activeCodeFont = codeFontSetting?.trim() ? resolveFontStack(codeFontSetting, DEFAULT_CODE_FONT) : codeFont || undefined;
 			const options: monaco.editor.IEditorOptions & monaco.editor.IGlobalEditorOptions = {
@@ -544,18 +546,21 @@ export function EditorGroup(props: { index: number }) {
 				ed.updateOptions(options);
 				return;
 			}
-			if (shown) keepView(shown);
-			const doc = path ? documents.get(path) : undefined;
-			ed.setModel(null);
-			ed.updateOptions(options);
-			ed.setModel(doc?.model ?? null);
-			shown = doc ? path : null;
-			if (doc) {
-				const view = viewStates.get(`${props.index}:${path}`) ?? lastViews.get(path!);
-				if (view) ed.restoreViewState(view);
-				if (state.activeGroup === props.index && monacoShown) reveal(path!);
-				if (state.activeGroup === props.index && !openedForALook(path!) && monacoShown) ed.focus();
-			}
+			untrack(() => {
+				if (shown) keepView(shown);
+				const doc = path ? documents.get(path) : undefined;
+				ed.setModel(null);
+				ed.updateOptions(options);
+				ed.setModel(doc?.model ?? null);
+				shown = doc ? path : null;
+				if (doc) {
+					const view = viewStates.get(`${index}:${path}`) ?? lastViews.get(path!);
+					if (view) ed.restoreViewState(view);
+					const isActiveGroup = state.activeGroup === index;
+					if (isActiveGroup && monacoShown) reveal(path!);
+					if (isActiveGroup && !openedForALook(path!) && monacoShown) ed.focus();
+				}
+			});
 		},
 	);
 
@@ -571,12 +576,12 @@ export function EditorGroup(props: { index: number }) {
 			prevMdInCm = inCm;
 			if (!path || !isMarkdown(path)) return;
 			if (inCm && !wasInCm && wasPath === path) {
-				if (Date.now() - lastSavedSourceAnchorAt > 100) saveSourceAnchor(path);
+				if (Date.now() - lastSavedSourceAnchorAt > 100) untrack(() => saveSourceAnchor(path));
 				return;
 			}
 			if (!inCm && (wasInCm || wasPath !== path)) {
 				cancelAnchorRaf();
-				if (!applySourceAnchor(path)) {
+				if (!untrack(() => applySourceAnchor(path))) {
 					queueMicrotask(() => {
 						if (disposed || !state.groups[props.index]) return;
 						if (!applySourceAnchor(path)) {

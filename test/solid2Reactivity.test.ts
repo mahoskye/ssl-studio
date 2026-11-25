@@ -4,79 +4,85 @@ import { createAsyncQuery } from "../src/view/asyncQuery";
 
 describe("SolidJS 2.0 runtime & createAsyncQuery", () => {
 	test("bun test resolves real reactive Solid 2 browser build with flush() and draft stores", () => {
-		createRoot((dispose) => {
+		const seen: number[] = [];
+		const ctx = createRoot((dispose) => {
 			const [n, setN] = createSignal(2);
 			const doubled = createMemo(() => n() * 2);
-			const seen: number[] = [];
 			createEffect(
 				() => doubled(),
 				(v) => {
 					seen.push(v);
 				},
 			);
-			flush();
-			expect(seen).toEqual([4]);
-
-			setN(5);
-			expect(n()).toBe(2); // deferred until flush
-			flush();
-			expect(n()).toBe(5);
-			expect(doubled()).toBe(10);
-			expect(seen).toEqual([4, 10]);
-
 			const [store, setStore] = createStore<{ dirty: Record<string, boolean> }>({ dirty: { "a.ssl": true } });
 			const aDirty = createMemo(() => Boolean(store.dirty["a.ssl"]));
 			const bDirty = createMemo(() => Boolean(store.dirty["b.ssl"]));
-			expect(aDirty()).toBe(true);
-			expect(bDirty()).toBe(false);
+			return { n, setN, doubled, store, setStore, aDirty, bDirty, dispose };
+		});
+		try {
+			flush();
+			expect(seen).toEqual([4]);
 
-			setStore((s) => {
+			ctx.setN(5);
+			expect(ctx.n()).toBe(2); // deferred until flush
+			flush();
+			expect(ctx.n()).toBe(5);
+			expect(ctx.doubled()).toBe(10);
+			expect(seen).toEqual([4, 10]);
+
+			expect(ctx.aDirty()).toBe(true);
+			expect(ctx.bDirty()).toBe(false);
+
+			ctx.setStore((s) => {
 				s.dirty = { "b.ssl": true };
 			});
-			expect(Object.keys(snapshot(store).dirty)).toEqual(["b.ssl"]);
+			expect(Object.keys(snapshot(ctx.store).dirty)).toEqual(["b.ssl"]);
 			flush();
-			expect(aDirty()).toBe(false);
-			expect(bDirty()).toBe(true);
-			dispose();
-		});
+			expect(ctx.aDirty()).toBe(false);
+			expect(ctx.bDirty()).toBe(true);
+		} finally {
+			ctx.dispose();
+		}
 	});
 
 	test("createAsyncQuery fetches, cancels stale runs, supports refetch, and clears on falsy key", async () => {
-		await createRoot(async (dispose) => {
+		const calls: string[] = [];
+		const resolvers = new Map<string, (v: string) => void>();
+		const ctx = createRoot((dispose) => {
 			const [key, setKey] = createSignal<string | false>("a");
-			const calls: string[] = [];
-			const resolvers = new Map<string, (v: string) => void>();
-
 			const [data, { refetch }] = createAsyncQuery(key, (k) => {
 				calls.push(k);
 				return new Promise<string>((r) => resolvers.set(`${k}:${calls.length}`, r));
 			});
+			return { setKey, data, refetch, dispose };
+		});
+		try {
 			flush();
-			expect(data.loading).toBe(true);
+			expect(ctx.data.loading).toBe(true);
 			await Promise.resolve();
 			expect(calls).toEqual(["a"]);
 
 			// Supersede "a" with "b" before "a" resolves — stale "a" result must be dropped.
-			setKey("b");
+			ctx.setKey("b");
 			flush();
 			await Promise.resolve();
 			expect(calls).toEqual(["a", "b"]);
 			resolvers.get("a:1")?.("stale-a");
 			await Promise.resolve();
 			await Promise.resolve();
-			expect(data()).toBeUndefined();
-			expect(data.loading).toBe(true);
+			expect(ctx.data()).toBeUndefined();
+			expect(ctx.data.loading).toBe(true);
 
 			resolvers.get("b:2")?.("fresh-b");
 			await Promise.resolve();
 			await Promise.resolve();
 			flush();
-			expect(data()).toBe("fresh-b");
-			expect(data.latest).toBe("fresh-b");
-			expect(data.loading).toBe(false);
+			expect(ctx.data()).toBe("fresh-b");
+			expect(ctx.data.latest).toBe("fresh-b");
+			expect(ctx.data.loading).toBe(false);
 
 			// Refetch re-runs same key
-			refetch();
+			ctx.refetch();
 			flush();
 			await Promise.resolve();
 			expect(calls).toEqual(["a", "b", "b"]);
@@ -84,14 +90,16 @@ describe("SolidJS 2.0 runtime & createAsyncQuery", () => {
 			await Promise.resolve();
 			await Promise.resolve();
 			flush();
-			expect(data()).toBe("refetched-b");
+			expect(ctx.data()).toBe("refetched-b");
 
 			// Falsy key clears value and loading
-			setKey(false);
+			ctx.setKey(false);
 			flush();
-			expect(data()).toBeUndefined();
-			expect(data.loading).toBe(false);
-			dispose();
-		});
+			expect(ctx.data()).toBeUndefined();
+			expect(ctx.data.latest).toBeUndefined();
+			expect(ctx.data.loading).toBe(false);
+		} finally {
+			ctx.dispose();
+		}
 	});
 });

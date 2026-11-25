@@ -3,8 +3,15 @@
 		"paths": {
 			"electrobun": ["./.hutch/devkit/api/sdks/main/index.ts"],
 			"electrobun/main": ["./.hutch/devkit/api/sdks/main/index.ts"],
-			"electrobun/main/*": ["./.hutch/devkit/api/sdks/main/entries/*.ts"],
+			"electrobun/main/ui/jsx-runtime": ["./.hutch/devkit/api/sdks/main/ui/jsx-runtime.ts"],
+			"electrobun/main/ui/jsx-dev-runtime": ["./.hutch/devkit/api/sdks/main/ui/jsx-dev-runtime.ts"],
 			"electrobun/bun": ["./.hutch/devkit/api/sdks/main/index.ts"],
+			"electrobun/bun/ui/jsx-runtime": ["./.hutch/devkit/api/sdks/main/ui/jsx-runtime.ts"],
+			"electrobun/bun/ui/jsx-dev-runtime": ["./.hutch/devkit/api/sdks/main/ui/jsx-dev-runtime.ts"],
+			"electrobun/browser/ui": ["./.hutch/devkit/api/browser/ui/index.ts"],
+			"electrobun/browser/ui/jsx-runtime": ["./.hutch/devkit/api/browser/ui/jsx-runtime.ts"],
+			"electrobun/browser/ui/jsx-dev-runtime": ["./.hutch/devkit/api/browser/ui/jsx-dev-runtime.ts"],
+			"electrobun/main/*": ["./.hutch/devkit/api/sdks/main/entries/*.ts"],
 			"electrobun/bun/*": ["./.hutch/devkit/api/sdks/main/entries/*.ts"],
 			"electrobun/rpc": ["./.hutch/devkit/api/sdks/main/entries/rpc.ts"],
 			"electrobun/view": ["./.hutch/devkit/api/browser/index.ts"]

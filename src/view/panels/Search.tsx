@@ -510,6 +510,8 @@ export function Search() {
 		setDismissedLines(new Set<string>());
 		if (!rawQuery) {
 			setHits([]);
+			setAsked("");
+			setEffectiveAsked("");
 			setStatus("idle");
 			return;
 		}
@@ -952,7 +954,7 @@ export function Search() {
 		const next = re.test(cur) ? cur.replace(re, " ").replace(/\s+/g, " ").trim() : `${token}${cur.trim() ? ` ${cur.trim()}` : ""}`;
 		if (input) input.value = next;
 		setTyped(next);
-		if (next) void run();
+		void run({ query: next });
 	};
 	const hasQueryToken = (token: string) => {
 		const esc = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -1463,16 +1465,14 @@ export function Search() {
 						{(part) =>
 							!part.match ? (
 								part.text
-							) : after()?.has(part.column!) ? (
-								// What is there now, struck out, and what would stand in its place.
-								<>
+							) : (
+								<Show when={after()?.has(part.column!)} fallback={<mark>{part.text}</mark>}>
+									{/* What is there now, struck out, and what would stand in its place. */}
 									<del>{part.text}</del>
 									<span class="visually-hidden"> becomes </span>
-									<ins>{after()!.get(part.column!)}</ins>
+									<ins>{after()?.get(part.column!) ?? ""}</ins>
 									<span class="visually-hidden"> </span>
-								</>
-							) : (
-								<mark>{part.text}</mark>
+								</Show>
 							)
 						}
 					</For>

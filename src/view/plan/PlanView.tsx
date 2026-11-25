@@ -5,7 +5,7 @@
 // model (ADR 0002). Assistant (Refine, Questions, Spec, Build, Tests) lives
 // cleanly in the Palette panel's Assistant tab so the chart stays unobstructed.
 import ELK from "elkjs/lib/elk.bundled.js";
-import { createEffect, createMemo, createSignal, createUniqueId, flush, For, onCleanup, onSettled, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, flush, For, onCleanup, onSettled, Show, untrack } from "solid-js";
 import { baseName, dirName, joinPath, relativeTo } from "../../shared/paths";
 import { isCatalog, registryTitle, ticketKey, toneOf } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
@@ -690,31 +690,33 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	});
 
 	// Re-run ELK only when chart topology, text, labels, groups, suggestions, or direction change — NOT on manual drag offsets.
-	const topologyKey = createMemo(() => {
-		const p = plan();
-		if (!p) return "";
-		const suggestions = assistOf(props.path).suggestions;
-		const preview = previewPlan(p, suggestions);
-		return JSON.stringify({
-			dir: direction(),
-			g: preview.groups.map((g) => [g.id, g.name]),
-			n: preview.nodes.map((n) => [n.id, n.kind, n.text, n.group ?? "", Boolean(n.pending)]),
-			e: preview.edges.map((e) => [e.from, e.to, textOf(e.label), Boolean(e.pending), Boolean(e.removing)]),
-		});
-	});
+	const layoutInput = createMemo(
+		() => {
+			const p = plan();
+			if (!p) return { key: "", plan: null as Plan | null, suggestions: [] as ReturnType<typeof assistOf>["suggestions"], dir: "DOWN" as LayoutDirection };
+			const suggestions = assistOf(props.path).suggestions;
+			const dir = direction();
+			const preview = previewPlan(p, suggestions);
+			const key = JSON.stringify({
+				dir,
+				g: preview.groups.map((g) => [g.id, g.name]),
+				n: preview.nodes.map((n) => [n.id, n.kind, n.text, n.group ?? "", Boolean(n.pending)]),
+				e: preview.edges.map((e) => [e.from, e.to, textOf(e.label), Boolean(e.pending), Boolean(e.removing)]),
+			});
+			return { key, plan: p, suggestions, dir };
+		},
+		{ equals: (a, b) => a.key === b.key },
+	);
 
 	let layoutRun = 0;
 	onCleanup(() => ++layoutRun);
 	createEffect(
-		() => topologyKey(),
-		(key) => {
-			const p = plan();
+		() => layoutInput(),
+		({ key, plan: p, suggestions, dir }) => {
 			if (!key || !p) {
 				++layoutRun;
 				return;
 			}
-			const suggestions = assistOf(props.path).suggestions;
-			const dir = direction();
 			const run = ++layoutRun;
 			void (async () => {
 				try {
@@ -731,6 +733,9 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 					notify(`Could not lay out the chart: ${e?.message ?? e}`, "error");
 				}
 			})();
+			return () => {
+				++layoutRun;
+			};
 		},
 	);
 
@@ -934,11 +939,11 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 
 	/** Fits as much of the chart as stays legible; returns true if canvas had real dimensions. */
 	const fit = (): boolean => {
-		const l = layout();
+		const [l, sel] = untrack(() => [layout(), selected()] as const);
 		if (!l || !canvas) return false;
 		const box = canvas.getBoundingClientRect();
 		if (box.width < 10 || box.height < 10) return false;
-		const here = l.boxes.find((b) => b.node && b.id === selected()) ?? l.boxes.find((b) => b.node?.kind === "start");
+		const here = l.boxes.find((b) => b.node && b.id === sel) ?? l.boxes.find((b) => b.node?.kind === "start");
 		fittedView = fitView(l, box, { floor: FIT_FLOOR, anchor: here && { x: here.x + here.width / 2, y: here.y + here.height / 2 } });
 		fittedWhole = false;
 		setView(fittedView);
@@ -970,7 +975,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 				return;
 			}
 			const frame = requestAnimationFrame(() => {
-				if (!isTextMode() && !fitted && layout() && fit()) fitted = true;
+				if (!untrack(isTextMode) && !fitted && untrack(layout) && fit()) fitted = true;
 			});
 			return () => cancelAnimationFrame(frame);
 		},
@@ -1017,16 +1022,16 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	createEffect(
 		() => [selected(), edge(), layout()] as const,
 		([id, chosen, l]) => {
-			if (!l || !canvas) return;
+			if (!l || !canvas || untrack(nodeDrag)?.moved) return;
 			const size = canvas.getBoundingClientRect();
 			if (size.width < 10 || size.height < 10) return;
 			const line = chosen && l.lines.find((x) => x.from === chosen.from && x.to === chosen.to);
 			const box = line ? { x: line.at.x - 30, y: line.at.y - 12, width: 60, height: 24 } : l.boxes.find((b) => b.node && b.id === id);
 			if (!box) return;
-			const v = view();
-			const shown = reveal(v, box, size);
-			const next = outOfSight(l, shown, size) ? clearOf(shown, box, mapArea(l, size)) : shown;
-			if (next !== v) setView(next);
+			setView((v) => {
+				const shown = reveal(v, box, size);
+				return outOfSight(l, shown, size) ? clearOf(shown, box, mapArea(l, size)) : shown;
+			});
 		},
 	);
 
@@ -2170,11 +2175,11 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 
 	// --- Right-Click Context Menus -------------------------------------------
 
-	const alignSubmenu = (): RowMenuEntry[] =>
-		selectedIds().size >= 2
+	const alignSubmenu = (count = selectedIds().size): RowMenuEntry[] =>
+		count >= 2
 			? [
 					{
-						label: `Align & Distribute (${selectedIds().size} selected)`,
+						label: `Align & Distribute (${count} selected)`,
 						children: [
 							{ label: "Align Left", value: "align:left" },
 							{ label: "Align Center", value: "align:center" },
@@ -2203,6 +2208,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		e.preventDefault();
 		e.stopPropagation();
 		const keepMulti = selectedIds().size > 1 && selectedIds().has(n.id);
+		const effectiveCount = keepMulti ? selectedIds().size : 1;
 		select(n.id, keepMulti);
 		const EDIT = "Edit label";
 		const ADD_STEP = "Add step after";
@@ -2223,14 +2229,14 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const NEW_QUESTION = "New question for this step…";
 		const NEW_DECISION = "New decision for this step…";
 		const NEW_SPEC = "New spec for this step…";
-		const DEL = keepMulti ? `Delete ${selectedIds().size} selected` : "Delete";
+		const DEL = keepMulti ? `Delete ${effectiveCount} selected` : "Delete";
 		const canBranch = n.kind === "step" || n.kind === "call" || n.kind === "decision";
 		const canDup = n.kind !== "start" && n.kind !== "end";
 		const hasCode = linksOf(n.id).length > 0 || Boolean(textOf(n.ref).trim());
 		const hasDrift = driftNodes().has(n.id) || driftFor(planUri() ?? "").items.length > 0;
 		const off = safeOffset(n.offset, direction());
 		const hasOffset = off.x !== 0 || off.y !== 0;
-		const alignGroup = alignSubmenu();
+		const alignGroup = alignSubmenu(effectiveCount);
 		const flowGroup: RowMenuEntry[] = [
 			...(n.kind !== "end" ? [{ label: ADD_STEP, value: ADD_STEP, keys: "Enter" }] : []),
 			...(canBranch ? [{ label: ADD_BRANCH, value: ADD_BRANCH, keys: "B" }] : []),
@@ -3040,8 +3046,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 								setPanning(true);
 							}
 							panned += Math.abs(dx) + Math.abs(dy);
-							const v = view();
-							setView({ ...v, x: v.x + dx, y: v.y + dy });
+							setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
 							dragging = { ...dragging, x: e.clientX, y: e.clientY };
 						}}
 						onMouseUp={() => {
@@ -3978,31 +3983,54 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 							/>
 						</Show>
 
-						<Show when={editBox()} keyed>
-							{(box) => (
-								<input
-									class="plan-edit"
-									aria-label={editing() && "node" in editing()! ? "The node's words" : "The label of this way out"}
-									style={{ left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px` }}
-									ref={(el) => {
-										el.value = editValue();
-										queueMicrotask(() => (el.focus(), el.select()));
-									}}
-									onMouseDown={(e) => e.stopPropagation()}
-									onClick={(e) => e.stopPropagation()}
-									onKeyDown={(e) => {
-										e.stopPropagation();
-										if (e.key === "Enter") commitEdit(e.currentTarget.value);
-										if (e.key === "Escape") {
-											setEditing(null);
-											refocus();
+						<Show when={editing()} keyed>
+							{(target) => {
+								const initial = untrack(editValue);
+								const box = createMemo(() => editBox());
+								const hasBox = createMemo(() => Boolean(box()));
+								let inputEl: HTMLInputElement | undefined;
+								createEffect(
+									() => hasBox(),
+									(ready) => {
+										if (ready && inputEl) {
+											queueMicrotask(() => {
+												if (inputEl?.isConnected) {
+													inputEl.focus();
+													inputEl.select();
+												}
+											});
 										}
-									}}
-									onBlur={(e) => {
-										if (editing()) commitEdit(e.currentTarget.value, false);
-									}}
-								/>
-							)}
+									},
+								);
+								return (
+									<input
+										class="plan-edit"
+										aria-label={"node" in target ? "The node's words" : "The label of this way out"}
+										defaultValue={initial}
+										style={
+											box()
+												? { left: `${box()!.left}px`, top: `${box()!.top}px`, width: `${box()!.width}px` }
+												: { display: "none" }
+										}
+										ref={(el) => {
+											inputEl = el;
+										}}
+										onMouseDown={(e) => e.stopPropagation()}
+										onClick={(e) => e.stopPropagation()}
+										onKeyDown={(e) => {
+											e.stopPropagation();
+											if (e.key === "Enter") commitEdit(e.currentTarget.value);
+											if (e.key === "Escape") {
+												setEditing(null);
+												refocus();
+											}
+										}}
+										onBlur={(e) => {
+											if (editing()) commitEdit(e.currentTarget.value, false);
+										}}
+									/>
+								);
+							}}
 						</Show>
 
 						<Show when={linking()}>

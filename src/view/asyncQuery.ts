@@ -25,7 +25,10 @@ export function createAsyncQuery<S, T>(
 ): [AsyncQuery<T>, AsyncQueryActions<T>] {
 	const [value, setValue] = createSignal<T | undefined>(undefined);
 	const [latest, setLatest] = createSignal<T | undefined>(undefined);
-	const [loading, setLoading] = createSignal(false);
+	// Without a gating source the query always starts fetching on mount.
+	// With a source, avoid reading `source()` untracked here (STRICT_READ_UNTRACKED);
+	// the effect sets `loading(true)` on the first flush when the source is truthy.
+	const [loading, setLoading] = createSignal(!maybeFetcher);
 	const [error, setError] = createSignal<unknown>(undefined);
 	const [bump, setBump] = createSignal(0);
 	let seq = 0;
@@ -40,6 +43,7 @@ export function createAsyncQuery<S, T>(
 					setLoading(false);
 					setError(undefined);
 					setValue(undefined);
+					setLatest(undefined);
 					return;
 				}
 				setLoading(true);
@@ -49,6 +53,8 @@ export function createAsyncQuery<S, T>(
 				try {
 					task = Promise.resolve(maybeFetcher(key));
 				} catch (err) {
+					if (runId !== seq) return;
+					setValue(undefined);
 					setError(() => err);
 					setLoading(false);
 					return;
@@ -62,6 +68,7 @@ export function createAsyncQuery<S, T>(
 					},
 					(err) => {
 						if (cancelled || runId !== seq) return;
+						setValue(undefined);
 						setError(() => err);
 						setLoading(false);
 					},
@@ -84,6 +91,8 @@ export function createAsyncQuery<S, T>(
 				try {
 					task = Promise.resolve(fetcher());
 				} catch (err) {
+					if (runId !== seq) return;
+					setValue(undefined);
 					setError(() => err);
 					setLoading(false);
 					return;
@@ -97,6 +106,7 @@ export function createAsyncQuery<S, T>(
 					},
 					(err) => {
 						if (cancelled || runId !== seq) return;
+						setValue(undefined);
 						setError(() => err);
 						setLoading(false);
 					},
@@ -119,6 +129,9 @@ export function createAsyncQuery<S, T>(
 		{
 			refetch: () => setBump((n) => n + 1),
 			mutate: (v) => {
+				++seq;
+				setLoading(false);
+				setError(undefined);
 				setValue(() => v);
 				setLatest(() => v);
 			},

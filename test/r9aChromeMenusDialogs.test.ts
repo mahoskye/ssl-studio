@@ -637,7 +637,7 @@ describe("R9A P1 — languages, monaco, StatusBar, EditorGroup cursor sync, file
 
 		const egSrc = readSrc("../src/view/editor/EditorGroup.tsx");
 		expect(egSrc).toMatch(/onDidFocusEditorText\(\(\) => \{\s*const at = editor\.getPosition\(\);[\s\S]*?s\.activeGroup = props\.index;/);
-		expect(egSrc).toContain("liveEditorAt(props.index)?.getPosition()");
+		expect(egSrc).toContain("liveEditorAt(index)?.getPosition()");
 
 		const wSrc = readSrc("../src/view/Welcome.tsx");
 		expect(wSrc).toContain("() => state.workspace?.root ?? \"\"");

@@ -18,6 +18,6 @@ export default defineConfig({
 		outDir: "../../dist",
 		emptyOutDir: true,
 		chunkSizeWarningLimit: 8000,
-		minify: process.env.NO_MINIFY ? false : "esbuild",
+		minify: process.env.NO_MINIFY ? false : "oxc",
 	},
 });

@@ -2,7 +2,7 @@
 // five-state code status breakdown, open questions/suggestions, flowchart test
 // walkthroughs, and spec status. Answers and accepted suggestions are undoable
 // text edits on the plan (ADR 0002).
-import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, onSettled, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, Show, untrack } from "solid-js";
 import { createAsyncQuery } from "../asyncQuery";
 import { Icon } from "../Icon";
 import { agent, currentModel } from "../agent/store";
@@ -112,10 +112,6 @@ export function PlanAssistant(props: {
 	let draftSeq = 0;
 	const customTests = createMemo(() => planTestsOf(props.plan));
 
-	onSettled(() => {
-		void loadRun(props.path);
-	});
-
 	const run = () => a().run;
 	const STATUS = { pending: "Waiting", running: "Building", passed: "Passed", stuck: "Stuck", skipped: "Waiting on a stuck unit", kept: "Untouched" } as const;
 	/** A run of an earlier version of the chart: it cannot be reviewed against this one. */
@@ -132,12 +128,15 @@ export function PlanAssistant(props: {
 	const closed = () => allDecisions().filter((d) => Boolean(d.answer?.trim()));
 	const inputCount = () => open().length + a().suggestions.length;
 
-	// Clear any pending journey test draft when collapsing the Tests card or switching plans.
+	// Load any saved build run and clear pending journey test drafts when mounting or switching plans.
 	const planPath = createMemo(() => props.path);
 	createEffect(
 		() => planPath(),
-		() => {
+		(p) => {
 			setDraftReq(null);
+			untrack(() => {
+				void loadRun(p);
+			});
 		},
 	);
 	createEffect(

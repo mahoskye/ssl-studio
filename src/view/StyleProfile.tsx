@@ -1,7 +1,7 @@
 // The style profile editor: the language server's `ssl` settings, per user
 // or per workspace, with the house preset (decisions 0002, 0005, 0006).
 import { Icon } from "./Icon";
-import { createEffect, createSignal, createUniqueId, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, Show, untrack } from "solid-js";
 import { createAsyncQuery } from "./asyncQuery";
 import { getPath, HOUSE_STYLE, SERVER_DEFAULTS, RULE_LEVELS, SECTIONS, setPath, type Field, type PathKey } from "../shared/styleProfile";
 import { backend } from "./backend";
@@ -86,9 +86,9 @@ export function StyleProfile() {
 	const [preview] = createAsyncQuery(
 		() => {
 			if (!open() || state.lsp.state !== "running" || !state.workspace) return false as const;
-			return [JSON.stringify(state.settings.ssl ?? {}), state.settings.theme, state.settings.themeMaterial ?? "", previewTabSize(), previewInsertSpaces()] as const;
+			return [state.workspace.root, JSON.stringify(state.settings.ssl ?? {}), state.settings.theme, state.settings.themeMaterial ?? "", previewTabSize(), previewInsertSpaces()] as const;
 		},
-		async ([, , , tabSize, insertSpaces]) => {
+		async ([, , , , tabSize, insertSpaces]) => {
 			await new Promise((done) => setTimeout(done, 150));
 			try {
 				const formatted = await session.formatText(SAMPLE, { tabSize, insertSpaces });
@@ -120,8 +120,11 @@ export function StyleProfile() {
 
 	const set = (path: PathKey, value: unknown) => {
 		const targetScope = scope();
-		const nextSsl = setPath(layers()[targetScope], path, value);
-		setLayers((prev) => ({ ...prev, [targetScope]: nextSsl }));
+		let nextSsl: Record<string, any> = {};
+		setLayers((prev) => {
+			nextSsl = setPath(prev[targetScope], path, value);
+			return { ...prev, [targetScope]: nextSsl };
+		});
 		void enqueueSave(targetScope, { ssl: nextSsl });
 	};
 
@@ -195,22 +198,44 @@ export function StyleProfile() {
 		return [...seen].sort();
 	};
 
-	const commitNumber = (el: HTMLInputElement, field: Extract<Field, { kind: "number" }>) => {
-		const raw = el.value.trim();
+	const commitNumber = (rawValue: string, field: Extract<Field, { kind: "number" }>): string => {
+		const raw = rawValue.trim();
 		if (raw === "") {
 			set(field.path, undefined);
-			return;
+			return String(displayed(field.path) ?? "");
 		}
 		const parsed = Number(raw);
 		if (!Number.isFinite(parsed)) {
-			el.value = String(displayed(field.path) ?? "");
-			return;
+			return String(displayed(field.path) ?? "");
 		}
 		let clamped = Math.round(parsed);
 		if (field.min !== undefined) clamped = Math.max(field.min, clamped);
 		if (field.max !== undefined) clamped = Math.min(field.max, clamped);
-		el.value = String(clamped);
 		set(field.path, clamped);
+		return String(clamped);
+	};
+
+	const NumberInput = (props: { field: Extract<Field, { kind: "number" }> }) => {
+		const displayedText = createMemo(() => String(displayed(props.field.path) ?? ""));
+		const [draft, setDraft] = createSignal(untrack(displayedText));
+		createEffect(displayedText, (v) => {
+			setDraft(v);
+		});
+		return (
+			<input
+				type="number"
+				min={props.field.min}
+				max={props.field.max}
+				value={draft()}
+				placeholder={String(getPath(SERVER_DEFAULTS, props.field.path) ?? "server default")}
+				onInput={(e) => setDraft(e.currentTarget.value)}
+				onChange={(e) => {
+					const next = commitNumber(e.currentTarget.value, props.field);
+					setDraft(next);
+					e.currentTarget.value = next;
+				}}
+			/>
+		);
 	};
 
 	const Input = (props: { field: Field }) => {
@@ -232,14 +257,7 @@ export function StyleProfile() {
 				{f.kind === "boolean" ? (
 					<input type="checkbox" checked={Boolean(displayed(f.path))} onChange={(e) => set(f.path, e.currentTarget.checked)} />
 				) : f.kind === "number" ? (
-					<input
-						type="number"
-						min={f.min}
-						max={f.max}
-						value={displayed(f.path) ?? ""}
-						placeholder={String(getPath(SERVER_DEFAULTS, f.path) ?? "server default")}
-						onChange={(e) => commitNumber(e.currentTarget, f)}
-					/>
+					<NumberInput field={f} />
 				) : (
 					<select value={displayed(f.path) ?? ""} onChange={(e) => set(f.path, e.currentTarget.value || undefined)}>
 						<option value="">server default</option>
@@ -345,7 +363,7 @@ export function StyleProfile() {
 					</h3>
 					<Show when={state.lsp.state === "running" && state.workspace} fallback={<p class="hint">The preview is formatted by the language server, and appears when it is running with a folder open.</p>}>
 						<Show when={!preview()?.error} fallback={<p class="hint">The sample could not be formatted: {preview()?.error}</p>}>
-							<pre class="block-code" style={{ "tab-size": String(previewTabSize()) }} innerHTML={preview.latest?.html ?? ""} />
+							<pre class="block-code" style={{ "tab-size": String(previewTabSize()) }} innerHTML={preview()?.html ?? ""} />
 						</Show>
 					</Show>
 				</section>

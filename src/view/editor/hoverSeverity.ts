@@ -24,6 +24,9 @@ export function severityName(severity: number): HoverSeverity {
 
 const normalizeSpace = (s: string) => s.replace(/\s+/g, " ").trim();
 
+const readText = (node: { innerText?: string; textContent?: string | null } | null | undefined): string =>
+	node?.innerText || node?.textContent || "";
+
 function markerDetailLabels(marker: MarkerLike): string[] {
 	const codeVal = typeof marker.code === "string" ? marker.code : marker.code?.value;
 	const src = marker.source ? normalizeSpace(marker.source) : "";
@@ -49,16 +52,15 @@ function matchIn(msg: string, detail: string, markers: readonly MarkerLike[]): H
 	return null;
 }
 
-/** Matches a rendered Monaco `.marker.hover-contents` row back to its model marker severity. */
-export function matchMarkerSeverity(
+function findMarkerSeverity(
 	messageText: string,
 	detailText: string,
 	markers: readonly MarkerLike[],
 	lineNumber?: number | null,
-): HoverSeverity {
+): HoverSeverity | null {
 	const msg = normalizeSpace(messageText);
 	const detail = normalizeSpace(detailText);
-	if (!msg || !markers.length) return "warning";
+	if (!msg || !markers.length) return null;
 
 	if (lineNumber != null && lineNumber > 0) {
 		const scoped = markers.filter(
@@ -74,7 +76,53 @@ export function matchMarkerSeverity(
 		}
 	}
 
-	return matchIn(msg, detail, markers) ?? "warning";
+	return matchIn(msg, detail, markers);
+}
+
+/** Matches a rendered Monaco `.marker.hover-contents` row back to its model marker severity. */
+export function matchMarkerSeverity(
+	messageText: string,
+	detailText: string,
+	markers: readonly MarkerLike[],
+	lineNumber?: number | null,
+	fallback: HoverSeverity = "warning",
+): HoverSeverity {
+	return findMarkerSeverity(messageText, detailText, markers, lineNumber) ?? fallback;
+}
+
+/** Reads Monaco 0.58+'s `.marker-severity` codicon span when present as an exact/fallback severity signal. */
+export function severityFromIcon(iconEl: Element | null | undefined): HoverSeverity | null {
+	if (!iconEl) return null;
+	const hasClass = (cls: string) =>
+		iconEl.classList?.contains?.(cls) ??
+		(typeof iconEl.className === "string" && iconEl.className.split(/\s+/).includes(cls));
+	if (hasClass("codicon-error")) return "error";
+	if (hasClass("codicon-warning")) return "warning";
+	if (hasClass("severity-ignore")) return "hint";
+	if (hasClass("codicon-info")) {
+		const aria = iconEl.getAttribute?.("aria-label")?.trim().toLowerCase();
+		return aria === "hint" ? "hint" : "info";
+	}
+	return null;
+}
+
+/** Resolves the severity of a rendered Monaco `.marker.hover-contents` DOM node (both Monaco 0.58+ and legacy layouts). */
+export function resolveMarkerHoverSeverity(
+	el: HTMLElement,
+	markers: readonly MarkerLike[],
+	lineNumber?: number | null,
+): HoverSeverity {
+	const msgContainer = el.querySelector?.<HTMLElement>(":scope > .marker-message") ?? null;
+	const spans = msgContainer
+		? msgContainer.querySelectorAll<HTMLElement>(":scope > span")
+		: el.querySelectorAll<HTMLElement>(":scope > span:not(.marker-severity)");
+	const msg = readText(spans[0]) || readText(msgContainer) || readText(el);
+	const detail = readText(spans[1]);
+	const iconSev = severityFromIcon(el.querySelector?.(":scope > .marker-severity"));
+	// Monaco 0.58+ renders unambiguous codicons for Error, Warning, and Hint (`severity-ignore`);
+	// match against model markers for legacy DOM and for `codicon-info` (distinguishing Hint vs Info).
+	if (iconSev === "error" || iconSev === "warning" || iconSev === "hint") return iconSev;
+	return matchMarkerSeverity(msg, detail, markers, lineNumber, iconSev ?? "warning");
 }
 
 /**
@@ -100,10 +148,7 @@ export function observeMarkerHoverSeverity(editor: monaco.editor.ICodeEditor): (
 		for (const el of markerNodes) {
 			const row = el.closest<HTMLElement>(".hover-row");
 			if (!row) continue;
-			const spans = el.querySelectorAll<HTMLElement>(":scope > span");
-			const msg = spans[0]?.innerText ?? spans[0]?.textContent ?? el.innerText ?? el.textContent ?? "";
-			const detail = spans[1]?.innerText ?? spans[1]?.textContent ?? "";
-			const sev = matchMarkerSeverity(msg, detail, markers, line);
+			const sev = resolveMarkerHoverSeverity(el, markers, line);
 			if (row.dataset.severity !== sev) row.dataset.severity = sev;
 		}
 	};

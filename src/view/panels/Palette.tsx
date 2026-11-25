@@ -2,7 +2,7 @@
 // the snippets the project keeps in its knowledge base (ADR 0012), inserted
 // as they are written. When a plan chart is open, Palette switches cleanly to
 // business-analyst process shapes and stage navigation (ADR 0027).
-import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from "solid-js";
 import { createAsyncQuery } from "../asyncQuery";
 import { snippetAsText, TEMPLATES, type Template } from "../../shared/houseStyle";
 import { CALLOUT_PRESETS } from "../../shared/markdownEdit";
@@ -563,6 +563,62 @@ export function Palette() {
 				ro.observe(nextEl);
 			}
 		};
+	};
+	const DraftInput = (props: {
+		value: string;
+		resetKey?: string;
+		placeholder?: string;
+		list?: string;
+		onKeyDown?: (e: KeyboardEvent) => void;
+		onCommit: (value: string) => void;
+	}) => {
+		const [draft, setDraft] = createSignal(untrack(() => props.value));
+		const syncVal = createMemo(
+			() => ({ key: props.resetKey ?? "", value: props.value }),
+			{ equals: (a, b) => a.key === b.key && a.value === b.value },
+		);
+		createEffect(syncVal, ({ value }) => {
+			setDraft(value);
+		});
+		return (
+			<input
+				value={draft()}
+				placeholder={props.placeholder}
+				list={props.list}
+				onKeyDown={props.onKeyDown}
+				onInput={(e) => setDraft(e.currentTarget.value)}
+				onChange={(e) => props.onCommit(e.currentTarget.value)}
+			/>
+		);
+	};
+	const DraftTextarea = (props: {
+		value: string;
+		resetKey?: string;
+		rows?: number;
+		placeholder?: string;
+		onCommit: (value: string) => void;
+	}) => {
+		const [draft, setDraft] = createSignal(untrack(() => props.value));
+		const syncVal = createMemo(
+			() => ({ key: props.resetKey ?? "", value: props.value }),
+			{ equals: (a, b) => a.key === b.key && a.value === b.value },
+		);
+		createEffect(syncVal, ({ value }) => {
+			setDraft(value);
+		});
+		return (
+			<textarea
+				ref={bindAutoTextarea(draft)}
+				rows={props.rows}
+				value={draft()}
+				placeholder={props.placeholder}
+				onInput={(e) => {
+					setDraft(e.currentTarget.value);
+					fitTextarea(e.currentTarget);
+				}}
+				onChange={(e) => props.onCommit(e.currentTarget.value)}
+			/>
+		);
 	};
 	const showTemplate = (t: Template) => void setShown({ label: t.label, note: t.note, text: snippetAsText(t.body()) });
 	/** A snippet's text is read when it is pointed at: the row asked for last is the one shown. */
@@ -1189,9 +1245,8 @@ export function Palette() {
 														{/* Contextual inspector: Selected object OR Plan (never both stacked together). */}
 														<Show
 															when={plan.selectedNode()}
-															keyed
 															fallback={
-																<Show when={p()} keyed>
+																<Show when={p()}>
 																	{(curPlan) => (
 																		<div class="plan-inspector">
 																			<section class="plan-prop-section" aria-label="Plan details">
@@ -1199,21 +1254,21 @@ export function Palette() {
 																				<div class="plan-prop-fields">
 																					<label class="plan-prop-field">
 																						<span>Title</span>
-																						<input
-																							value={curPlan.title ?? ""}
+																						<DraftInput
+																							resetKey={plan.path}
+																							value={curPlan().title ?? ""}
 																							onKeyDown={commitOnEnter}
-																							onChange={(e) => plan.setPlanField("title", e.currentTarget.value)}
+																							onCommit={(val) => plan.setPlanField("title", val)}
 																						/>
 																					</label>
 																					<label class="plan-prop-field">
 																						<span>Goal</span>
-																						<textarea
-																							ref={bindAutoTextarea(goalText)}
+																						<DraftTextarea
+																							resetKey={plan.path}
 																							rows={2}
 																							value={goalText()}
 																							placeholder="What this process should achieve"
-																							onInput={(e) => fitTextarea(e.currentTarget)}
-																							onChange={(e) => plan.setPlanField("goal", e.currentTarget.value)}
+																							onCommit={(val) => plan.setPlanField("goal", val)}
 																						/>
 																					</label>
 																					<label
@@ -1222,19 +1277,20 @@ export function Palette() {
 																					>
 																						<span>Ticket</span>
 																						<div class="plan-ticket-row">
-																							<input
-																								value={typeof curPlan.ticket === "string" ? curPlan.ticket : ""}
+																							<DraftInput
+																								resetKey={plan.path}
+																								value={typeof curPlan().ticket === "string" ? (curPlan().ticket as string) : ""}
 																								placeholder="LIMS-123"
 																								onKeyDown={commitOnEnter}
-																								onChange={(e) => plan.setPlanField("ticket", e.currentTarget.value)}
+																								onCommit={(val) => plan.setPlanField("ticket", val)}
 																							/>
-																							<Show when={ticketDoc()} keyed>
+																							<Show when={ticketDoc()}>
 																								{(td) => (
 																									<IconButton
-																										label={`Open ticket ${td.ticket}`}
-																										title={`Open ${td.ticket}${td.title ? `: ${td.title}` : ""}`}
+																										label={`Open ticket ${td().ticket}`}
+																										title={`Open ${td().ticket}${td().title ? `: ${td().title}` : ""}`}
 																										icon="go-to-file"
-																										onClick={() => void openFile(td.path)}
+																										onClick={() => void openFile(td().path)}
 																									/>
 																								)}
 																							</Show>
@@ -1270,7 +1326,7 @@ export function Palette() {
 																					type="button"
 																					class="plan-sched-btn"
 																					title="Implement this plan with Agent or run the spec build"
-																					onClick={() => plan.triggerScheduledBuild({ kind: "plan", label: curPlan.title || "this plan" })}
+																					onClick={() => plan.triggerScheduledBuild({ kind: "plan", label: curPlan().title || "this plan" })}
 																				>
 																					<Icon name="tools" />
 																					<span>Implement with Agent</span>
@@ -1280,7 +1336,7 @@ export function Palette() {
 																						type="button"
 																						class="plan-sched-btn"
 																						title="Reconcile chart and code drift with Agent"
-																						onClick={() => void fixPlanDriftWithAgent(plan.path, curPlan, plan.planUri())}
+																						onClick={() => void fixPlanDriftWithAgent(plan.path, curPlan(), plan.planUri())}
 																					>
 																						<Icon name="warning" />
 																						<span>Fix drift with Agent</span>
@@ -1298,7 +1354,7 @@ export function Palette() {
 																			</div>
 
 																			<PlanTests
-																				plan={curPlan}
+																				plan={curPlan()}
 																				allPaths={plan.allPaths()}
 																				activePathIndex={plan.activePathIndex()}
 																				open={planTestsOpen()}
@@ -1316,7 +1372,7 @@ export function Palette() {
 																			/>
 
 																			<PlanImplementation
-																				plan={curPlan}
+																				plan={curPlan()}
 																				builtUnits={plan.builtUnits()}
 																				open={planImplOpen()}
 																				onToggle={() => setPlanImplOpen((o) => !o)}
@@ -1333,18 +1389,18 @@ export function Palette() {
 															}
 														>
 															{(node) => {
-																const displayKind = node.kind === "call" ? "step" : node.kind;
-																const heading = `Selected ${displayKind}`;
-																const iconName: IconName =
-																	displayKind === "decision"
+																const displayKind = () => (node().kind === "call" ? "step" : node().kind);
+																const heading = () => `Selected ${displayKind()}`;
+																const iconName = (): IconName =>
+																	displayKind() === "decision"
 																		? "git-branch"
-																		: displayKind === "end"
+																		: displayKind() === "end"
 																			? "pass-filled"
 																			: "play";
-																const codeState = () => plan.codeStateOf(node.id);
-																const actionable = node.kind !== "start" && node.kind !== "end";
+																const codeState = () => plan.codeStateOf(node().id);
+																const actionable = () => node().kind !== "start" && node().kind !== "end";
 																const linkedDocs = () =>
-																	nodeDocsOf(node).map((ref) => {
+																	nodeDocsOf(node()).map((ref) => {
 																		const doc = resolveLinkedDoc(ref);
 																		const label = doc ? docDisplayName(doc) : baseName(ref) || ref;
 																		const kind = doc ? docKindTag(doc) : "";
@@ -1378,7 +1434,7 @@ export function Palette() {
 																const linkDoc = (d: DocFile) => {
 																	const cur = p();
 																	if (!cur) return;
-																	applyText(plan.path, printPlan(addNodeDoc(cur, node.id, docRelPath(d))));
+																	applyText(plan.path, printPlan(addNodeDoc(cur, node().id, docRelPath(d))));
 																	setDocPickerOpen(false);
 																	setDocPickerQuery("");
 																	setDocPickerIdx(0);
@@ -1387,7 +1443,7 @@ export function Palette() {
 																const unlinkDoc = (ref: string) => {
 																	const cur = p();
 																	if (!cur) return;
-																	applyText(plan.path, printPlan(removeNodeDoc(cur, node.id, ref)));
+																	applyText(plan.path, printPlan(removeNodeDoc(cur, node().id, ref)));
 																};
 																const openLinkedDoc = (item: { ref: string; doc: DocFile | null }) => {
 																	if (item.doc) return void openFile(item.doc.path);
@@ -1403,14 +1459,14 @@ export function Palette() {
 																};
 																return (
 																	<div class="plan-inspector">
-																		<section class="plan-prop-section plan-step-section" aria-label={heading}>
+																		<section class="plan-prop-section plan-step-section" aria-label={heading()}>
 																			<div class="plan-step-head">
-																				<Icon name={iconName} class={`plan-sel-icon ${displayKind}`} />
-																				<span class="plan-prop-title">{heading}</span>
+																				<Icon name={iconName()} class={`plan-sel-icon ${displayKind()}`} />
+																				<span class="plan-prop-title">{heading()}</span>
 																				<span class="spacer" />
-																				<IconButton label={`Close ${heading.toLowerCase()}`} title="Back to plan details (Esc)" icon="close" onClick={() => plan.clearSelection()} />
+																				<IconButton label={`Close ${heading().toLowerCase()}`} title="Back to plan details (Esc)" icon="close" onClick={() => plan.clearSelection()} />
 																			</div>
-																			<Show when={actionable}>
+																			<Show when={actionable()}>
 																				<div class="plan-step-status-row">
 																					<span
 																						class={`plan-code-badge ${codeState()}`}
@@ -1433,10 +1489,11 @@ export function Palette() {
 																							if (codeState() === "yellow" && cur && driftFor(plan.planUri() ?? "").items.length > 0) {
 																								void fixPlanDriftWithAgent(plan.path, cur, plan.planUri());
 																							} else {
+																								const curNode = node();
 																								plan.triggerScheduledBuild({
 																									kind: "node",
-																									id: node.id,
-																									label: node.text.trim() || node.id,
+																									id: curNode.id,
+																									label: curNode.text.trim() || curNode.id,
 																								});
 																							}
 																						}}
@@ -1456,8 +1513,8 @@ export function Palette() {
 																						{(k) => (
 																							<button
 																								type="button"
-																								class={{ on: displayKind === k }}
-																								aria-pressed={displayKind === k ? "true" : "false"}
+																								class={{ on: displayKind() === k }}
+																								aria-pressed={displayKind() === k ? "true" : "false"}
 																								onClick={() => plan.setNodeKind(k)}
 																							>
 																								{k === "step" ? "Step" : "Decision"}
@@ -1469,21 +1526,23 @@ export function Palette() {
 																			<div class="plan-prop-fields">
 																				<label class="plan-prop-field">
 																					<span>Label</span>
-																					<input
-																						value={node.text}
+																					<DraftInput
+																						resetKey={node().id}
+																						value={node().text}
 																						placeholder="Describe this step"
 																						onKeyDown={commitOnEnter}
-																						onChange={(e) => plan.setNodeText(e.currentTarget.value)}
+																						onCommit={(val) => plan.setNodeText(val)}
 																					/>
 																				</label>
 																				<label class="plan-prop-field">
 																					<span>Stage</span>
-																					<input
+																					<DraftInput
+																						resetKey={node().id}
 																						value={plan.groupName()}
 																						list="plan-palette-groups"
 																						placeholder="None (unassigned)"
 																						onKeyDown={commitOnEnter}
-																						onChange={(e) => plan.setNodeGroup(e.currentTarget.value)}
+																						onCommit={(val) => plan.setNodeGroup(val)}
 																					/>
 																				</label>
 																				<datalist id="plan-palette-groups">
@@ -1491,13 +1550,12 @@ export function Palette() {
 																				</datalist>
 																				<label class="plan-prop-field">
 																					<span>Notes</span>
-																					<textarea
-																						ref={bindAutoTextarea()}
+																					<DraftTextarea
+																						resetKey={node().id}
 																						rows={2}
-																						value={node.notes ?? ""}
+																						value={node().notes ?? ""}
 																						placeholder="Business rules, exceptions, or context"
-																						onInput={(e) => fitTextarea(e.currentTarget)}
-																						onChange={(e) => plan.setNodeField("notes", e.currentTarget.value)}
+																						onCommit={(val) => plan.setNodeField("notes", val)}
 																					/>
 																				</label>
 																				<div class="plan-prop-field plan-node-docs">
@@ -1615,12 +1673,12 @@ export function Palette() {
 																					</Show>
 																				</div>
 																			</div>
-																			<Show when={p()} keyed>
+																			<Show when={p()}>
 																				{(curPlan) => (
 																					<>
 																						<NodeTests
-																							plan={curPlan}
-																							node={node}
+																							plan={curPlan()}
+																							node={node()}
 																							allPaths={plan.allPaths()}
 																							activePathIndex={plan.activePathIndex()}
 																							open={nodeTestsOpen()}
@@ -1636,9 +1694,9 @@ export function Palette() {
 																							onTriggerScheduled={(scope) => plan.triggerScheduledBuild(scope)}
 																						/>
 																						<NodeImplementation
-																							plan={curPlan}
+																							plan={curPlan()}
 																							planUri={plan.planUri()}
-																							node={node}
+																							node={node()}
 																							open={nodeImplOpen()}
 																							onToggle={() => setNodeImplOpen((o) => !o)}
 																							onOpenUnit={(unit) => plan.openCodeUnit(unit)}

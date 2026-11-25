@@ -3,7 +3,7 @@
 // is a text edit on the model the text editor shows, so one undo stack serves
 // both modes (ADR 0002).
 import { Icon } from "../Icon";
-import { createEffect, createMemo, createSignal, createStore, For, Match, onCleanup, reconcile, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, createStore, For, Match, onCleanup, reconcile, Show, Switch, untrack } from "solid-js";
 import { createAsyncQuery } from "../asyncQuery";
 import { findCodeCitations } from "../../shared/codeCitations";
 import { dirName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
@@ -119,10 +119,10 @@ export function BlocksView(props: { path: string; group: number }) {
 	);
 	const pathAndLsp = createMemo(() => `${props.path}\u0000${state.lsp.state}`);
 	createEffect(
-		() => pathAndLsp(),
-		() => {
+		() => ({ key: pathAndLsp(), path: props.path }),
+		({ path }) => {
 			treeVersionId = -1;
-			const model = doc()?.model;
+			const model = documents.get(path)?.model;
 			if (!model || model.isDisposed()) return;
 			const sub = model.onDidChangeContent(() => {
 				clearTimeout(timer);
@@ -137,17 +137,17 @@ export function BlocksView(props: { path: string; group: number }) {
 		},
 	);
 	createEffect(
-		() => version(),
-		() => {
+		() => ({ version: version(), path: props.path, lspRunning: state.lsp.state === "running" }),
+		({ path, lspRunning }) => {
 			const req = ++reqSeq;
-			const model = doc()?.model;
+			const model = documents.get(path)?.model;
 			if (!model || model.isDisposed()) return;
-			if (state.lsp.state !== "running") {
+			if (!lspRunning) {
 				setFailed(null);
 				return;
 			}
 			const startVersion = model.getVersionId();
-			const stale = () => req !== reqSeq || model.isDisposed() || doc()?.model !== model || model.getVersionId() !== startVersion;
+			const stale = () => req !== reqSeq || model.isDisposed() || untrack(doc)?.model !== model || model.getVersionId() !== startVersion;
 			void (async () => {
 				try {
 					await session.waitReady().catch(() => {});
@@ -320,15 +320,18 @@ export function BlocksView(props: { path: string; group: number }) {
 	// Governing Plan & Doc citation trace data for subtle badges on procedure and region cards.
 	const govFingerprint = createMemo(() => {
 		const gov = docsGoverningFile(docs(), props.path, state.workspace?.root);
-		return `${props.path}|${state.treeVersion}|${gov.map((g) => g.file.path).join(",")}`;
+		return `${props.path}|${state.workspace?.root ?? ""}|${state.treeVersion}|${gov.map((g) => g.file.path).join(",")}`;
 	});
 	const [traceData] = createAsyncQuery(govFingerprint, async () => {
-		const wsRoot = state.workspace?.root;
-		const allDocs = docs();
-		const gov = docsGoverningFile(allDocs, props.path, wsRoot);
+		const { path, wsRoot, allDocs } = untrack(() => ({
+			path: props.path,
+			wsRoot: state.workspace?.root,
+			allDocs: docs(),
+		}));
+		const gov = docsGoverningFile(allDocs, path, wsRoot);
 		const planByProc = new Map<string, BlockPlanBadge[]>();
 		const citations: BlockDocCitation[] = [];
-		const canonSelf = canonical(props.path);
+		const canonSelf = canonical(path);
 
 		for (const g of gov) {
 			if (g.file.group === "plans") {
@@ -352,13 +355,13 @@ export function BlocksView(props: { path: string; group: number }) {
 					};
 					for (const u of parsed.built?.units ?? []) {
 						if (!u?.name) continue;
-						if (u.script && !codeMatchesRef(props.path, u.script, wsRoot)) continue;
+						if (u.script && !codeMatchesRef(path, u.script, wsRoot)) continue;
 						addProc(u.name, Array.isArray(u.nodes) ? u.nodes.length : 0);
 					}
 					for (const t of parsed.targets ?? []) {
 						if (typeof t === "object" && t && Array.isArray(t.procedures)) {
 							const scriptRef = t.script ?? t.path ?? "";
-							if (scriptRef && !codeMatchesRef(props.path, scriptRef, wsRoot)) continue;
+							if (scriptRef && !codeMatchesRef(path, scriptRef, wsRoot)) continue;
 							for (const pName of t.procedures) if (typeof pName === "string") addProc(pName, 0);
 						}
 					}
@@ -379,7 +382,7 @@ export function BlocksView(props: { path: string; group: number }) {
 						: g.file.title || g.file.name;
 				for (const cit of findCodeCitations(text)) {
 					if (!cit.file) continue;
-					let matches = codeMatchesRef(props.path, cit.file, wsRoot);
+					let matches = codeMatchesRef(path, cit.file, wsRoot);
 					if (!matches && wsRoot) {
 						const resolved = cit.file.startsWith("/")
 							? joinPath(wsRoot, ...cit.file.split("/").filter(Boolean))

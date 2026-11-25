@@ -3,7 +3,7 @@
 // supports Focus (Comes from / Goes to) for any step or stage, lets analysts build
 // and edit business test cases by clicking decision branches directly on the flow,
 // stays live-synced with Palette (Design | Assistant), and switches smoothly to Chart or Source.
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show, untrack } from "solid-js";
 import { baseName, joinPath, relativeTo } from "../../shared/paths";
 import { isCatalog, registryTitle } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
@@ -265,14 +265,16 @@ export function PlanTextView(props: {
 		(req) => {
 			if (!req || req.seq === handledSeq) return;
 			handledSeq = req.seq;
-			if (req.testId) {
-				const tc = planTestsOf(props.plan).find((t) => t.id === req.testId);
-				if (tc) {
-					openEditTest(tc);
-					return;
+			untrack(() => {
+				if (req.testId) {
+					const tc = planTestsOf(props.plan).find((t) => t.id === req.testId);
+					if (tc) {
+						openEditTest(tc);
+						return;
+					}
 				}
-			}
-			openFreshBuilder({ nodeId: req.nodeId, journeyIndex: req.journeyIndex });
+				openFreshBuilder({ nodeId: req.nodeId, journeyIndex: req.journeyIndex });
+			});
 		},
 	);
 

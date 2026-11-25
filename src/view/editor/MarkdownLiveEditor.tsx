@@ -7,7 +7,7 @@ import { closeSearchPanel, openSearchPanel, searchPanelOpen } from "@codemirror/
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { Annotation, Compartment, EditorSelection, EditorState, RangeSetBuilder, StateEffect, StateField, Transaction, type Extension } from "@codemirror/state";
 import { Decoration, type DecorationSet, drawSelection, dropCursor, EditorView, highlightSpecialChars } from "@codemirror/view";
-import { createEffect, createMemo, createSignal, onCleanup, onSettled, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onSettled, Show, untrack } from "solid-js";
 import { Portal } from "@solidjs/web";
 import { fenced } from "../../shared/catalog";
 import { placeAnchoredMenu, submenuOrInline, type RectBox } from "../../shared/contextMenu";
@@ -345,15 +345,16 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		() => ({
 			activeGroup: state.activeGroup,
 			group: props.group,
+			path: props.path,
 			active: state.groups[state.activeGroup]?.active,
 			list: headings(),
 			activeId: activeHeadingId(),
 		}),
-		({ activeGroup, group, active, list, activeId }) => {
+		({ activeGroup, group, path, active, list, activeId }) => {
 			if (activeGroup !== group) return;
-			if (active !== props.path) return;
+			if (active !== path) return;
 			setMdOutline({
-				path: props.path,
+				path,
 				headings: list,
 				activeId: activeId || (list[0]?.id ?? ""),
 				goTo: goToHeading,
@@ -492,7 +493,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		() => ({ read: isRead(), enabled: readingHighlightEnabled() }),
 		({ enabled }) => {
 			if (!enabled) clearReadAssist();
-			else scheduleReadAssist();
+			else if (!assistFrame) assistFrame = requestAnimationFrame(applyReadAssist);
 		},
 	);
 	onCleanup(clearReadAssist);
@@ -1825,13 +1826,15 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			if (read) {
 				setSelBubble(null);
 			}
-			cmView.dispatch({
-				effects: [
-					modeCompartment.reconfigure(modeExtensions(read)),
-					...(read ? [setRawEditBlockEffect.of(null)] : []),
-					refreshLiveEffect.of(++refreshSeq),
-				],
-			});
+			untrack(() =>
+				cmView!.dispatch({
+					effects: [
+						modeCompartment.reconfigure(modeExtensions(read)),
+						...(read ? [setRawEditBlockEffect.of(null)] : []),
+						refreshLiveEffect.of(++refreshSeq),
+					],
+				}),
+			);
 			if (read) {
 				setTableHud(null);
 			} else {
@@ -1849,7 +1852,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	createEffect(
 		() => [docs(), state.treeVersion] as const,
 		() => {
-			if (cmView) cmView.dispatch({ effects: refreshLiveEffect.of(++refreshSeq) });
+			if (cmView) untrack(() => cmView!.dispatch({ effects: refreshLiveEffect.of(++refreshSeq) }));
 		},
 		{ defer: true },
 	);
@@ -1859,12 +1862,14 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	let gitDrawTimer: ReturnType<typeof setTimeout> | undefined;
 	const redrawGitMarks = () => {
 		if (!cmView) return;
-		if (!gitBaseLines) {
-			cmView.dispatch({ effects: setGitChangesEffect.of([]) });
-			return;
-		}
-		const changes = lineChanges(gitBaseLines, cmView.state.doc.toString().split(/\r?\n/));
-		cmView.dispatch({ effects: setGitChangesEffect.of(changes) });
+		untrack(() => {
+			if (!gitBaseLines) {
+				cmView!.dispatch({ effects: setGitChangesEffect.of([]) });
+				return;
+			}
+			const changes = lineChanges(gitBaseLines, cmView!.state.doc.toString().split(/\r?\n/));
+			cmView!.dispatch({ effects: setGitChangesEffect.of(changes) });
+		});
 	};
 	const hasGitRepo = createMemo(() => Boolean(gitStatus()));
 	createEffect(
@@ -1904,7 +1909,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	createEffect(
 		() => themeVersion(),
 		() => {
-			if (cmView) cmView.dispatch({ effects: refreshLiveEffect.of(++refreshSeq) });
+			if (cmView) untrack(() => cmView!.dispatch({ effects: refreshLiveEffect.of(++refreshSeq) }));
 		},
 		{ defer: true },
 	);

@@ -3,7 +3,7 @@
 // analysts and managers lead with plain process language, while developers can
 // expand once to inspect implementing scripts, functions, called procedures,
 // and live read-only SSL previews (all ranges from starlims-lsp, ADR 0003).
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show, untrack } from "solid-js";
 import { baseName, dirName } from "../../shared/paths";
 import { Icon } from "../Icon";
 import { IconButton } from "../panels/Rows";
@@ -12,7 +12,14 @@ import { nodeCodeDetails, type BuiltUnit } from "./built";
 import { readProcedurePreview, type ProcedurePreview } from "./drift";
 import type { Plan, PlanNode } from "./model";
 
-type PreviewTarget = { name: string; script?: string; hintScript?: string; label: string };
+export type PreviewTarget = { name: string; script?: string; hintScript?: string; label: string };
+
+/** Structural equality for preview targets so unrelated plan edits/drags do not refetch or remount code previews. */
+export function samePreviewTarget(a: PreviewTarget | null | undefined, b: PreviewTarget | null | undefined): boolean {
+	if (a === b) return true;
+	if (!a || !b) return false;
+	return a.name === b.name && a.script === b.script && a.hintScript === b.hintScript && a.label === b.label;
+}
 
 export const sigOf = (u: Pick<BuiltUnit, "name" | "parameters">) =>
 	`${u.name}(${(Array.isArray(u.parameters) ? u.parameters.filter((p): p is string => typeof p === "string") : []).join(", ")})`;
@@ -43,12 +50,15 @@ export function NodeImplementation(props: {
 		return "Not linked";
 	});
 
-	const defaultTarget = createMemo<PreviewTarget | null>(() => {
-		const d = details();
-		if (d.units[0]) return { name: d.units[0].name, script: d.units[0].script, label: d.units[0].name };
-		if (d.primaryRef) return { name: d.primaryRef, label: d.primaryRef };
-		return null;
-	});
+	const defaultTarget = createMemo<PreviewTarget | null>(
+		() => {
+			const d = details();
+			if (d.units[0]) return { name: d.units[0].name, script: d.units[0].script, label: d.units[0].name };
+			if (d.primaryRef) return { name: d.primaryRef, label: d.primaryRef };
+			return null;
+		},
+		{ equals: samePreviewTarget },
+	);
 
 	const [pickedTarget, setPickedTarget] = createSignal<PreviewTarget | null>(null);
 	const [preview, setPreview] = createSignal<ProcedurePreview | null>(null);
@@ -64,7 +74,7 @@ export function NodeImplementation(props: {
 		},
 	);
 
-	const activeTarget = createMemo(() => pickedTarget() ?? defaultTarget());
+	const activeTarget = createMemo<PreviewTarget | null>(() => pickedTarget() ?? defaultTarget(), { equals: samePreviewTarget });
 
 	let fetchSeq = 0;
 	createEffect(
@@ -271,6 +281,13 @@ export function PlanImplementation(props: {
 	const targets = createMemo(() => planTargetsOf(props.plan));
 	const allScripts = createMemo(() => [...new Set([...targets(), ...props.builtUnits.map((u) => u.script).filter(Boolean)])]);
 	const scriptsText = () => targets().join(", ");
+	const [scriptsDraft, setScriptsDraft] = createSignal(untrack(scriptsText));
+	createEffect(
+		() => scriptsText(),
+		(v) => {
+			setScriptsDraft(v);
+		},
+	);
 
 	const summary = createMemo(() => {
 		const sc = allScripts().length;
@@ -352,13 +369,16 @@ export function PlanImplementation(props: {
 					<label class="plan-prop-field">
 						<span>Target scripts</span>
 						<textarea
-							ref={props.bindTextarea(scriptsText)}
+							ref={props.bindTextarea(scriptsDraft)}
 							class="plan-scripts-input"
 							rows={2}
-							value={scriptsText()}
+							value={scriptsDraft()}
 							placeholder="Sample/Release.ssl"
 							onKeyDown={(e) => props.onCommitOnEnter(e)}
-							onInput={(e) => props.fitTextarea(e.currentTarget)}
+							onInput={(e) => {
+								setScriptsDraft(e.currentTarget.value);
+								props.fitTextarea(e.currentTarget);
+							}}
 							onChange={(e) => props.onSetTargets(e.currentTarget.value)}
 						/>
 					</label>

@@ -3347,28 +3347,43 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 	border-bottom: 1px solid color-mix(in srgb, var(--mh-sev) 34%, var(--editor-border));
 }
 
-.monaco-editor .monaco-hover .hover-row[data-severity="error"]:has(> .marker.hover-contents) {
+.monaco-editor .monaco-hover .hover-row[data-severity="error"]:has(> .marker.hover-contents),
+.monaco-editor .monaco-hover .hover-row:not([data-severity]):has(> .marker.hover-contents > .marker-severity.codicon-error) {
 	--mh-sev: var(--editor-error);
 	--mh-icon: "\ea87";
 }
 
-.monaco-editor .monaco-hover .hover-row[data-severity="info"]:has(> .marker.hover-contents) {
+.monaco-editor .monaco-hover .hover-row[data-severity="info"]:has(> .marker.hover-contents),
+.monaco-editor .monaco-hover .hover-row:not([data-severity]):has(> .marker.hover-contents > .marker-severity.codicon-info:not(.severity-ignore)) {
 	--mh-sev: var(--editor-info);
 	--mh-icon: "\ea74";
 }
 
-.monaco-editor .monaco-hover .hover-row[data-severity="hint"]:has(> .marker.hover-contents) {
+.monaco-editor .monaco-hover .hover-row[data-severity="hint"]:has(> .marker.hover-contents),
+.monaco-editor .monaco-hover .hover-row:not([data-severity]):has(> .marker.hover-contents > .marker-severity.severity-ignore) {
 	--mh-sev: var(--editor-muted);
 	--mh-icon: "\ea74";
 }
 
 .monaco-editor .monaco-hover .hover-row > .marker.hover-contents {
 	position: relative;
+	flex: 1;
+	min-width: 0;
 	padding: 7px 28px 7px 32px !important;
 	font-family: var(--ui-font) !important;
 	font-size: var(--text-base) !important;
 	line-height: 1.4 !important;
 	color: var(--editor-strong);
+}
+
+/* Hide Monaco 0.58+'s inline severity icon so our ::before gutter badge owns all 4 severities without duplicate icons. */
+.monaco-editor .monaco-hover .hover-row > .marker.hover-contents > .marker-severity {
+	display: none;
+}
+
+.monaco-editor .monaco-hover .hover-row > .marker.hover-contents > .marker-message {
+	flex: 1;
+	min-width: 0;
 }
 
 .monaco-editor .monaco-hover .hover-row > .marker.hover-contents::before {
@@ -3381,13 +3396,15 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 	-webkit-font-smoothing: antialiased;
 }
 
-.monaco-editor .monaco-hover .hover-row > .marker.hover-contents > span:first-child {
+.monaco-editor .monaco-hover .hover-row > .marker.hover-contents > .marker-message > span:first-child,
+.monaco-editor .monaco-hover .hover-row > .marker.hover-contents > span:not(.marker-severity):first-of-type {
 	font-family: var(--ui-font) !important;
 	font-weight: 600;
 	color: var(--editor-strong);
 }
 
-.monaco-editor .monaco-hover .hover-row > .marker.hover-contents > span:nth-child(2) {
+.monaco-editor .monaco-hover .hover-row > .marker.hover-contents > .marker-message > span:nth-child(2),
+.monaco-editor .monaco-hover .hover-row > .marker.hover-contents > span:not(.marker-severity):nth-of-type(2) {
 	display: inline-block;
 	margin-left: 8px;
 	padding: 0 6px !important;
@@ -3402,7 +3419,8 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 	opacity: 1 !important;
 }
 
-.monaco-editor .monaco-hover .hover-row > .marker.hover-contents > div {
+.monaco-editor .monaco-hover .hover-row > .marker.hover-contents > .marker-message > div,
+.monaco-editor .monaco-hover .hover-row > .marker.hover-contents > div:not(.marker-message) {
 	font-family: var(--ui-font) !important;
 	font-weight: 400;
 	font-size: var(--text-md) !important;

@@ -2,6 +2,7 @@
 // approved spec, one unit at a time and without stopping, and you review the result.
 // Nothing is written while it runs: results collect in a pending change set, kept in
 // `.ssl-studio/plans/`, so closing the app loses nothing, paid work included.
+import { snapshot } from "solid-js";
 import { backend } from "../backend";
 import { agent, currentModel, interrupt } from "../agent/store";
 import { fenced } from "../agent/tidy";
@@ -21,7 +22,7 @@ import { assembleScript, bannerFor, judgeUnit, MAX_ATTEMPTS, newRun, nextUnit, o
 import { builtOf, changeText, classifyUnits, recordBuilt, settleBuilt } from "./built";
 import { driftFor } from "./drift";
 import type { Plan } from "./model";
-import { askAgent, assistOf, begin, planOf, savePlan, specPath, survey, updateAssist } from "./run";
+import { askAgent, begin, latestAssistOf, planOf, savePlan, specPath, survey, updateAssist } from "./run";
 
 export { bannerFor };
 
@@ -29,16 +30,16 @@ const stopping = new Set<string>();
 /** Tool calls in a turn before it is stopped. Nothing here needs any; a skill may take one to load. */
 const TOOL_LIMIT = 2;
 
-export const runFile = (path: string, root = state.workspace?.root ?? "") =>
+export const runFile = (path: string, root = snapshot(state).workspace?.root ?? "") =>
 	joinPath(root, ".ssl-studio", "plans", runFileName(relativeTo(root, path)));
 const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 
 /** The save of each run's file that is under way: the next one waits for it. */
 const saving = new Map<string, Promise<unknown>>();
 
-function publish(path: string, run: BuildRun | null, expectedRoot?: string) {
-	const root = state.workspace?.root;
-	if (!root || (expectedRoot && root !== expectedRoot)) return;
+function publish(path: string, run: BuildRun | null, expectedRoot?: string): boolean {
+	const root = snapshot(state).workspace?.root;
+	if (!root || (expectedRoot && root !== expectedRoot)) return false;
 	updateAssist(path, { run: run && plain(run) });
 	// One save of a file at a time, in the order they were asked for. A build says where it stands several times in
 	// a moment, and two writes of one file at once got in each other's way: one of them failed, and the file could
@@ -47,17 +48,18 @@ function publish(path: string, run: BuildRun | null, expectedRoot?: string) {
 	const text = JSON.stringify(run, null, 1);
 	const next = (saving.get(file) ?? Promise.resolve()).then(() => backend.write(file, text)).catch(() => notify("Could not save the build's progress.", "error"));
 	saving.set(file, next);
+	return true;
 }
 
 /** Picks a run back up when its plan opens. A unit caught mid-turn goes back to waiting. */
 export async function loadRun(path: string) {
-	const root = state.workspace?.root;
-	if (!root || assistOf(path).run) return;
+	const root = snapshot(state).workspace?.root;
+	if (!root || latestAssistOf(path).run) return;
 	const text = await backend.read(runFile(path, root)).then(
 		(f) => f.text,
 		() => null,
 	);
-	if (!text || state.workspace?.root !== root) return;
+	if (!text || snapshot(state).workspace?.root !== root || latestAssistOf(path).run) return;
 	try {
 		const raw = JSON.parse(text) as Partial<BuildRun> | null;
 		const plan = planOf(path);
@@ -82,14 +84,14 @@ export async function loadRun(path: string) {
 		updateAssist(path, { run });
 		// Accepted, and the plan closed without saving its record: the code is still what was accepted.
 		const recorded = new Set((builtOf(plan)?.units ?? []).map((u) => u.name.toLowerCase()));
-		for (const script of run.accepted) if (run.units.some((u) => u.status === "passed" && scriptOf(u, plan) === script && !recorded.has(u.name.toLowerCase()))) recordAccepted(path, script);
+		for (const script of run.accepted) if (run.units.some((u) => u.status === "passed" && scriptOf(u, plan) === script && !recorded.has(u.name.toLowerCase()))) recordAccepted(path, script, run);
 	} catch {
 		// Not a run this version can read: a new build starts afresh.
 	}
 }
 
 /** A script as it stands: its buffer if it is open, so accepted and unsaved work is built on, not overwritten. */
-export function readScript(script: string, root = state.workspace?.root): Promise<string | null> {
+export function readScript(script: string, root = snapshot(state).workspace?.root): Promise<string | null> {
 	if (!root) return Promise.resolve(null);
 	const full = joinPath(root, script);
 	const doc = documents.get(canonical(full)) ?? documents.get(full);
@@ -148,11 +150,11 @@ async function buildUnit(path: string, root: string, plan: Plan, spec: string, r
 	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
 		if (state.workspace?.root !== root) return;
 		unit.attempts = attempt;
-		const spent = assistOf(path);
+		const spent = latestAssistOf(path);
 		const before = { tokens: spent.tokens, cost: spent.cost };
 		const reply = await askAgent(path, `Build ${unit.name} (try ${attempt} of ${MAX_ATTEMPTS})`, prompt, skills, TOOL_LIMIT);
 		if (state.workspace?.root !== root) return;
-		const now = assistOf(path);
+		const now = latestAssistOf(path);
 		run.tokens += now.tokens - before.tokens;
 		run.cost += now.cost - before.cost;
 		if (stopping.has(path)) {
@@ -210,7 +212,7 @@ async function secondOpinion(path: string, root: string, plan: Plan, spec: strin
 	if (!passed.length || overBudget(run)) return;
 	const scripts: { path: string; text: string }[] = [];
 	for (const script of new Set(passed.map((u) => scriptOf(u, plan)))) scripts.push({ path: script, text: assembleScript(null, "", passed.filter((u) => scriptOf(u, plan) === script), plan) });
-	const spent = assistOf(path);
+	const spent = latestAssistOf(path);
 	const before = { tokens: spent.tokens, cost: spent.cost };
 	// Rebuilding part of a chart: the rest is not in front of the reader, so it is not asked about.
 	const partial = run.units.some((u) => u.status === "kept" || u.change);
@@ -221,7 +223,7 @@ async function secondOpinion(path: string, root: string, plan: Plan, spec: strin
 	const review = reviewPrompt(plan, spec, scripts, partial ? passed.flatMap((u) => u.nodes ?? []) : undefined);
 	const reply = await askAgent(path, "A second opinion", workContext ? `${review}\n\n${workContext}` : review, [], TOOL_LIMIT);
 	if (state.workspace?.root !== root) return;
-	const now = assistOf(path);
+	const now = latestAssistOf(path);
 	run.tokens += now.tokens - before.tokens;
 	run.cost += now.cost - before.cost;
 	if (reply?.trim()) run.review = reply.trim();
@@ -247,7 +249,8 @@ export function startBuild(path: string) {
 		if (!units.length && !builtOf(plan)) return notify("The spec lists nothing to build.");
 		const model = currentModel();
 		const local = agent.models.find((m) => `${m.providerID}/${m.id}` === model)?.local ?? true;
-		let run: BuildRun | null = assistOf(path).run ? plain(assistOf(path).run) : null;
+		const existingRun = latestAssistOf(path).run;
+		let run: BuildRun | null = existingRun ? plain(existingRun) : null;
 		if (!run || run.planHash !== hash) {
 			let cost: number | undefined;
 			if (!local) {
@@ -320,12 +323,12 @@ export function stopBuild(path: string) {
 	void interrupt();
 }
 
-const mutate = (path: string, change: (run: BuildRun) => void) => {
-	const current = assistOf(path).run;
-	if (!current) return;
+const mutate = (path: string, change: (run: BuildRun) => void): BuildRun | null => {
+	const current = latestAssistOf(path).run;
+	if (!current) return null;
 	const run = plain(current);
 	change(run);
-	publish(path, run);
+	return publish(path, run) ? run : null;
 };
 
 /** Puts a stuck unit, and those waiting on it, back in the queue. */
@@ -361,9 +364,9 @@ export const discardRun = (path: string) => publish(path, null);
 export const scriptsToReview = (run: BuildRun, plan: Plan): string[] => [...new Set(run.units.filter((u) => u.status === "passed").map((u) => scriptOf(u, plan)))].filter((s) => !run.accepted.includes(s));
 
 /** The links, in the plan's text: an undoable edit, saved when you save the plan. */
-function recordAccepted(path: string, script: string) {
+function recordAccepted(path: string, script: string, runOverride?: BuildRun | null) {
 	const plan = planOf(path);
-	const run = assistOf(path).run;
+	const run = runOverride ?? latestAssistOf(path).run;
 	if (!plan || !run) return;
 	const accepted = run.units.filter((u) => u.status === "passed" && scriptOf(u, plan) === script);
 	const recorded = recordBuilt(plan, plain(accepted), plain(run.units));
@@ -373,8 +376,8 @@ function recordAccepted(path: string, script: string) {
 
 /** Stage 5: one review per script, walked in turn. Nothing is applied until you accept it. */
 export async function reviewBuild(path: string) {
-	const root = state.workspace?.root;
-	const current = assistOf(path).run;
+	const root = snapshot(state).workspace?.root;
+	const current = latestAssistOf(path).run;
 	const plan = planOf(path);
 	if (!root || !current || !plan) return;
 	const run = plain(current);
@@ -434,11 +437,12 @@ export async function reviewBuild(path: string) {
 				if (state.workspace?.root !== root) return;
 				applyText(monaco.Uri.file(full).fsPath, final);
 			}
-			if (state.workspace?.root !== root) return;
-			mutate(path, (r) => r.accepted.push(script));
-			recordAccepted(path, script);
+			if (snapshot(state).workspace?.root !== root) return;
+			const after = mutate(path, (r) => {
+				if (!r.accepted.includes(script)) r.accepted.push(script);
+			});
+			recordAccepted(path, script, after);
 			notify(!existsNow ? `Created ${script}.` : `Applied to ${script}. Review and save it; undo reverts it.`);
-			const after = assistOf(path).run;
 			const latestPlan = planOf(path) ?? plan;
 			if (after && scriptsToReview(after, latestPlan).length) void reviewBuild(path);
 		},

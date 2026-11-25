@@ -3,7 +3,7 @@
 import { Icon, type IconName } from "../Icon";
 import { Menu, type MenuItem } from "../Menu";
 import { showPanel } from "../panels/registry";
-import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show, snapshot, untrack } from "solid-js";
 import { createAsyncQuery } from "../asyncQuery";
 import { activeEditor } from "../editor/EditorGroup";
 import { activeLiveEditor, liveSelectionVersion } from "../editor/liveBridge";
@@ -94,12 +94,17 @@ let sentContext: { session: string | null; root: string | null; hashes: Map<stri
 	hashes: new Map(),
 };
 let lastWorkspaceRoot: string | null = null;
+const [workspaceResetEpoch, setWorkspaceResetEpoch] = createSignal(0);
+let targetWorkspaceResetEpoch = 0;
 
-/** Resets all workspace-scoped Agent context & session state whenever the user opens a different folder. */
-function ensureAgentWorkspace(): void {
-	const curRoot = state.workspace?.root ? canonical(state.workspace.root) : null;
-	if (curRoot === lastWorkspaceRoot) return;
+/** Resets all workspace-scoped Agent context & session state whenever the user opens a different folder. Returns true if a reset occurred (or is still pending flush). */
+function ensureAgentWorkspace(): boolean {
+	const rawRoot = snapshot(state).workspace?.root;
+	const curRoot = rawRoot ? canonical(rawRoot) : null;
+	if (curRoot === lastWorkspaceRoot) return untrack(workspaceResetEpoch) !== targetWorkspaceResetEpoch;
 	lastWorkspaceRoot = curRoot;
+	targetWorkspaceResetEpoch++;
+	setWorkspaceResetEpoch(targetWorkspaceResetEpoch);
 	setPickedTicket(null);
 	setWithSchema(false);
 	setWithRefTables(false);
@@ -111,6 +116,7 @@ function ensureAgentWorkspace(): void {
 	sentContext = { session: null, root: curRoot, hashes: new Map() };
 	syncWorkspaceThreads(curRoot);
 	setSentTick((n) => n + 1);
+	return true;
 }
 
 /** Auto-detected ticket: explicit workspace activeTicket > file-specific ticket > single in-progress ticket. */
@@ -120,22 +126,23 @@ function resolvedAutoTicket(): string {
 
 /** Current ticket & extra-context options configured in the Agent panel (honored by `Ctrl+Shift+H` too). */
 export function currentAgentContext(): { includeWork: boolean; ticket: string; workOptions: WorkTextOptions } {
-	ensureAgentWorkspace();
-	const picked = pickedTicket();
+	const didReset = ensureAgentWorkspace();
+	const picked = didReset ? null : pickedTicket();
 	const auto = resolvedAutoTicket();
 	const ticket = picked === null ? auto : picked;
 	const includeWork = Boolean(ticket) && (picked !== null || withWork());
-	const root = state.workspace?.root ?? "";
-	const safeFiles = root
-		? attachedFiles().filter((f) => isInside(root, f.path) && isAllowedContextPath(relativeTo(root, f.path)))
-		: [];
+	const root = snapshot(state).workspace?.root ?? "";
+	const safeFiles =
+		didReset || !root
+			? []
+			: attachedFiles().filter((f) => isInside(root, f.path) && isAllowedContextPath(relativeTo(root, f.path)));
 	return {
 		includeWork,
 		ticket,
 		workOptions: {
-			includeSchema: withSchema(),
-			includeRegistries: withRegistries(),
-			includeState: withState(),
+			includeSchema: didReset ? false : withSchema(),
+			includeRegistries: didReset ? false : withRegistries(),
+			includeState: didReset ? false : withState(),
 			ticketFiles: safeFiles,
 		},
 	};
@@ -294,6 +301,11 @@ async function buildGitDiffSlice(): Promise<string> {
 }
 
 type PreparedContext = PreparedContextResult;
+type ExtraContextFlags = {
+	withGitDiff: boolean;
+	withGoverningDocs: boolean;
+	withRefTables: boolean;
+};
 
 /**
  * Computes the exact pending context delta (ticket work, Git diff, governing docs, schema,
@@ -304,8 +316,13 @@ async function prepareContextDelta(
 	ticket: string,
 	workOpts: WorkTextOptions,
 	alreadySent: ReadonlyMap<string, string>,
+	flags: ExtraContextFlags = {
+		withGitDiff: withGitDiff(),
+		withGoverningDocs: withGoverningDocs(),
+		withRefTables: withRefTables(),
+	},
 ): Promise<PreparedContext> {
-	const root = state.workspace?.root ?? "";
+	const root = snapshot(state).workspace?.root ?? "";
 	const all = docs().filter((d) => d.exists && !isCatalog(d));
 	const { addSlice, finish } = createContextAccumulator(alreadySent, MAX_WORK_PROMPT_CHARS, cut);
 
@@ -326,13 +343,13 @@ async function prepareContextDelta(
 	}
 
 	// 1b. Compact staged + unstaged Git diff (Wave 1.4).
-	if (withGitDiff()) {
+	if (flags.withGitDiff) {
 		const diffText = await buildGitDiffSlice();
 		if (diffText) addSlice("git-diff", "git diff", diffText);
 	}
 
 	// 1c. Governing docs for active / changed code & SQL files (even across tickets or with Ticket=None).
-	if (withGoverningDocs() && root) {
+	if (flags.withGoverningDocs && root) {
 		const govItems = collectGoverningDocsForContext(all, root, activePath());
 		for (const item of govItems) {
 			const dk = canonical(item.file.path);
@@ -376,7 +393,7 @@ async function prepareContextDelta(
 	}
 
 	// 3b. Targeted schema column tables referenced in the active SSL/SQL editor or selection (Wave 3.1).
-	if (withRefTables()) {
+	if (flags.withRefTables) {
 		const sel = selectionContext();
 		const activeModelText = sel?.code || activeDoc()?.model.getValue() || "";
 		const refTables = referencedSchemaTables(activeModelText, all, 6);
@@ -427,9 +444,9 @@ async function runAskAbout(
 	includeWork = false,
 	extra?: { ticket?: string; workOptions?: WorkTextOptions },
 ) {
-	ensureAgentWorkspace();
+	const didReset = ensureAgentWorkspace();
 	const path = activePath();
-	const root = state.workspace?.root ?? "";
+	const root = snapshot(state).workspace?.root ?? "";
 	const context = includeSelection ? selectionContext() : null;
 	const file = path ? relativeTo(root, path) : "";
 	const ticket = includeWork ? (extra?.ticket ?? resolvedAutoTicket()) : "";
@@ -437,12 +454,20 @@ async function runAskAbout(
 
 	// Reset delta tracker whenever starting a brand-new conversation session or switching workspaces.
 	const curRoot = root ? canonical(root) : null;
-	const sameWorkspace = () => (state.workspace?.root ? canonical(state.workspace.root) : null) === curRoot;
-	if (!agent.chatSession || sentContext.session !== agent.chatSession || sentContext.root !== curRoot) {
-		sentContext = { session: agent.chatSession, root: curRoot, hashes: new Map() };
+	const sameWorkspace = () => {
+		const r = snapshot(state).workspace?.root;
+		return (r ? canonical(r) : null) === curRoot;
+	};
+	const chatSession = snapshot(agent).chatSession;
+	if (!chatSession || sentContext.session !== chatSession || sentContext.root !== curRoot) {
+		sentContext = { session: chatSession, root: curRoot, hashes: new Map() };
 	}
 
-	const prepared = await prepareContextDelta(ticket, workOpts, sentContext.hashes);
+	const prepared = await prepareContextDelta(ticket, workOpts, sentContext.hashes, {
+		withGitDiff: didReset ? false : withGitDiff(),
+		withGoverningDocs: didReset ? false : withGoverningDocs(),
+		withRefTables: didReset ? false : withRefTables(),
+	});
 	if (!sameWorkspace()) return;
 	const text = composeQuestion(question, context && { ...context, file }, prepared.text || undefined);
 	const withWhat = [context ? `${file} ${context.label}` : "", ...prepared.labels].filter(Boolean).join("; ");
@@ -450,7 +475,7 @@ async function runAskAbout(
 	const reply = await ask(text, {
 		title: "SSL Studio chat",
 		keep: true,
-		sessionID: agent.chatSession ?? undefined,
+		sessionID: chatSession ?? undefined,
 		show: withWhat ? `${question}  (with ${withWhat})` : question,
 		turn: {
 			ticket: ticket || undefined,
@@ -1133,6 +1158,11 @@ export function AgentPanel() {
 				ticketFiles: src.files,
 			},
 			already,
+			{
+				withGitDiff: src.gitDiff,
+				withGoverningDocs: src.govDocs,
+				withRefTables: src.refTables,
+			},
 		);
 		return { chars: prepared.text.length, breakdown: prepared.breakdown };
 	});
@@ -1220,16 +1250,17 @@ export function AgentPanel() {
 		preparingLock = true;
 		setPreparing(true);
 		toEnd();
-		const targetTicket = ticket();
-		const sendWork = Boolean(targetTicket) && (pickedTicket() !== null || withWork());
+		const didReset = ensureAgentWorkspace();
+		const targetTicket = didReset ? resolvedAutoTicket() : ticket();
+		const sendWork = Boolean(targetTicket) && ((!didReset && pickedTicket() !== null) || withWork());
 		void safely("The question was not sent", () =>
 			runAskAbout(result.send!, withSelection(), sendWork, {
 				ticket: targetTicket,
 				workOptions: {
-					includeSchema: withSchema(),
-					includeRegistries: withRegistries(),
-					includeState: withState(),
-					ticketFiles: attachedFiles(),
+					includeSchema: didReset ? false : withSchema(),
+					includeRegistries: didReset ? false : withRegistries(),
+					includeState: didReset ? false : withState(),
+					ticketFiles: didReset ? [] : attachedFiles(),
 				},
 			}),
 		).finally(() => {

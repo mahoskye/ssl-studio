@@ -6,17 +6,29 @@
 import { createEffect, createMemo, onSettled, snapshot } from "solid-js";
 import { createMiddleClickGuard, isExplicitPasteKey } from "../shared/middleClickGuard";
 import { canGoBack, canGoForward, NO_TRAIL, stepTrail, TRAIL_LENGTH, trailRenamed, trailWithout, visited, type Place, type Trail } from "../shared/navHistory";
+import { resolvePlanMode } from "../shared/viewModes";
 import { activeEditor } from "./editor/EditorGroup";
 import { activeLiveEditor } from "./editor/liveBridge";
 import { activeGraphBridge } from "./graph/graphBridge";
 import { modalOpen } from "./modal";
-import { isPlanChartActive, narrowHosted, narrowPanels, showPanel } from "./panels/registry";
+import { narrowHosted, narrowPanels, showPanel } from "./panels/registry";
+import { isPlanPath } from "./plan/model";
 import { activePlanTab, requestPlanPaletteTab } from "./plan/planBridge";
-import { activeDoc, activePath, notify, openFile, pathChanges, setState, state, type PanelId } from "./state";
+import { activePath, documents, notify, openFile, pathChanges, setState, state, type PanelId } from "./state";
 
 let trail: Trail = NO_TRAIL;
 /** Steps back or forward that are under way: where they pass and land is on the trail already. */
 let stepping = 0;
+
+function isPlanChartActiveIn(src: typeof state): boolean {
+	if (src.centerView !== "editors") return false;
+	const group = src.groups[src.activeGroup];
+	const path = group?.active ?? null;
+	if (!path || !isPlanPath(path)) return false;
+	if (resolvePlanMode(group?.planMode, src.planViewMode) === "source") return false;
+	const doc = documents.get(path);
+	return Boolean(doc && !doc.binary);
+}
 
 /** Encodes the active screen and right-side panel so panel switches join Back / Forward history. */
 function viewKeyFrom(src: typeof state): string {
@@ -24,7 +36,7 @@ function viewKeyFrom(src: typeof state): string {
 	const rightId = narrowPanels()
 		? (src.settings.layout.left && narrowHosted() ? narrowHosted()! : "")
 		: (src.settings.layout.right ? src.rightView : "");
-	const planTab = rightId === "palette" && isPlanChartActive() ? `:${activePlanTab()}` : "";
+	const planTab = rightId === "palette" && isPlanChartActiveIn(src) ? `:${activePlanTab()}` : "";
 	return `${center}|${rightId}${planTab}`;
 }
 
@@ -78,7 +90,7 @@ function here(): Place | null {
 		return { path, line: at.lineNumber, column: at.column, view };
 	}
 	const editor = activeEditor();
-	const at = editor && editor.getModel() === activeDoc()?.model ? editor.getPosition() : null;
+	const at = editor && editor.getModel() === documents.get(path)?.model ? editor.getPosition() : null;
 	return { path, line: at?.lineNumber ?? 1, column: at?.column ?? 1, view };
 }
 

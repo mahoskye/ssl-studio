@@ -149,13 +149,14 @@ export function Modal(props: {
 	onKey?: (e: KeyboardEvent) => boolean | void;
 	children: JSX.Element;
 }) {
-	// What had the keyboard before, read before anything of the modal exists.
-	const previous = typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null;
+	let previous: HTMLElement | null = null;
 	let overlay: HTMLDivElement | undefined;
 	let dialog: HTMLElement | undefined;
 	const entry: Open = { overlay: () => overlay, dialog: () => dialog, close: () => props.onClose(), key: (e) => props.onKey?.(e) };
 
 	onSettled(() => {
+		// Capture what had the keyboard after any outgoing modal's cleanup has restored focus, right before this modal takes it.
+		previous = typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null;
 		stack.push(entry);
 		setDepth(stack.length);
 		syncIsolation();
