@@ -3,7 +3,7 @@
 // the drift report, and knowing what a changed chart needs rebuilt. Once built the code is
 // the source of truth (ADR 0005): differences are reported, never repaired. Pure, and
 // nothing here reads SSL (ADR 0003): procedures and calls are the server's.
-import { hashText, planHash, type SpecUnit } from "./assist";
+import { hashText, planHashMatches, testsHash, type SpecUnit } from "./assist";
 import { lastPart, requiredCalls, scriptOf, type BuildRun, type BuildUnit } from "./build";
 import { planTestsOf, type Finding, type Plan, type PlanNode } from "./model";
 
@@ -64,7 +64,7 @@ export function changesSince(plan: Plan): Changes {
 }
 
 /** The same, for the chart to show: while a run of this very chart is open, what it has not reached yet is not a change. */
-export const chartChanges = (plan: Plan, run: BuildRun | null | undefined): Changes => (run && run.planHash === planHash(plan) ? NONE : changesSince(plan));
+export const chartChanges = (plan: Plan, run: BuildRun | null | undefined): Changes => (run && planHashMatches(run.planHash, plan) ? NONE : changesSince(plan));
 
 export const anyChanges = (c: Changes) => c.changed.length + c.added.length + c.removed.length > 0;
 
@@ -137,7 +137,7 @@ export function settleBuilt(plan: Plan, run: BuildRun): Plan {
 	return { ...plan, built: { ...built, units: built.units.map((u) => ({ ...u, nodes: u.nodes.filter((n) => ids.has(n)) })), nodes } };
 }
 
-export const recordTests = (plan: Plan, script: string): Plan => ({ ...plan, built: { ...(builtOf(plan) ?? { units: [], nodes: {} }), tests: { script, hash: planHash(plan) } } });
+export const recordTests = (plan: Plan, script: string): Plan => ({ ...plan, built: { ...(builtOf(plan) ?? { units: [], nodes: {} }), tests: { script, hash: testsHash(plan) } } });
 
 /** The procedures that carry a node. */
 export const unitsOfNode = (plan: Plan, id: string): BuiltUnit[] => (builtOf(plan)?.units ?? []).filter((u) => u.nodes.includes(id));

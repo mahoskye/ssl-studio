@@ -115,7 +115,7 @@ import { ask, browseWorkspaceFile, choose, quickPick, quickPickMany, type QuickP
 import { recall, remember } from "./graph/canvas";
 import { tasks, toggleTask } from "../shared/tasks";
 import type { LinkMend } from "../shared/docChecks";
-import { linkFile, linkWritten, ownLinkEdits, rewriteHeadingReferences, withLinkFiles, type LinkEdit } from "../shared/docLinks";
+import { bareNameTarget, isPictureName, linkFile, linkWritten, ownLinkEdits, rewriteHeadingReferences, withLinkFiles, type LinkEdit } from "../shared/docLinks";
 import { parsePlan, printPlan, isPlanPath } from "./plan/model";
 import { docs, isMarkdown } from "./project";
 import {
@@ -182,8 +182,9 @@ async function put(path: string, text: string, existed: boolean) {
 	if (openDoc && !openDoc.binary && !openDoc.model.isDisposed()) {
 		const clean = !state.dirty[open];
 		if (!applyText(open, text)) throw new Error(`${relativeTo(root(), path)} could not be updated in the editor.`);
-		// A save that fails has said why; whoever asked for the write is told it was not made.
-		if (clean && !(await save(open))) throw new Error(`${relativeTo(root(), path)} was changed in the editor and could not be saved.`);
+		// A save that fails has said why; whoever asked for the write is told it was not made. The text is saved as
+		// it was put: with format on save, a link mended in an SSL comment would have its whole procedure reformatted.
+		if (clean && !(await save(open, { format: false }))) throw new Error(`${relativeTo(root(), path)} was changed in the editor and could not be saved.`);
 		return;
 	}
 	if (!existed) await backend.create(path, "file");
@@ -524,6 +525,7 @@ export async function importTickets() {
 		(useFolders ? joinPath(areaFolder("tickets"), ticket.key, `${ticket.key}.md`) : joinPath(areaFolder("tickets"), `${ticket.key}.md`));
 	const counts = { made: 0, updated: 0, same: 0, skipped: read.skipped, pulls: read.pulls };
 	let failed = 0;
+	const unset = new Set<string>();
 	for (const ticket of read.tickets) {
 		if (!state.workspace || root() !== startRoot) break;
 		const dest = destPath(ticket);
@@ -552,6 +554,11 @@ export async function importTickets() {
 			const { values } = frontMatter(was);
 			const oldTitle = one(values.title);
 			let now = was;
+			// A field the file lays out over several lines is left as the person wrote it, and named when the import is done.
+			const kept = (field: string, next: string | null) => {
+				if (next === null) unset.add(`${ticket.key} ${field}`);
+				return next ?? now;
+			};
 			for (const [k, value] of [
 				["status", ticket.status],
 				["title", ticket.title],
@@ -562,17 +569,17 @@ export async function importTickets() {
 				["source", ticket.source],
 			] as const) {
 				if (!value || one(values[k]).toLowerCase() === value.toLowerCase()) continue;
-				now = withFrontMatter(now, k, value) ?? now;
+				now = kept(k, withFrontMatter(now, k, value));
 			}
 			// Keep heading synced if it still matches `# KEY: Old Title` (function replacer prevents `$` corruption).
 			if (oldTitle && ticket.title && oldTitle.toLowerCase() !== ticket.title.toLowerCase()) {
 				const h1 = new RegExp(`^(#\\s+${ticket.key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s+)${oldTitle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "m");
 				if (h1.test(now)) now = now.replace(h1, (_, prefix: string) => `${prefix}${ticket.title}`);
 			}
-			for (const tag of ticket.tags ?? []) now = addToFrontMatterList(now, "tags", tag) ?? now;
-			for (const relKey of ticket.related) now = addToFrontMatterList(now, "related", relKey) ?? now;
-			for (const blk of ticket.blocks ?? []) now = addToFrontMatterList(now, "blocks", blk) ?? now;
-			for (const by of ticket.blockedBy ?? []) now = addToFrontMatterList(now, "blocked-by", by) ?? now;
+			for (const tag of ticket.tags ?? []) now = kept("tags", addToFrontMatterList(now, "tags", tag));
+			for (const relKey of ticket.related) now = kept("related", addToFrontMatterList(now, "related", relKey));
+			for (const blk of ticket.blocks ?? []) now = kept("blocks", addToFrontMatterList(now, "blocks", blk));
+			for (const by of ticket.blockedBy ?? []) now = kept("blocked-by", addToFrontMatterList(now, "blocked-by", by));
 			// Hydrate untouched stub descriptions only when the template prompt is still verbatim (ADR 0009: never overwrite human-edited descriptions).
 			if (ticket.description?.trim() && now.includes(PROMPTS.ticket)) {
 				const cutAt = bodyOffset(now);
@@ -596,6 +603,10 @@ export async function importTickets() {
 	if (counts.made || counts.updated) setState((s) => { s.treeVersion += 1; });
 	if (counts.made || counts.updated || counts.same || !failed) {
 		notify(`${importSummary(counts)}${failed ? ` (${failed} failed)` : ""}`);
+	}
+	if (unset.size) {
+		const named = [...unset];
+		notify(`Not updated, because the file writes the value over several lines: ${named.slice(0, 6).join(", ")}${named.length > 6 ? ` and ${named.length - 6} more` : ""}. Change ${named.length === 1 ? "it" : "them"} in the text.`, "error");
 	}
 	if (counts.made === 1 && read.tickets.length === 1) await openFile(destPath(read.tickets[0]!));
 }
@@ -857,7 +868,7 @@ export async function setStatus(path: string, status: string) {
 	const before = await current(path);
 	if (before === null) return;
 	let after = withFrontMatter(before, "status", status);
-	if (after === null) return notify("The status could not be set here: it is written as a list. Change it in the text.", "error");
+	if (after === null) return notify("The status could not be set here: it is written over several lines. Change it in the text.", "error");
 	// A question that is answered says when, once: the day is part of the answer.
 	const question = docs().some((d) => d.group === "knowledge" && d.kind === "questions" && canonical(d.path) === canonical(path));
 	if (question && toneOf(status) === "done" && !one(frontMatter(after).values.answered)) after = withFrontMatter(after, "answered", today()) ?? after;
@@ -929,12 +940,16 @@ export async function setStatus(path: string, status: string) {
 			let linked = false;
 			try {
 				const oldText = await current(path);
+				// A side whose field is written over several lines is not edited from here: the notice names the
+				// side that was left, and does not say linked for it.
+				const left: string[] = [];
 				if (oldText !== null) {
 					const curBy = many(frontMatter(oldText).values["superseded-by"]);
 					const updatedOld = curBy.length
 						? addToFrontMatterList(oldText, "superseded-by", newStem)
 						: withFrontMatter(oldText, "superseded-by", newStem);
-					if (updatedOld && updatedOld !== oldText) {
+					if (updatedOld === null) left.push(`superseded-by: in ${baseName(path)}`);
+					else if (updatedOld !== oldText) {
 						await put(path, updatedOld, true);
 						linked = true;
 					}
@@ -945,13 +960,15 @@ export async function setStatus(path: string, status: string) {
 					const updatedTarget = curSup.length
 						? addToFrontMatterList(targetText, "supersedes", oldStem)
 						: withFrontMatter(targetText, "supersedes", oldStem);
-					if (updatedTarget && updatedTarget !== targetText) {
+					if (updatedTarget === null) left.push(`supersedes: in ${baseName(targetDecision.path)}`);
+					else if (updatedTarget !== targetText) {
 						await put(targetDecision.path, updatedTarget, true);
 						linked = true;
 					}
 				}
 				if (linked) setState((s) => { s.treeVersion += 1; });
-				notify(`Linked ${newStem} as superseding ${oldStem}.`);
+				if (left.length) notify(`Could not write ${left.join(" and ")}: ${left.length === 1 ? "it is" : "they are"} written over several lines. Add the link in the text.`, "error");
+				else notify(`Linked ${newStem} as superseding ${oldStem}.`);
 			} catch (e: any) {
 				if (linked) setState((s) => { s.treeVersion += 1; });
 				notify(`Could not link superseding decision: ${e?.message ?? e}`, "error");
@@ -974,7 +991,8 @@ export async function setStatus(path: string, status: string) {
 					const oldText = await current(path);
 					if (oldText !== null) {
 						const updatedOld = withFrontMatter(oldText, "superseded-by", newStem);
-						if (updatedOld && updatedOld !== oldText) await put(path, updatedOld, true);
+						if (updatedOld === null) notify(`Could not write superseded-by: in ${baseName(path)}: it is written over several lines. Add ${newStem} there in the text.`, "error");
+						else if (updatedOld !== oldText) await put(path, updatedOld, true);
 					}
 				} catch (e: any) {
 					notify(`Could not update superseded-by on ${baseName(path)}: ${e?.message ?? e}`, "error");
@@ -1758,6 +1776,37 @@ export async function followRename(from: string, to: string, beforeDocs?: DocFil
 }
 
 /**
+ * What a bare name (`shot.png`, no folder) in an embed or a link by name is written as after a rename, or null
+ * where it is left as it is. Another file may have the same name (each ticket's own `attachments/shot.png`), so
+ * the name is followed only where, found from its document the way the page finds it, it led to the file that
+ * moved: a name that means one of the project's documents leads to that one, a picture or any other file is
+ * looked for among the project's files as they were. `holder` is the document it is written in, where it was and
+ * where it is now; `before` is the project before the rename.
+ */
+export function bareNameFollowed(
+	name: string,
+	holder: { was: string; is: string; embed?: boolean },
+	pairs: readonly { fromCanon: string; toCanon: string }[],
+	before: { files: readonly string[]; docs: readonly DocFile[]; root: string; docsFolder?: string | null; attachments?: string | null },
+): string | null {
+	const doc = isPictureName(name) ? null : docByName(name, before.docs, before.root);
+	const led = doc ? canonical(doc.path) : bareNameTarget(name, holder.was, before.files, { root: before.root, docs: before.docsFolder, attachments: before.attachments });
+	for (const p of pairs) {
+		const oldBase = baseName(p.fromCanon);
+		const newBase = baseName(p.toCanon);
+		if (name.toLowerCase() !== oldBase.toLowerCase()) continue;
+		if (!(holder.embed || /\.[a-z0-9]{1,8}$/i.test(oldBase))) continue;
+		if (led !== p.fromCanon) continue;
+		if (oldBase.toLowerCase() !== newBase.toLowerCase()) return newBase;
+		if (canonical(dirName(p.fromCanon)) === canonical(dirName(holder.was)) && canonical(dirName(p.toCanon)) !== canonical(dirName(holder.is))) {
+			return relativePath(dirName(holder.is), p.toCanon).split("\\").join("/");
+		}
+		return null;
+	}
+	return null;
+}
+
+/**
  * The links by name ([[name]]) a rename leaves behind: those that no longer
  * mean the document they meant, whether they named it by its file's name,
  * its path or what it called itself, and those whose name the renamed file
@@ -1818,6 +1867,18 @@ async function followNames(rawPairs: readonly { from: string; to: string }[], li
 		? namesToFollow(places, before, after, moved, wsRoot)
 		: [];
 
+	// The project's files as they were before the rename, the moved ones put back where they were: asked for once,
+	// and only when a bare name has a moved file's name. A bare name is followed only where it led to that file.
+	let filesBefore: string[] | null = null;
+	const wasThere = async () => {
+		if (!filesBefore) {
+			const now = await backend.files().catch(() => [] as string[]);
+			// A listing that was cut short, or could not be had, still knows the files that moved: they were there.
+			filesBefore = [...new Set([...now.map((path) => unmoved(canonical(path))), ...pairs.map((p) => p.fromCanon)])];
+		}
+		return filesBefore;
+	};
+
 	// Also rewrite non-doc wikilink/embed references such as `![[old.png]]` or `![[samples/old.sql]]` across all co-moved pairs.
 	const seenFollow = new Set(follow.map((p) => `${p.path}:${p.line}:${p.column}`));
 	for (const place of places) {
@@ -1847,19 +1908,14 @@ async function followNames(rawPairs: readonly { from: string; to: string }[], li
 				const rel = relativePath(placeCurDir, candDoc).split("\\").join("/");
 				instead = raw.startsWith("./") && !rel.startsWith(".") ? `./${rel}` : rel;
 			}
-		} else {
-			for (const p of pairs) {
-				const oldBase = baseName(p.fromCanon);
-				const newBase = baseName(p.toCanon);
-				if (raw.toLowerCase() !== oldBase.toLowerCase()) continue;
-				if (!((place as NameIn & { embed?: boolean }).embed || /\.[a-z0-9]{1,8}$/i.test(oldBase))) continue;
-				if (oldBase.toLowerCase() !== newBase.toLowerCase()) {
-					instead = newBase;
-				} else if (canonical(dirName(p.fromCanon)) === canonical(placeOrigDir) && canonical(dirName(p.toCanon)) !== canonical(placeCurDir)) {
-					instead = relativePath(placeCurDir, p.toCanon).split("\\").join("/");
-				}
-				break;
-			}
+		} else if (pairs.some((p) => baseName(p.fromCanon).toLowerCase() === raw.toLowerCase())) {
+			instead = bareNameFollowed(raw, { was: placeOrigPath, is: place.path, embed: (place as NameIn & { embed?: boolean }).embed }, pairs, {
+				files: await wasThere(),
+				docs: before,
+				root: wsRoot,
+				docsFolder: state.project?.docs,
+				attachments: state.settings.attachmentsFolder,
+			});
 		}
 		if (instead && instead !== place.name) {
 			seenFollow.add(key);
@@ -2189,7 +2245,12 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 				const before = await current(target.path);
 				if (before === null) return;
 				const next = withFrontMatter(before, "parent", key);
-				if (next && next !== before) await put(target.path, next, true);
+				// Null says the field is laid out over several lines and was left alone: the link is not said to be made.
+				if (next === null) {
+					notify(`Could not set parent: automatically in ${baseName(target.path)} — add parent: ${key} directly in its frontmatter.`, "error");
+					return;
+				}
+				if (next !== before) await put(target.path, next, true);
 				setState((s) => { s.treeVersion += 1; });
 				notify(`Set parent: ${key} on ${otherKey}.`);
 				return;
@@ -2198,7 +2259,11 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 			const before = await current(ticketPath);
 			if (before === null) return;
 			const next = addToFrontMatterList(before, field, otherKey);
-			if (next && next !== before) await put(ticketPath, next, true);
+			if (next === null) {
+				notify(`Could not update ${field}: automatically in ${baseName(ticketPath)} — add ${otherKey} directly in YAML.`, "error");
+				return;
+			}
+			if (next !== before) await put(ticketPath, next, true);
 			setState((s) => { s.treeVersion += 1; });
 			notify(`Linked ${otherKey} under ${field}: in ${baseName(ticketPath)}.`);
 			return;
@@ -2230,10 +2295,11 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 			next = addToFrontMatterList(before, "tickets", key);
 		} else if (existingSingle.length) {
 			const merged = [...new Set([...existingSingle, key])];
-			let cleared = before;
-			for (const prev of existingSingle) cleared = removeFromFrontMatterList(cleared, "ticket", prev) ?? cleared;
+			// One step that cannot be made stops the rest: `ticket:` taken out with `tickets:` not written would lose the link there was.
+			let cleared: string | null = before;
+			for (const prev of existingSingle) cleared = cleared === null ? null : removeFromFrontMatterList(cleared, "ticket", prev);
 			next = cleared;
-			for (const t of merged) next = addToFrontMatterList(next, "tickets", t) ?? next;
+			for (const t of merged) next = next === null ? null : addToFrontMatterList(next, "tickets", t);
 		} else {
 			next = withFrontMatter(before, "ticket", key);
 		}
@@ -2255,6 +2321,14 @@ export async function unlinkDocumentFromTicket(ticketPath: string, key: string, 
 	const relTarget = relativeTo(root(), target.path).split("\\").join("/");
 	try {
 		let changed = false;
+		// A field laid out over several lines is not edited from here. It is named afterwards: the link is written,
+		// not inferred, and it is still there.
+		const refused = new Set<string>();
+		const take = (src: string, field: string, value: string, inPath: string) => {
+			const res = removeFromFrontMatterList(src, field, value);
+			if (res === null) refused.add(`${field}: in ${baseName(inPath)}`);
+			return res ?? src;
+		};
 		// 1. Remove from ticket's own specs/plans/related/blocks/blocked-by/parent frontmatter.
 		const tBefore = await current(ticketPath);
 		if (tBefore !== null) {
@@ -2267,7 +2341,7 @@ export async function unlinkDocumentFromTicket(ticketPath: string, key: string, 
 				for (const v of vals) {
 					const vn = normRef(v);
 					if (vn === targetNorm || targetNorm.endsWith(`/${vn}`) || vn.endsWith(`/${targetNorm}`)) {
-						cur = removeFromFrontMatterList(cur, field, v) ?? cur;
+						cur = take(cur, field, v, ticketPath);
 					}
 				}
 				return cur;
@@ -2278,7 +2352,7 @@ export async function unlinkDocumentFromTicket(ticketPath: string, key: string, 
 				tNext = removePathField(removePathField(tNext, "plans"), "plan");
 			} else if (target.group === "tickets" && target.ticket) {
 				for (const field of ["related", "blocks", "blocked-by", "parent"]) {
-					tNext = removeFromFrontMatterList(tNext, field, target.ticket) ?? tNext;
+					tNext = take(tNext, field, target.ticket, ticketPath);
 				}
 			}
 			if (tNext !== tBefore) {
@@ -2300,7 +2374,7 @@ export async function unlinkDocumentFromTicket(ticketPath: string, key: string, 
 			} else if (isMarkdown(target.path)) {
 				let dNext = dBefore;
 				for (const field of target.group === "tickets" ? ["parent", "related", "blocks", "blocked-by"] : ["ticket", "tickets"]) {
-					dNext = removeFromFrontMatterList(dNext, field, key) ?? dNext;
+					dNext = take(dNext, field, key, target.path);
 				}
 				if (dNext !== dBefore) {
 					await put(target.path, dNext, true);
@@ -2308,8 +2382,10 @@ export async function unlinkDocumentFromTicket(ticketPath: string, key: string, 
 				}
 			}
 		}
-		if (changed) {
-			setState((s) => { s.treeVersion += 1; });
+		if (changed) setState((s) => { s.treeVersion += 1; });
+		if (refused.size) {
+			notify(`Could not unlink in ${[...refused].join(", ")}: the value is written over several lines. Remove the link in the text.`, "error");
+		} else if (changed) {
 			notify(`Unlinked ${target.ticket ?? target.title ?? baseName(target.path)} from ${key}.`);
 		} else {
 			notify(`That link is inferred (e.g. via a paired plan or ticket folder) and cannot be unlinked from YAML.`);
@@ -2355,12 +2431,17 @@ export async function linkNonTicketToTicket(docPath: string): Promise<void> {
 	if (freshMulti.length) next = addToFrontMatterList(fresh, "tickets", ticket.ticket);
 	else if (freshSingle.length) {
 		const merged = [...new Set([...freshSingle, ticket.ticket])];
-		let cleared = fresh;
-		for (const prev of freshSingle) cleared = removeFromFrontMatterList(cleared, "ticket", prev) ?? cleared;
+		// One step that cannot be made stops the rest: `ticket:` taken out with `tickets:` not written would lose the link there was.
+		let cleared: string | null = fresh;
+		for (const prev of freshSingle) cleared = cleared === null ? null : removeFromFrontMatterList(cleared, "ticket", prev);
 		next = cleared;
-		for (const t of merged) next = addToFrontMatterList(next, "tickets", t) ?? next;
+		for (const t of merged) next = next === null ? null : addToFrontMatterList(next, "tickets", t);
 	} else next = withFrontMatter(fresh, "ticket", ticket.ticket);
-	if (next && next !== fresh) {
+	if (next === null) {
+		notify(`Could not update ticket: automatically in ${baseName(docPath)} — add ticket: ${ticket.ticket} directly in its frontmatter.`, "error");
+		return;
+	}
+	if (next !== fresh) {
 		try {
 			await put(docPath, next, true);
 			setState((s) => { s.treeVersion += 1; });
@@ -3572,7 +3653,8 @@ export async function linkSchemaDocToSql(mdPath: string): Promise<void> {
 	if (freshCur === null) return;
 	const relSql = relativeTo(startRoot, chosenPath).split("\\").join("/");
 	const next = withFrontMatter(freshCur, "source", relSql);
-	if (!next || next === freshCur) return;
+	if (next === null) return notify(`Could not set source: in ${baseName(mdPath)}: it is written over several lines. Change it in the text.`, "error");
+	if (next === freshCur) return;
 	try {
 		await put(mdPath, next, true);
 		setState((s) => { s.treeVersion += 1; });
@@ -5429,6 +5511,15 @@ export async function pickActiveTicket(): Promise<void> {
 }
 
 /**
+ * A heading's line with new words: its hashes, and its closing hashes where it has them, stay. Hashes at the
+ * line's end are closing ones only after a space, as the heading is read everywhere else: "## Notes on C#" ends
+ * in a sharp that is part of its words, and would otherwise be left behind after the new ones.
+ */
+export function renamedHeadingLine(rawLine: string, typed: string): string {
+	return rawLine.replace(/^([ \t]{0,3}#{1,6}[ \t]+).+?((?:[ \t]+#+)?[ \t]*)$/, (_, prefix: string, suffix: string) => `${prefix}${typed}${suffix}`);
+}
+
+/**
  * Renames a Markdown heading in the active document and rewrites `#anchor` / `[[Doc#Heading]]`
  * references across all workspace Markdown docs, confirming impact first (ADR 0009), and
  * refreshes any existing `<!-- toc -->` block in the source document.
@@ -5502,7 +5593,7 @@ export async function renameHeadingAcrossWorkspace(targetPath?: string, targetLi
 		const lineIdx = (match.line - 1) * 2;
 		const rawLine = lines[lineIdx];
 		if (rawLine === undefined) return null;
-		const updatedLine = rawLine.replace(/^([ \t]{0,3}#{1,6}[ \t]+).+?([ \t]*#*[ \t]*)$/, (_, prefix: string, suffix: string) => `${prefix}${typed}${suffix}`);
+		const updatedLine = renamedHeadingLine(rawLine, typed);
 		if (updatedLine === rawLine) return null;
 		lines[lineIdx] = updatedLine;
 		const renamed = lines.join("");
@@ -6692,6 +6783,17 @@ export async function recordDocApproval(targetPath?: string): Promise<void> {
 	const freshBefore = await current(docPath);
 	if (freshBefore === null) return notify("Could not read the document.", "error");
 	const summary = changeControl ? `Approved (${changeControl})` : "Formal approval recorded";
+	// An approval is recorded whole or not at all: a field the document writes over several lines is not set from
+	// here, and a record that left it out would say less than the notice does.
+	const stamped = ["status", "approved-by", "approved-date", "effective-date", ...(nextVersion ? ["version"] : []), ...(changeControl ? ["change-control"] : []), ...(reviewDue ? ["review-due"] : [])];
+	const unset = stamped.filter((field) => withFrontMatter(freshBefore, field, "x") === null);
+	if (unset.length === stamped.length) {
+		// No field at all can be set: the block itself is not one (it opens and never closes).
+		return notify(`The approval was not recorded: the front matter of ${baseName(docPath)} cannot be written. Close its block with a line of three dashes and record the approval again.`, "error");
+	}
+	if (unset.length) {
+		return notify(`The approval was not recorded: ${unset.join(", ")} ${unset.length === 1 ? "is" : "are"} written over several lines in ${baseName(docPath)}. Put ${unset.length === 1 ? "it" : "each"} on one line and record the approval again.`, "error");
+	}
 	const after = applyApprovalToMarkdown(freshBefore, {
 		approver,
 		date: approvalDate,
@@ -7073,33 +7175,117 @@ function extractUncheckedChecklistLines(markdown: string): { line: number; text:
 	return out;
 }
 
-/** Removes selected 1-based checklist line numbers from a parent ticket and records a clean wikilink back to the new child ticket. */
-function splitParentTicketChecklist(
+/**
+ * A parent ticket with the picked checklist items (1-based line numbers) taken out and a wikilink to the child
+ * ticket they went to, and the items as the child is to have them. An item is its own line and the more-indented
+ * lines under it (sub-bullets, a wrapped line, a fenced block): they go with it. The text is edited where it
+ * changes and nowhere else: the items' lines come out, the link line goes in under `## Notes` (a new section at
+ * the end where there is none), and every other line stays as it was, blank lines inside a code fence included.
+ */
+export function splitParentTicketChecklist(
 	markdown: string,
 	removedLines: ReadonlySet<number>,
 	childKey: string,
 	childTitle: string,
-): string {
+): { text: string; moved: string[] } {
 	const eol = markdown.includes("\r\n") ? "\r\n" : "\n";
-	const lines = markdown.split(/\r?\n/);
-	const kept = lines.filter((_, idx) => !removedLines.has(idx + 1));
-	const linkLine = `- Split to [[${childKey}]]: ${childTitle}`;
-
-	// Place backlink under `## Notes` when present; otherwise append under a new `## Notes` section.
-	const notesIdx = kept.findIndex((ln) => /^[ \t]{0,3}##[ \t]+Notes\b/i.test(ln));
-	if (notesIdx >= 0) {
-		let insertAt = notesIdx + 1;
-		while (insertAt < kept.length && !/^[ \t]{0,3}#{1,2}[ \t]+/.test(kept[insertAt]!)) {
-			insertAt++;
-		}
-		while (insertAt > notesIdx + 1 && !kept[insertAt - 1]!.trim()) insertAt--;
-		if (insertAt === notesIdx + 1) kept.splice(insertAt, 0, "", linkLine);
-		else kept.splice(insertAt, 0, linkLine);
-	} else {
-		while (kept.length && !kept[kept.length - 1]!.trim()) kept.pop();
-		kept.push("", "## Notes", "", linkLine, "");
+	// Each line with where it starts and where the one after it does, so a line that is not moved keeps its own end.
+	const lines: { text: string; start: number; next: number }[] = [];
+	for (let at = 0; at <= markdown.length; ) {
+		const stop = markdown.indexOf("\n", at);
+		lines.push({ text: markdown.slice(at, stop < 0 ? markdown.length : stop).replace(/\r$/, ""), start: at, next: stop < 0 ? markdown.length : stop + 1 });
+		if (stop < 0) break;
+		at = stop + 1;
 	}
-	return kept.join(eol).replace(/(\r?\n){3,}/g, `${eol}${eol}`);
+	const blank = (idx: number) => !lines[idx]!.text.trim();
+	const width = (text: string) => /^[ \t]*/.exec(text)![0].replace(/\t/g, "    ").length;
+
+	// Each picked item with the lines under it. One picked under another that is picked goes as part of that one.
+	const items: [number, number][] = [];
+	for (const first of [...removedLines].map((n) => n - 1).sort((a, b) => a - b)) {
+		if (first < 0 || first >= lines.length || (items.length && first <= items.at(-1)![1])) continue;
+		const own = width(lines[first]!.text);
+		let end = first;
+		for (let j = first + 1; j < lines.length; j++) {
+			if (blank(j)) continue;
+			if (width(lines[j]!.text) <= own) break;
+			end = j;
+		}
+		items.push([first, end]);
+	}
+	const moved = items.map(([first, end]) => {
+		const lead = /^[ \t]*/.exec(lines[first]!.text)![0];
+		const block = lines.slice(first, end + 1).map((line) => (line.text.startsWith(lead) ? line.text.slice(lead.length) : line.text.trimStart()));
+		const box = /^[-*+][ \t]+\[ \][ \t]+(.+)$/.exec(block[0]!);
+		if (box) block[0] = `- [ ] ${box[1]!.trim()}`;
+		return block.join("\n");
+	});
+
+	// What comes out of the text. An item that stood alone between two blank lines takes the one after it along:
+	// the two would otherwise be left side by side where it was.
+	const gone = new Set<number>();
+	const cuts: { from: number; to: number; put: string }[] = [];
+	for (let i = 0; i < items.length; i++) {
+		const first = items[i]![0];
+		let end = items[i]![1];
+		while (i + 1 < items.length && items[i + 1]![0] === end + 1) end = items[++i]![1];
+		let before = first - 1;
+		while (before >= 0 && gone.has(before)) before--;
+		const after = end + 1;
+		if ((before < 0 || blank(before)) && after < lines.length && blank(after) && lines[after]!.next > lines[after]!.start) end = after;
+		for (let j = first; j <= end; j++) gone.add(j);
+		cuts.push({ from: lines[first]!.start, to: lines[end]!.next, put: "" });
+	}
+
+	// The link line goes in at one place: after the last line of `## Notes`, or in a new `## Notes` at the end.
+	// A line inside a code fence is no heading, so the section is not cut short at a `#` comment in a script.
+	const linkLine = `- Split to [[${childKey}]]: ${childTitle}`;
+	let notesIdx = -1;
+	let sectionEnd = lines.length;
+	let fenceChar = "";
+	let fenceLen = 0;
+	for (let i = frontMatter(markdown).lines; i < lines.length; i++) {
+		if (gone.has(i)) continue;
+		const raw = lines[i]!.text;
+		const fence = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(raw);
+		if (fence) {
+			if (!fenceChar) {
+				fenceChar = fence[1]![0]!;
+				fenceLen = fence[1]!.length;
+			} else if (fence[1]![0] === fenceChar && fence[1]!.length >= fenceLen && /^[ \t]*$/.test(raw.slice(fence[0].length))) {
+				fenceChar = "";
+				fenceLen = 0;
+			}
+			continue;
+		}
+		if (fenceChar) continue;
+		if (notesIdx < 0) {
+			if (/^[ \t]{0,3}##[ \t]+Notes\b/i.test(raw)) notesIdx = i;
+		} else if (/^[ \t]{0,3}#{1,2}[ \t]+/.test(raw)) {
+			sectionEnd = i;
+			break;
+		}
+	}
+	// The last line that stays and says something, in the section or in the whole text: the link goes in after it.
+	let last = (notesIdx < 0 ? lines.length : sectionEnd) - 1;
+	while (last > notesIdx && (gone.has(last) || blank(last))) last--;
+	// A last line with no line end of its own is given one first.
+	const at = last < 0 ? 0 : lines[last]!.next;
+	const open = last >= 0 && !markdown.slice(lines[last]!.start, at).endsWith("\n") ? eol : "";
+	if (notesIdx < 0) {
+		// A new section stands one blank line below the text: the one that is there already, where there is one.
+		let below = last + 1;
+		while (gone.has(below)) below++;
+		const spaced = last >= 0 && below < lines.length && blank(below) && lines[below]!.next > lines[below]!.start;
+		const from = spaced ? lines[below]!.next : at;
+		cuts.push({ from, to: from, put: `${open}${last < 0 || spaced ? "" : eol}## Notes${eol}${eol}${linkLine}${eol}` });
+	} else if (last === notesIdx) cuts.push({ from: at, to: at, put: `${open}${eol}${linkLine}${eol}` });
+	else cuts.push({ from: at, to: at, put: open ? `${open}${linkLine}` : `${linkLine}${eol}` });
+
+	// From the end backwards, so no edit moves the place of one before it; where the link goes in at the start of a cut, it is put in last.
+	let text = markdown;
+	for (const cut of cuts.sort((a, b) => b.from - a.from || b.to - a.to)) text = `${text.slice(0, cut.from)}${cut.put}${text.slice(cut.to)}`;
+	return { text, moved };
 }
 
 /** Suggests a deterministic next sub-ticket key (e.g. `LIMS-100-1` or `LIMS-101`). */
@@ -7187,7 +7373,19 @@ export async function splitTicketSubticket(targetPath?: string): Promise<void> {
 	if (gxpVal) childMd = withFrontMatter(childMd, "gxp-impact", gxpVal) ?? childMd;
 	for (const tag of many(fm.tags)) childMd = addToFrontMatterList(childMd, "tags", tag) ?? childMd;
 
-	const movedChecklist = pickedItems.map((it) => `- [ ] ${it.text}`).join("\n");
+	// The picked items as the ticket has them now. One that is found goes to the child with the lines under it and
+	// leaves the parent; one that is no longer there goes as the one line that was picked.
+	const freshUnchecked = extractUncheckedChecklistLines(freshSrcText);
+	const removedSet = new Set<number>();
+	const notFound: string[] = [];
+	for (const picked of pickedItems) {
+		const exact = freshUnchecked.find((u) => !removedSet.has(u.line) && u.line === picked.line && u.text === picked.text);
+		const fallback = exact ?? freshUnchecked.find((u) => !removedSet.has(u.line) && u.text === picked.text);
+		if (fallback) removedSet.add(fallback.line);
+		else notFound.push(`- [ ] ${picked.text}`);
+	}
+	const split = splitParentTicketChecklist(freshSrcText, removedSet, childKey, childTitle);
+	const movedChecklist = [...split.moved, ...notFound].join("\n");
 	const donePlaceholder = /^## What done looks like\r?\n\r?\n- \[ \] What must be true when this is done:[^\r\n]*/m;
 	if (donePlaceholder.test(childMd)) {
 		childMd = childMd.replace(donePlaceholder, () => `## What done looks like\n\n${movedChecklist}`);
@@ -7200,15 +7398,7 @@ export async function splitTicketSubticket(targetPath?: string): Promise<void> {
 	try {
 		await backend.create(childDest, "file");
 		await backend.write(childDest, childMd);
-		const freshUnchecked = extractUncheckedChecklistLines(freshSrcText);
-		const removedSet = new Set<number>();
-		for (const picked of pickedItems) {
-			const exact = freshUnchecked.find((u) => !removedSet.has(u.line) && u.line === picked.line && u.text === picked.text);
-			const fallback = exact ?? freshUnchecked.find((u) => !removedSet.has(u.line) && u.text === picked.text);
-			if (fallback) removedSet.add(fallback.line);
-		}
-		const nextParent = splitParentTicketChecklist(freshSrcText, removedSet, childKey, childTitle);
-		await put(srcDoc.path, nextParent, true);
+		await put(srcDoc.path, split.text, true);
 		setState((s) => { s.treeVersion += 1; });
 		notify(`Split ${pickedItems.length} ${pickedItems.length === 1 ? "item" : "items"} from ${parentKey} into ${childKey}.`);
 		await openFile(childDest);

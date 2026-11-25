@@ -35,7 +35,11 @@ import {
 	markedColumns,
 	parseDocFilterTokens,
 	resolveSearchQuery,
+	searchShortfall,
 	segments,
+	shortfallBlocksReplace,
+	shortfallCount,
+	timedOutEmpty,
 	type LineHit,
 	type ParsedDocFilters,
 	type SearchScopeKind,
@@ -140,6 +144,8 @@ const [docFilterNote, setDocFilterNote] = createSignal("");
 const [lineFiltered, setLineFiltered] = createSignal(false);
 /** True when backend/dirty search hit `SEARCH_LIMIT` before post-filtering or deduping. */
 const [truncated, setTruncated] = createSignal(false);
+/** True when the backend's scan ran out of time: what is listed is only what was found in the files it got to. */
+const [timedOut, setTimedOut] = createSignal(false);
 /** Active ticket key when scoped to an active ticket via explicit `paths` allowlist. */
 const [ticketScopeKey, setTicketScopeKey] = createSignal<string | null>(null);
 /** Re-entrancy guard for Replace All and Replace Preview flows. */
@@ -167,6 +173,7 @@ function resetSearchState() {
 	setDocFilterNote("");
 	setLineFiltered(false);
 	setTruncated(false);
+	setTimedOut(false);
 	setDismissedFiles(new Set<string>());
 	setDismissedLines(new Set<string>());
 	setTicketScopeKey(null);
@@ -506,6 +513,7 @@ export function Search() {
 		setDocFilterNote("");
 		setLineFiltered(false);
 		setTruncated(false);
+		setTimedOut(false);
 		setDismissedFiles(new Set<string>());
 		setDismissedLines(new Set<string>());
 		if (!rawQuery) {
@@ -656,7 +664,8 @@ export function Search() {
 		setLineFiltered(hasHeadingFilter || hasTaskFilter);
 
 		try {
-			const diskHits = await backend.search(effectiveQuery, backendOptions);
+			// Asked for with whether the scan was cut short: a scan that ran out of time gives only some of what is there.
+			const { hits: diskHits, timedOut: ranOutOfTime } = await backend.searchScan(effectiveQuery, backendOptions);
 			if (mine !== latest || state.workspace?.root !== startRoot) return;
 
 			// Overlay unsaved dirty open editor buffers so freshly edited unsaved text is always searchable.
@@ -735,12 +744,14 @@ export function Search() {
 
 			if (merged.length > SEARCH_LIMIT) merged = merged.slice(0, SEARCH_LIMIT);
 			setTruncated(wasTruncated);
+			setTimedOut(ranOutOfTime);
 			setHits(merged);
 			setStatus("done");
 		} catch (e: any) {
 			if (mine !== latest || state.workspace?.root !== startRoot) return;
 			setHits([]);
 			setTruncated(false);
+			setTimedOut(false);
 			setFailure(String(e?.message ?? e));
 			setStatus("failed");
 		}
@@ -1099,13 +1110,15 @@ export function Search() {
 		}
 		return new Map(entries);
 	};
+	/** How the list on screen falls short of all there is to find, when it does: the summary says so and a replace is refused. */
+	const shortfall = () => searchShortfall({ hits: hits().length, limit: SEARCH_LIMIT, truncated: truncated(), timedOut: timedOut() });
 	/** Why "Replace all" cannot be pressed now; "" when it can. */
 	const noReplace = (ignoreReplaceActive = false) => {
 		if (status() === "busy" || (!ignoreReplaceActive && replaceActive())) return "The search is still running";
 		if (searched().syntheticQuery) return "Enter search text to replace — filter-only queries cannot replace";
 		if (status() !== "done" || !visibleHits().length) return "Search for something first: what is found is what is replaced";
-		if (truncated() || hits().length >= SEARCH_LIMIT) return `There are ${SEARCH_LIMIT} results or more, and only the first are listed: narrow the search before replacing`;
-		return "";
+		// A list cut short by the match limit or by the scan's time budget is not all there is to replace.
+		return shortfallBlocksReplace(shortfall(), SEARCH_LIMIT);
 	};
 	const executeReplace = async (skipConfirm: boolean) => {
 		if (replaceBusy || noReplace(true)) return;
@@ -1410,14 +1423,10 @@ export function Search() {
 		const dismissedTail = dismissedHitCount() ? ` (${dismissedHitCount()} dismissed)` : "";
 		if (!visibleHits().length) {
 			if (dismissedHitCount()) return `All ${count(hits().length, "result")} for “${asked()}” were dismissed.`;
+			if (timedOut()) return timedOutEmpty(asked(), filterTail);
 			return `Nothing found for “${asked()}”${filterTail}${narrowed() && !docFilterNote() ? " in the files chosen" : ""}. Check the spelling${switchesOn().length ? `, or switch ${switchesOn().join(" and ")} off` : ""}${narrowed() ? ", or look in more files" : ""}.`;
 		}
-		const countText =
-			hits().length >= SEARCH_LIMIT
-				? `The first ${SEARCH_LIMIT} results`
-				: truncated()
-					? `Partial results (${count(visibleHits().length, "result")} shown; hit ${SEARCH_LIMIT}-match limit)`
-					: count(visibleHits().length, "result");
+		const countText = shortfallCount(shortfall(), count(visibleHits().length, "result"), hits().length, SEARCH_LIMIT);
 		return `${countText} in ${count(groups().length, "file")} for “${asked()}”${filterTail}${dismissedTail}${narrowed() && !docFilterNote() ? ", in the files chosen" : ""}`;
 	};
 
@@ -1688,49 +1697,67 @@ export function Search() {
 				{summary()}
 			</p>
 			<Rows label="Search results">
-				<For each={groups()}>
-					{([path, list]) => (
-						<RowGroup
-							headClass="tree-row file-head"
-							title={path}
-							head={
-								<>
-									<FileMark name={path} />
-									<span class="label">{rel(path)}</span>
-									<span class="meta" title={count(matchesIn(list), "match", "matches") + " in this file"}>
-										{matchesIn(list)}
-									</span>
-									<button
-										type="button"
-										class="search-dismiss"
-										style={dismissBtnStyle}
-										tabindex={-1}
-										title={`Dismiss ${rel(path)} from results and Replace all`}
-										aria-label={`Dismiss ${rel(path)} from results`}
-										onClick={(e) => {
-											e.stopPropagation();
-											dismissFile(path);
-										}}
-									>
-										<Icon name="close" />
-									</button>
-								</>
-							}
-						>
-							<For each={byPlace(list)}>
-								{([where, lines]) => (
-									<Show when={where} fallback={<For each={lines}>{(line) => <HitRow line={line} />}</For>}>
-										<div role="group" aria-label={where}>
-											<div class="tree-row place" style={{ "padding-left": "16px" }} title={where} aria-hidden="true">
-												<span class="label">{where}</span>
-											</div>
-											<For each={lines}>{(line) => <HitRow line={line} />}</For>
-										</div>
-									</Show>
-								)}
-							</For>
-						</RowGroup>
-					)}
+				<For each={groups()} keyed={([path]) => path}>
+					{(group) => {
+						const path = () => group()[0];
+						const list = () => group()[1];
+						const places = createMemo(() => byPlace(list()));
+						return (
+							<RowGroup
+								headClass="tree-row file-head"
+								title={path()}
+								head={
+									<>
+										<FileMark name={path()} />
+										<span class="label">{rel(path())}</span>
+										<span class="meta" title={count(matchesIn(list()), "match", "matches") + " in this file"}>
+											{matchesIn(list())}
+										</span>
+										<button
+											type="button"
+											class="search-dismiss"
+											style={dismissBtnStyle}
+											tabindex={-1}
+											title={`Dismiss ${rel(path())} from results and Replace all`}
+											aria-label={`Dismiss ${rel(path())} from results`}
+											onClick={(e) => {
+												e.stopPropagation();
+												dismissFile(path());
+											}}
+										>
+											<Icon name="close" />
+										</button>
+									</>
+								}
+							>
+								<For each={places()} keyed={([where]) => where}>
+									{(place) => {
+										const where = () => place()[0];
+										const lines = () => place()[1];
+										return (
+											<Show
+												when={where()}
+												fallback={
+													<For each={lines()} keyed={(line) => `${line.path}:${line.line}`}>
+														{(line) => <HitRow line={line()} />}
+													</For>
+												}
+											>
+												<div role="group" aria-label={where()}>
+													<div class="tree-row place" style={{ "padding-left": "16px" }} title={where()} aria-hidden="true">
+														<span class="label">{where()}</span>
+													</div>
+													<For each={lines()} keyed={(line) => `${line.path}:${line.line}`}>
+														{(line) => <HitRow line={line()} />}
+													</For>
+												</div>
+											</Show>
+										);
+									}}
+								</For>
+							</RowGroup>
+						);
+					}}
 				</For>
 			</Rows>
 		</div>

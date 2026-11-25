@@ -3,7 +3,7 @@
 import type { Subprocess } from "bun";
 import type { LspState } from "../shared/protocol";
 import { createFrameReader, frame } from "./frames";
-import { lspCommand } from "./tools";
+import { lspCommand, verbatim } from "./tools";
 
 const MAX_RESTARTS = 3;
 const RESTART_WINDOW_MS = 60_000;
@@ -25,7 +25,9 @@ export class LspProcess {
 		this.onState({ state: "starting" });
 		let proc: Subprocess<"pipe", "pipe", "pipe">;
 		try {
-			proc = Bun.spawn(lspCommand(this.path, ["--stdio"]), { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+			// A shim whose path needs quoting is a line written out for cmd.exe, which Windows must be given as written.
+			const command = lspCommand(this.path, ["--stdio"]);
+			proc = Bun.spawn(command, { stdin: "pipe", stdout: "pipe", stderr: "pipe", windowsVerbatimArguments: verbatim(command) });
 		} catch (err: any) {
 			this.proc = undefined;
 			const msg = String(err?.message ?? err).slice(-500);

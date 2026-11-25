@@ -7,6 +7,7 @@ import { continueLists } from "./markdownKeys";
 import { emitSplitScrollSync, liveEditorAt, saveMarkdownSyncAnchor, takeMarkdownSyncAnchor } from "./liveBridge";
 import { MarkdownLiveEditor } from "./MarkdownLiveEditor";
 import { Icon } from "../Icon";
+import { RegionBoundary } from "../RegionBoundary";
 import { tabShown } from "../recentTabs";
 import { createEffect, createMemo, createRoot, createSignal, flush, For, getOwner, onCleanup, onSettled, runWithOwner, Show, untrack } from "solid-js";
 import { createAsyncQuery } from "../asyncQuery";
@@ -43,6 +44,9 @@ import { size as scriptSize } from "../StatusBar";
 import { getPath, SERVER_DEFAULTS } from "../../shared/styleProfile";
 import { level, RULER_MARGIN, rulerColumns } from "../../shared/houseStyle";
 import { noteCursor } from "../navigation";
+
+/** Under a view that failed (RegionBoundary): what still works, since the tab strip above it does. */
+const VIEW_FAILED_HINT = "The file is still open: another view of it, or closing its tab, works as before.";
 
 /**
  * Where the cursor and the scroll were in each file a group showed, by the group's place in the row and the file's
@@ -440,7 +444,10 @@ export function EditorGroup(props: { index: number }) {
 				});
 		});
 		editor.onDidChangeCursorPosition((e) => {
-			if (state.activeGroup !== props.index) return;
+			// A click into the other group gives this editor the keyboard and moves its cursor in one task, and the
+			// store's `activeGroup` (set on focus, just above) still reads as the old group until the next flush. The
+			// keyboard being here says the same thing sooner, so that first click is a place to go back to as well.
+			if (state.activeGroup !== props.index && !editor.hasTextFocus()) return;
 			setState((s) => {
 				s.cursor = { line: e.position.lineNumber, column: e.position.column };
 			});
@@ -1337,20 +1344,43 @@ export function EditorGroup(props: { index: number }) {
 					</nav>
 				</Show>
 				{/* Keyed by the file: a view built for one script is never reused for the next. */}
+				{/* Each view in a boundary of its own, inside the keyed Show: a view that throws as it is built costs this
+				    pane only, and the boundary goes with the view when the tab or the mode changes, so the tab strip
+				    above can still close the tab or switch it to Source. */}
 				<Show when={showBlocks() && group().active} keyed>
-					{(path) => <BlocksView path={path} group={props.index} />}
+					{(path) => (
+						<RegionBoundary what="This view" hint={VIEW_FAILED_HINT}>
+							<BlocksView path={path} group={props.index} />
+						</RegionBoundary>
+					)}
 				</Show>
 				<Show when={showChart() && group().active} keyed>
-					{(path) => <PlanView path={path} group={props.index} mode={planViewMode() === "text" ? "text" : "chart"} />}
+					{(path) => (
+						<RegionBoundary what="This view" hint={VIEW_FAILED_HINT}>
+							<PlanView path={path} group={props.index} mode={planViewMode() === "text" ? "text" : "chart"} />
+						</RegionBoundary>
+					)}
 				</Show>
 				<Show when={(showRendered() || showLive()) && group().active} keyed>
-					{(path) => <MarkdownLiveEditor path={path} group={props.index} mode={showRendered() ? "read" : "live"} />}
+					{(path) => (
+						<RegionBoundary what="This view" hint={VIEW_FAILED_HINT}>
+							<MarkdownLiveEditor path={path} group={props.index} mode={showRendered() ? "read" : "live"} />
+						</RegionBoundary>
+					)}
 				</Show>
 				<Show when={showFile() && group().active} keyed>
-					{(path) => <FileView path={path} />}
+					{(path) => (
+						<RegionBoundary what="This view" hint={VIEW_FAILED_HINT}>
+							<FileView path={path} />
+						</RegionBoundary>
+					)}
 				</Show>
 				<Show when={showTable() && group().active} keyed>
-					{(path) => <TableView path={path} group={props.index} />}
+					{(path) => (
+						<RegionBoundary what="This view" hint={VIEW_FAILED_HINT}>
+							<TableView path={path} group={props.index} />
+						</RegionBoundary>
+					)}
 				</Show>
 				<div class={["editor-row", { hidden: showBlocks() || showChart() || showRendered() || showLive() || showTable() || showFile() }]}>
 					{/* An overview of the whole file, top to bottom, to the left of the line numbers: not marks on the lines in view. */}

@@ -263,6 +263,78 @@ function readFrontMatterListValues(text: string, key: string): string[] {
 
 const quoteListItem = (v: string) => (/[:#[\]{},&*?|>!'"%@`\r\n]|^-|^\s|\s$/.test(v) ? JSON.stringify(v) : v);
 
+/**
+ * How far a key's value runs: the index of its last line, the key's own line
+ * when the value is all on it. A value goes on under its key as dashes, as
+ * more-indented lines (a block scalar, a nested map, a scalar that wraps) or
+ * as a flow list or map whose bracket closes on a later line. Blank and
+ * comment lines between two of its lines are part of it; ones after its last
+ * line are not. `dashes` says the value is a plain list, one `- item` to a
+ * line and all at one indent: the only shape over several lines that is
+ * edited a line at a time. A writer that changed the key's line alone would
+ * leave the rest of any other shape behind as broken YAML.
+ */
+function valueExtent(lines: readonly { text: string }[], at: number, close: number): { end: number; dashes: boolean } {
+	const keyLine = lines[at]!.text;
+	const value = keyLine.slice(keyLine.indexOf(":") + 1);
+	const empty = /^\s*(?:#.*)?$/.test(value);
+	// Under a block scalar's mark every more-indented line is its text, one that starts with a hash too.
+	const block = /^\s*[|>][-+0-9]*\s*(?:#.*)?$/.test(value);
+	// A flow list or map left open on the key's line runs to the line that closes it: its items are indented, and
+	// the closing bracket (or a comment) may stand at the margin. Brackets that do not close that way say nothing
+	// (an unquoted title may open with one), and the value is then read as far as its indented lines go.
+	let flowEnd = -1;
+	if (/^\s*[[{]/.test(value)) {
+		let depth = 0;
+		let quote = "";
+		// A quote mark opens a quoted item only where an item starts: the one in `it's` is a letter of its word.
+		let opening = true;
+		scan: for (let j = at; j < close; j++) {
+			const text = j === at ? value : lines[j]!.text;
+			if (j > at && /^[^\s\]}#]/.test(text)) break;
+			for (let i = 0; i < text.length; i++) {
+				const ch = text[i]!;
+				if (quote) {
+					if (quote === '"' && ch === "\\") i++;
+					else if (ch === quote) quote = "";
+					continue;
+				}
+				if (/\s/.test(ch)) continue;
+				if (ch === "#" && (i === 0 || /\s/.test(text[i - 1]!))) break;
+				const starts = opening;
+				opening = ch === "[" || ch === "{" || ch === "," || ch === ":";
+				if ((ch === '"' || ch === "'") && starts) quote = ch;
+				else if (ch === "[" || ch === "{") depth++;
+				else if ((ch === "]" || ch === "}") && --depth <= 0) {
+					flowEnd = j;
+					break scan;
+				}
+			}
+		}
+	}
+	let end = at;
+	let dashes = empty;
+	let indent: string | null = null;
+	for (let j = at + 1; j < close; j++) {
+		const text = lines[j]!.text;
+		if (j <= flowEnd) {
+			end = j;
+			dashes = false;
+			continue;
+		}
+		const trimmed = text.trim();
+		if (!trimmed) continue;
+		const indented = /^\s/.test(text);
+		if (trimmed.startsWith("#") && !(block && indented)) continue;
+		const dash = /^(\s*)-\s+/.exec(text);
+		if (!indented && !(empty && /^-(?:\s|$)/.test(text))) break;
+		end = j;
+		if (!dash || (indent !== null && dash[1] !== indent)) dashes = false;
+		else indent = dash[1]!;
+	}
+	return { end, dashes: dashes && end > at };
+}
+
 function writeFrontMatterRaw(text: string, key: string, serializedVal: string): string | null {
 	const eol = text.includes("\r\n") ? "\r\n" : "\n";
 	// Each line with where it is in the text: only the one line is rewritten, so every other line keeps its own end.
@@ -305,15 +377,9 @@ function writeFrontMatterRaw(text: string, key: string, serializedVal: string): 
 	const keyRe = new RegExp(`^${escapeRegExp(key)}\\s*:`, "i");
 	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && keyRe.test(line.text));
 	if (at < 0) return `${text.slice(0, lines[close]!.start)}${key}: ${serializedVal}${eol}${text.slice(lines[close]!.start)}`;
-	// A list written as dashes under the key is the person's layout: skip blank/comment lines when checking.
-	if (/:\s*(?:#.*)?$/.test(lines[at]!.text)) {
-		for (let j = at + 1; j < close; j++) {
-			const next = lines[j]!.text.trim();
-			if (!next || next.startsWith("#")) continue;
-			if (/^-\s+/.test(next)) return null;
-			break;
-		}
-	}
+	// A value that goes on under its key's line (dashes, a block scalar, a nested map, a flow list closed on a later
+	// line) is the person's layout, and a new value on the key's line would leave its other lines behind: not set here.
+	if (valueExtent(lines, at, close).end > at) return null;
 	return `${text.slice(0, lines[at]!.start)}${lines[at]!.text.slice(0, lines[at]!.text.indexOf(":"))}: ${serializedVal}${text.slice(lines[at]!.end)}`;
 }
 
@@ -321,8 +387,9 @@ function writeFrontMatterRaw(text: string, key: string, serializedVal: string): 
  * The text with one value of its front matter set: the key's own line is
  * changed where it has one, and added at the block's end where it has not.
  * A document with no front matter gets a block. Nothing else is touched, and
- * the file's own line ends are kept. A value that is a list under its key is
- * left alone: null says it could not be set.
+ * the file's own line ends are kept. A value that goes on under its key's
+ * line (a list as dashes, a block scalar, a nested map, a flow list closed on
+ * a later line) is left alone: null says it could not be set.
  */
 export function withFrontMatter(text: string, key: string, value: string): string | null {
 	return writeFrontMatterRaw(text, key, quoteYamlScalar(value));
@@ -332,6 +399,8 @@ export function withFrontMatter(text: string, key: string, value: string): strin
  * Adds `item` to a front matter list key (e.g. `specs: [a, b]`, `plans: [...]`, `related: [...]`).
  * Supports BOTH inline arrays (`key: [a, b]`) AND multi-line YAML bullet lists (`key:\n  - a`),
  * preserving the author's list style. If `item` is already present (case-insensitive), returns `text` unchanged.
+ * Any other value over several lines (a flow list broken across lines, a block scalar, a nested map, dash items
+ * that run on) is left alone: null says the item could not be added.
  */
 export function addToFrontMatterList(text: string, key: string, item: string): string | null {
 	const wanted = item.trim();
@@ -358,24 +427,21 @@ export function addToFrontMatterList(text: string, key: string, item: string): s
 	const keyRe = new RegExp(`^${escapeRegExp(key)}\\s*:`, "i");
 	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && keyRe.test(line.text));
 	if (at < 0) return null;
-	let lastItem = at;
-	let indent = "  ";
-	for (let j = at + 1; j < close; j++) {
-		const t = lines[j]!.text;
-		if (!t.trim() || t.trim().startsWith("#")) continue;
-		const m = /^(\s*)-\s+/.exec(t);
-		if (m) {
-			indent = m[1] || "  ";
-			lastItem = j;
-		} else break;
-	}
+	// Only a plain dash list takes one more dash: any other value over several lines is left for the person to edit.
+	const extent = valueExtent(lines, at, close);
+	if (!extent.dashes) return null;
+	// The new item stands where the others do: a list written at the margin has its dashes there, and an indented
+	// dash under one of them would be read as more of that item's text.
+	const lastItem = extent.end;
+	const indent = /^(\s*)-/.exec(lines[lastItem]!.text)?.[1] ?? "  ";
 	const insertAt = lines[lastItem]!.end;
 	return `${text.slice(0, insertAt)}${eol}${indent}- ${quoteListItem(wanted)}${text.slice(insertAt)}`;
 }
 
 /**
  * Removes `item` (case-insensitive) from a front matter list or scalar key.
- * If the key becomes empty, removes the key line(s) cleanly.
+ * If the key becomes empty, removes the key line(s) cleanly. Null when the value runs over several lines and is
+ * not a plain dash list: it cannot be edited a line at a time.
  */
 export function removeFromFrontMatterList(text: string, key: string, item: string): string | null {
 	const target = item.trim().toLowerCase();
@@ -406,19 +472,12 @@ export function removeFromFrontMatterList(text: string, key: string, item: strin
 	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && keyRe.test(line.text));
 	if (at < 0) return text;
 
-	// Check if multi-line bullet list
-	let isMulti = false;
-	let listEnd = at;
-	if (/:\s*(?:#.*)?$/.test(lines[at]!.text)) {
-		for (let j = at + 1; j < close; j++) {
-			const t = lines[j]!.text.trim();
-			if (!t || t.startsWith("#")) continue;
-			if (/^-\s+/.test(t)) {
-				isMulti = true;
-				listEnd = j;
-			} else break;
-		}
-	}
+	// A plain dash list loses the item's own line. Any other value over several lines is not edited here: taking
+	// the key's line out of it would leave its other lines under the key before.
+	const extent = valueExtent(lines, at, close);
+	if (extent.end > at && !extent.dashes) return null;
+	const isMulti = extent.dashes;
+	const listEnd = extent.end;
 	if (isMulti) {
 		if (!kept.length) return `${text.slice(0, lines[at]!.start)}${text.slice(lines[listEnd]!.lineEnd)}`;
 		const toRemove: { start: number; end: number }[] = [];
@@ -444,6 +503,7 @@ export function removeFromFrontMatterList(text: string, key: string, item: strin
 /**
  * Replaces `oldItem` (case-insensitive) with `newItem` inside a scalar, inline list,
  * or multi-line YAML bullet list while preserving key position, YAML list style, and all other entries verbatim.
+ * Null when the value runs over several lines and is not a plain dash list.
  */
 export function replaceInFrontMatterList(text: string, key: string, oldItem: string, newItem: string): string | null {
 	const target = oldItem.trim().toLowerCase();
@@ -472,22 +532,16 @@ export function replaceInFrontMatterList(text: string, key: string, oldItem: str
 	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && keyRe.test(line.text));
 	if (at < 0) return text;
 
-	// Check multi-line YAML bullet list
-	let isMulti = false;
-	let listEnd = at;
-	if (/:\s*(?:#.*)?$/.test(lines[at]!.text)) {
-		for (let j = at + 1; j < close; j++) {
-			const t = lines[j]!.text.trim();
-			if (!t || t.startsWith("#")) continue;
-			if (/^-\s+/.test(t)) {
-				isMulti = true;
-				listEnd = j;
-			} else break;
-		}
-	}
+	// A plain dash list has the item's own line rewritten; any other value over several lines is not edited here.
+	const extent = valueExtent(lines, at, close);
+	if (extent.end > at && !extent.dashes) return null;
+	const isMulti = extent.dashes;
+	const listEnd = extent.end;
 	if (isMulti) {
 		const edits: { start: number; end: number; rep: string }[] = [];
-		const alreadyHasNew = vals.some((v) => v.toLowerCase() === next.toLowerCase());
+		// The new item is in the list already only when another line holds it: a change of an item's case alone
+		// finds the item itself, and dropping its line for that would lose it.
+		const alreadyHasNew = vals.some((v) => v.toLowerCase() === next.toLowerCase() && v.toLowerCase() !== target);
 		for (let j = at + 1; j <= listEnd; j++) {
 			const m = /^(\s*-\s+)(.*)$/.exec(lines[j]!.text);
 			if (m && unquote(stripInlineComment(m[2]!)).toLowerCase() === target) {
@@ -523,7 +577,8 @@ export function replaceInFrontMatterList(text: string, key: string, oldItem: str
 }
 
 /**
- * Removes a front matter key (and any indented bullet items beneath it) from the
+ * Removes a front matter key and the whole of its value (dash items, a block
+ * scalar's lines, a nested map, a flow list closed on a later line) from the
  * YAML block, then strips the fences if the block becomes empty.
  */
 export function removeFrontMatterKey(text: string, key: string): string {
@@ -548,15 +603,9 @@ export function removeFrontMatterKey(text: string, key: string): string {
 	const ranges: [number, number][] = [];
 	for (let i = openIdx + 1; i < close; i++) {
 		if (!keyRe.test(lines[i]!.text)) continue;
-		let endIdx = i;
-		if (/:\s*(?:#.*)?$/.test(lines[i]!.text)) {
-			for (let j = i + 1; j < close; j++) {
-				const t = lines[j]!.text.trim();
-				if (!t || t.startsWith("#")) continue;
-				if (/^-\s+/.test(t)) endIdx = j;
-				else break;
-			}
-		}
+		// The whole value goes with its key: lines of a block scalar or a nested map left behind would be read as
+		// more of the key before.
+		const endIdx = valueExtent(lines, i, close).end;
 		ranges.push([lines[i]!.start, lines[endIdx]!.lineEnd]);
 		i = endIdx;
 	}

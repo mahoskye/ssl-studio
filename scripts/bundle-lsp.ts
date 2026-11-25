@@ -6,8 +6,9 @@
 //   bun scripts/bundle-lsp.ts [--download]
 import { $ } from "bun";
 import { homedir } from "node:os";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { renameReplacing } from "../src/bun/atomic";
 import { findLsp, LSP_PIN } from "../src/bun/tools";
 
 export async function versionOf(path: string): Promise<string | undefined> {
@@ -37,6 +38,26 @@ export async function bundleLsp(opts: BundleLspOptions = {}): Promise<{ target: 
 	const findLocal = opts.findLocal ?? findLsp;
 	mkdirSync(vendor, { recursive: true });
 
+	const sameResolvedPath = (a: string, b: string) => {
+		const ra = resolve(a);
+		const rb = resolve(b);
+		return platformName === "win32" || platformName === "darwin" ? ra.toLowerCase() === rb.toLowerCase() : ra === rb;
+	};
+	const stageTarget = async (writeTemp: (tempPath: string) => Promise<void> | void) => {
+		const temp = `${target}.new`;
+		try {
+			await writeTemp(temp);
+			await renameReplacing(temp, target, { win32: platformName === "win32" });
+		} catch (err) {
+			try {
+				rmSync(temp, { force: true });
+			} catch {
+				// Best-effort cleanup of temp file.
+			}
+			throw err;
+		}
+	};
+
 	let action: "downloaded" | "cached" | "copied";
 	if (opts.download) {
 		const platform = platformName === "win32" ? "windows" : platformName;
@@ -51,8 +72,7 @@ export async function bundleLsp(opts: BundleLspOptions = {}): Promise<{ target: 
 		};
 		// Beside the old one, then renamed over it: a server that is running (an open
 		// SSL Studio) keeps its own copy, where writing into the file in use fails.
-		await fetchTo(`${release}/${asset}`, `${target}.new`);
-		renameSync(`${target}.new`, target);
+		await stageTarget((temp) => fetchTo(`${release}/${asset}`, temp));
 		await fetchTo(`${release}/THIRD-PARTY-NOTICES.md`, noticesPath);
 		await fetchTo(`https://raw.githubusercontent.com/mahoskye/starlims-lsp/v${LSP_PIN}/LICENSE`, licensePath);
 		action = "downloaded";
@@ -62,20 +82,25 @@ export async function bundleLsp(opts: BundleLspOptions = {}): Promise<{ target: 
 	} else {
 		const found = await findLocal();
 		if (!found.ok || found.version !== LSP_PIN) throw new Error(`No local starlims-lsp ${LSP_PIN} (found: ${found.version ?? "none"}). Use --download.`);
+		if (platformName === "win32" && /\.(cmd|bat)$/i.test(found.path!)) {
+			throw new Error(`Cannot bundle batch shim "${found.path}" as ${target}. Point STARLIMS_LSP at the real starlims-lsp.exe binary or use --download.`);
+		}
 		// Skip copying when findLocal() resolved to vendor/starlims-lsp itself; otherwise stage atomically.
-		if (resolve(found.path!) !== resolve(target)) {
-			copyFileSync(found.path!, `${target}.new`);
-			renameSync(`${target}.new`, target);
+		if (!sameResolvedPath(found.path!, target)) {
+			await stageTarget((temp) => {
+				copyFileSync(found.path!, temp);
+			});
 		}
 		// Its license and notices travel with it.
 		const repo = opts.repoDir ?? process.env.STARLIMS_LSP_REPO ?? `${homedir()}/dev/starlims-projects/starlims-lsp`;
 		for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.md"]) {
 			const src = join(repo, file);
 			const dest = file === "LICENSE" ? licensePath : noticesPath;
-			if (existsSync(src) && resolve(src) !== resolve(dest)) copyFileSync(src, dest);
+			if (existsSync(src) && !sameResolvedPath(src, dest)) copyFileSync(src, dest);
 		}
-		if (!existsSync(licensePath)) {
-			throw new Error(`Missing required ${licensePath} after bundling local starlims-lsp (looked in ${repo}). Set STARLIMS_LSP_REPO or use --download.`);
+		if (!existsSync(licensePath) || !existsSync(noticesPath)) {
+			const missing = [!existsSync(licensePath) && licensePath, !existsSync(noticesPath) && noticesPath].filter(Boolean).join(", ");
+			throw new Error(`Missing required ${missing} after bundling local starlims-lsp (looked in ${repo}). Set STARLIMS_LSP_REPO or use --download.`);
 		}
 		action = "copied";
 	}

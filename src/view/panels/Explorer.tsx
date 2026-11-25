@@ -627,6 +627,16 @@ export function sanitizeDropName(raw: string): string {
 	return cleaned || "imported";
 }
 
+/**
+ * What is said of a dropped file that could not be imported. Of a Word document it cannot read the backend already
+ * names the file, by the name it was sent under (the one its Markdown file was to take, which is not the dropped
+ * file's when that name was taken). Put after the dropped file's name as well, the notice named the file twice.
+ */
+export function dropFailure(dropped: string, sentAs: string | null, said: string): string {
+	if (sentAs && said.startsWith(`${sentAs} `)) return `${dropped}${said.slice(sentAs.length)}`;
+	return `${dropped}: ${said}`;
+}
+
 /** Decodes dropped text bytes strictly as UTF-8, falling back to Windows-1252 so legacy STARLIMS files never get U+FFFD corruption. */
 export function decodeDroppedText(bytes: Uint8Array): string {
 	try {
@@ -697,12 +707,15 @@ async function importExternalFiles(files: File[], into: string): Promise<void> {
 			continue;
 		}
 		const safeName = sanitizeDropName(file.name);
+		/** The name a Word document goes to the backend under, once it has one. */
+		let sentAs: string | null = null;
 		try {
 			if (/\.docx$/i.test(safeName)) {
 				const stem = safeName.replace(/\.docx$/i, "") || "imported";
 				const dest = await reserveAvailableDest(`${stem}.md`);
 				if (!dest) continue;
 				const docxNameForBackend = `${dest.name.replace(/\.md$/i, "")}.docx`;
+				sentAs = docxNameForBackend;
 				const bytes = new Uint8Array(await file.arrayBuffer());
 				const res = await backend.importDocxBytes({
 					fileName: docxNameForBackend,
@@ -739,7 +752,7 @@ async function importExternalFiles(files: File[], into: string): Promise<void> {
 				imported.push(dest.path);
 			}
 		} catch (e: any) {
-			errors.push(`${file.name}: ${errorText(e)}`);
+			errors.push(dropFailure(file.name, sentAs, errorText(e)));
 		}
 	}
 
@@ -960,7 +973,10 @@ export function Explorer() {
 	createEffect(
 		() => ({ root: state.workspace?.root, open: [...expanded()], keep: keeps() }),
 		({ root, open, keep }) => {
-			if (root && keep) remember(`tree:${root}`, JSON.stringify(open));
+			// Only what was recalled for this workspace is written back for it. On a change of folder this effect
+			// runs before the one above has recalled the new folder's tree, with the previous folder's set still in
+			// hand: written then, it replaced the new folder's remembered tree, which came up shut for good.
+			if (root && keep && recalledFor === root) remember(`tree:${root}`, JSON.stringify(open));
 		},
 	);
 	const [openEdOpen, setOpenEdOpen] = createSignal(recall("explorer.openEditors") !== "closed");
@@ -1088,25 +1104,26 @@ export function Explorer() {
 					<div class="explorer-section-body" style={{ height: `${Math.min(openEdH(), openEdCap())}px` }}>
 						<Show when={openEditorRows().length} fallback={<p class="hint explorer-empty-hint">No open editors.</p>}>
 							<div class="tree explorer-open-list" role="list" aria-label="Open editors">
-								<For each={openEditorRows()}>
+								<For each={openEditorRows()} keyed={(item) => `${item.groupIndex}:${item.path}`}>
 									{(item) => {
 										const activateOpenEditor = () => {
+											const cur = item();
 											closeComparison();
 											setState((s) => {
 												if (s.bottomMaximized) s.bottomMaximized = false;
 												s.centerView = "editors";
-												s.activeGroup = item.groupIndex;
-												const grp = s.groups[item.groupIndex];
-												if (grp) grp.active = item.path;
+												s.activeGroup = cur.groupIndex;
+												const grp = s.groups[cur.groupIndex];
+												if (grp) grp.active = cur.path;
 											});
 											focusEditor();
 										};
 										return (
 											<div
-												class={["tree-row open-editor-row", { selected: item.active, dirty: item.dirty }]}
+												class={["tree-row open-editor-row", { selected: item().active, dirty: item().dirty }]}
 												role="listitem"
 												tabindex={0}
-												title={isUntitled(item.path) ? `${item.name} (unsaved buffer)` : item.path}
+												title={isUntitled(item().path) ? `${item().name} (unsaved buffer)` : item().path}
 												onClick={activateOpenEditor}
 												onKeyDown={(e) => {
 													if (e.target !== e.currentTarget) return;
@@ -1118,22 +1135,23 @@ export function Explorer() {
 											>
 												<button
 													class="open-editor-close"
-													title={`Close ${item.name}`}
-													aria-label={`Close ${item.name}`}
+													title={`Close ${item().name}`}
+													aria-label={`Close ${item().name}`}
 													onClick={(e) => {
 														e.stopPropagation();
-														void closeTab(item.path, item.groupIndex);
+														const cur = item();
+														void closeTab(cur.path, cur.groupIndex);
 													}}
 												>
-													<Show when={item.dirty} fallback={<Icon name="close" />}>
+													<Show when={item().dirty} fallback={<Icon name="close" />}>
 														<span class="open-editor-dot" aria-hidden="true" />
 														<Icon name="close" class="open-editor-x" />
 													</Show>
 												</button>
-												<FileMark name={item.name} />
-												<span class="label">{item.name}</span>
-												<Show when={item.folder}>
-													<span class="meta open-editor-folder">{item.folder}</span>
+												<FileMark name={item().name} />
+												<span class="label">{item().name}</span>
+												<Show when={item().folder}>
+													<span class="meta open-editor-folder">{item().folder}</span>
 												</Show>
 											</div>
 										);

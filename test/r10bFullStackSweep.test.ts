@@ -279,17 +279,17 @@ describe("R10B #1 — chooseModel() persists agentModel to 'user' scope even whe
 			writeFileSync(join(ws, ".ssl-studio", "project.toml"), '[agent]\nmodel = "ollama/qwen3:8b"\n');
 
 			const store = new SettingsStore(() => ws);
-			// Workspace save strips USER_ONLY_SETTINGS.agentModel.
+			// Workspace save strips USER_ONLY_SETTINGS.agentModel: what shows through is the local model project.toml names.
 			const wsEffective = await store.save("workspace", { agentModel: "ollama/llama3:8b" });
-			expect(wsEffective.agentModel).toBeUndefined();
+			expect(wsEffective.agentModel).toBe("ollama/qwen3:8b");
 
 			// User save persists agentModel cleanly.
 			const userEffective = await store.save("user", { agentModel: "ollama/llama3:8b" });
 			expect(userEffective.agentModel).toBe("ollama/llama3:8b");
 
-			// Clearing via null removes it cleanly.
+			// Clearing via null removes the user's own choice, and the project's shows through again.
 			const cleared = await store.save("user", { agentModel: null });
-			expect(cleared.agentModel).toBeUndefined();
+			expect(cleared.agentModel).toBe("ollama/qwen3:8b");
 		});
 	});
 

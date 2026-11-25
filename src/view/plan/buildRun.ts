@@ -4,7 +4,7 @@
 // `.ssl-studio/plans/`, so closing the app loses nothing, paid work included.
 import { snapshot } from "solid-js";
 import { backend } from "../backend";
-import { agent, currentModel, interrupt } from "../agent/store";
+import { agent, currentModel, interrupt, start } from "../agent/store";
 import { fenced } from "../agent/tidy";
 import { ask as askUser } from "../dialogs";
 import { openReview, type Check } from "../editor/Review";
@@ -17,8 +17,8 @@ import { catalogsKeptFor, workPrompt } from "../projectDocs";
 import { applyText, canonical, documents, notify, openFile, setState, state } from "../state";
 import { joinPath, relativeTo } from "../../shared/paths";
 import { TEMPLATES } from "../../shared/houseStyle";
-import { planHash, specHash } from "./assist";
-import { assembleScript, bannerFor, judgeUnit, MAX_ATTEMPTS, newRun, nextUnit, overBudget, patternsFrom, procedureSpans, procedureText, questionIn, readSpecFile, requiredCalls, retryPrompt, reviewPrompt, runFileName, scriptOf, unbuiltNodes, unitPrompt, type BuildRun, type BuildUnit, type Edge } from "./build";
+import { planHash, planHashMatches, specHash } from "./assist";
+import { assembleScript, bannerFor, judgeUnit, MAX_ATTEMPTS, modelIsLocal, newRun, nextUnit, overBudget, patternsFrom, procedureSpans, procedureText, questionIn, readSpecFile, requeueRunning, requiredCalls, retryPrompt, reviewPrompt, runFileName, scriptOf, unbuiltNodes, unitPrompt, type BuildRun, type BuildUnit, type Edge } from "./build";
 import { builtOf, changeText, classifyUnits, recordBuilt, settleBuilt } from "./built";
 import { driftFor } from "./drift";
 import type { Plan } from "./model";
@@ -27,6 +27,13 @@ import { askAgent, begin, latestAssistOf, planOf, savePlan, specPath, survey, up
 export { bannerFor };
 
 const stopping = new Set<string>();
+/**
+ * The run each build under way is working on, by plan. A build keeps its own copy of the run and publishes it
+ * after every step, so a change made to the stored run meanwhile was written over by the build's next step: an
+ * answer typed for a stuck unit while the other units were still being built was lost, and the unit never came
+ * back into the queue. What is changed during a build is changed in the build's own copy (`mutate`).
+ */
+const building = new Map<string, BuildRun>();
 /** Tool calls in a turn before it is stopped. Nothing here needs any; a skill may take one to load. */
 const TOOL_LIMIT = 2;
 
@@ -70,12 +77,16 @@ export async function loadRun(path: string) {
 			!Array.isArray(raw.accepted) ||
 			!Array.isArray(raw.map) ||
 			!plan ||
-			raw.planHash !== planHash(plan)
+			!planHashMatches(raw.planHash, plan)
 		) {
 			return;
 		}
 		const run: BuildRun = {
 			...(raw as BuildRun),
+			// A run saved before layout was left out of the hash holds the older kind. It is of this plan, so it takes
+			// the kind that moving a node does not change: the next drag would otherwise put a build already paid for
+			// out of reach.
+			planHash: planHash(plan),
 			units: raw.units.filter((u): u is BuildUnit => Boolean(u && typeof u === "object" && typeof u.name === "string")),
 			accepted: raw.accepted.filter((s): s is string => typeof s === "string"),
 		};
@@ -232,6 +243,8 @@ async function secondOpinion(path: string, root: string, plan: Plan, spec: strin
 
 /** Stage 4. Runs unattended from an approved spec, or carries on from where a run stopped. */
 export function startBuild(path: string) {
+	/** What to do when this build is over, however it ends. Nothing, for a call that never became a build. */
+	let ended = () => {};
 	return begin(path, "build", async () => {
 		const root = snapshot(state).workspace?.root;
 		if (!root) return;
@@ -244,24 +257,57 @@ export function startBuild(path: string) {
 		if (snapshot(state).workspace?.root !== root) return;
 		if (!specText) return notify("Write and approve a plan doc first.");
 		const hash = planHash(plan);
-		if (specHash(specText) !== hash) return notify("The plan has changed since its plan doc was approved. Write the plan doc again first.");
+		if (!planHashMatches(specHash(specText), plan)) return notify("The plan has changed since its plan doc was approved. Write the plan doc again first.");
 		const { units, map } = readSpecFile(specText);
 		if (!units.length && !builtOf(plan)) return notify("The spec lists nothing to build.");
+		// Whether the model costs money is read from opencode's list of models, and on a fresh launch nothing has asked
+		// for that list yet: it was empty here, the chosen model was not found in it, and a model not found counted as
+		// local, so a build on a paid model began with no cost budget. opencode is started first, as the first turn
+		// would have started it anyway.
+		if (snapshot(agent).status.state !== "ready" || !snapshot(agent).models.length) await start();
+		if (snapshot(state).workspace?.root !== root) return;
+		const opencode = snapshot(agent).status;
+		if (opencode.state !== "ready") return notify(opencode.message || "opencode is not ready, so nothing can be built.", "error");
 		const model = currentModel();
-		const local = snapshot(agent).models.find((m) => `${m.providerID}/${m.id}` === model)?.local ?? true;
-		const existingRun = latestAssistOf(path).run;
-		let run: BuildRun | null = existingRun ? plain(existingRun) : null;
-		if (!run || run.planHash !== hash) {
-			let cost: number | undefined;
-			if (!local) {
-				const answer = await askUser(`${model} may cost money. Stop the build at what cost?`, "1");
-				if (snapshot(state).workspace?.root !== root || answer === null) return;
-				cost = Number(answer);
-				if (!Number.isFinite(cost) || cost <= 0) return notify("Give the budget as a number above zero.");
-			}
+		// With no model chosen and no local one found, opencode refuses the turn: it never falls back on a paid model.
+		const local = !model || modelIsLocal(snapshot(agent).models, model, snapshot(state).settings.agentOwnModels);
+		const carriesOn = (r: BuildRun | null): r is BuildRun => Boolean(r && planHashMatches(r.planHash, plan));
+		const before = latestAssistOf(path).run;
+		let cost: number | undefined;
+		// Asked for a new run, and for one carried on that has no cost budget: it was begun on a local model, or
+		// before the model was known to be one that may cost money.
+		if (!local && !(carriesOn(before) && before.budget.cost !== undefined)) {
+			const answer = await askUser(`${model} may cost money. Stop the build at what cost?`, "1");
+			if (snapshot(state).workspace?.root !== root || answer === null) return;
+			cost = Number(answer);
+			if (!Number.isFinite(cost) || cost <= 0) return notify("Give the budget as a number above zero.");
+		}
+		// Read after the question, not before it: what was changed in the run while the question was open is in it.
+		const held = latestAssistOf(path).run;
+		let run: BuildRun;
+		if (carriesOn(held)) {
+			run = plain(held);
+			// A run from before layout was left out of the hash holds the older kind. It is of this plan, so it takes
+			// the kind that moving a node does not change.
+			run.planHash = hash;
+			if (cost !== undefined) run.budget.cost = cost;
+			requeueRunning(run);
+		} else {
 			run = newRun({ hash, model }, units, map, cost === undefined ? {} : { cost });
 			classifyUnits(run, plan, driftFor((documents.get(canonical(path)) ?? documents.get(path))?.model.uri.toString()).moved);
 		}
+		building.set(path, run);
+		ended = () => {
+			if (building.get(path) === run) building.delete(path);
+			// However the build ended, nothing is being built now. A build that left without saying so (the folder was
+			// changed under it, or something outside a unit threw) must not leave the run saying that it is.
+			const stored = latestAssistOf(path).run;
+			if (!stored || (stored.status !== "running" && !stored.units.some((u) => u.status === "running"))) return;
+			requeueRunning(run);
+			if (run.status === "running") run.status = "stopped";
+			// The file is the other folder's to write when the folder has changed: only what is shown is put right.
+			if (!publish(path, run, root)) updateAssist(path, { run: plain(run) });
+		};
 		stopping.delete(path);
 		run.status = "running";
 		const skills = ((await backend.agent("skills", []).catch(() => [])) as { id: string }[]).map((s) => s.id);
@@ -291,7 +337,20 @@ export function startBuild(path: string) {
 				run.status = "built";
 				break;
 			}
-			await buildUnit(path, root, plan, spec, run, unit, callable, ["ssl-new-procedure"]);
+			try {
+				await buildUnit(path, root, plan, spec, run, unit, callable, ["ssl-new-procedure"]);
+			} catch (e: any) {
+				// A unit is marked as being built before its first turn. When building it threw (the language server
+				// gone, a script that could not be read), it stayed marked for the rest of the session: nothing took
+				// it up again, and the run ended "built" with the unit still shown as building. It is stuck, with the
+				// reason, so it can be tried again. The build stops here: what threw once is likely to throw for the
+				// next unit too, after another turn has been spent on it.
+				unit.status = "stuck";
+				unit.problems = [`It could not be built: ${e?.message ?? e}`];
+				run.status = "stopped";
+				notify(`The build stopped at ${unit.name}: ${e?.message ?? e}`, "error");
+				break;
+			}
 		}
 		if (snapshot(state).workspace?.root !== root) {
 			stopping.delete(path);
@@ -315,7 +374,7 @@ export function startBuild(path: string) {
 			const stuck = run.units.filter((u) => u.status !== "passed" && u.status !== "kept").length;
 			notify(stuck ? `The build is done, but ${stuck} ${stuck === 1 ? "unit is" : "units are"} stuck. Nothing has been written.` : "The build is ready to review. Nothing has been written.");
 		}
-	});
+	}).finally(() => ended());
 }
 
 export function stopBuild(path: string) {
@@ -324,6 +383,11 @@ export function stopBuild(path: string) {
 }
 
 const mutate = (path: string, change: (run: BuildRun) => void): BuildRun | null => {
+	const live = building.get(path);
+	if (live) {
+		change(live);
+		return publish(path, live) ? plain(live) : null;
+	}
 	const current = latestAssistOf(path).run;
 	if (!current) return null;
 	const run = plain(current);

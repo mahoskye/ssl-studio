@@ -3,17 +3,18 @@
 // walkthroughs, and spec status. Answers and accepted suggestions are undoable
 // text edits on the plan (ADR 0002).
 import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, onSettled, Show, untrack } from "solid-js";
+import { createDraft } from "../draft";
 import { createAsyncQuery } from "../asyncQuery";
 import { Icon } from "../Icon";
-import { agent, currentModel } from "../agent/store";
+import { agent, currentModel, resume } from "../agent/store";
 import { choose } from "../dialogs";
 import { showPanel } from "../panels/registry";
 import { promoteToKnowledge } from "../projectDocs";
 import { documents, openFile, state } from "../state";
 import { baseName, joinPath } from "../../shared/paths";
-import { buildDriftAgentDraft, buildPlanAgentDraft, buildTestsAgentDraft, decisionsOf, describeSuggestion, planHash, planTargetsOf, type Decision } from "./assist";
+import { buildDriftAgentDraft, buildPlanAgentDraft, buildTestsAgentDraft, decisionsOf, describeSuggestion, planHashMatches, planTargetsOf, testsHashMatches, type Decision } from "./assist";
 import { planTestsOf, type Plan, type PlanNode, type PlanTestInput, type PlanTestPatch } from "./model";
-import { scriptOf, unbuiltNodes } from "./build";
+import { modelCostNote, scriptOf, unbuiltNodes } from "./build";
 import { anyChanges, builtOf, chartChanges, journeyDraft, pathSummary, planPaths, type BuiltUnit, type Drift, type PlanPath } from "./built";
 import { CODE_INDICATOR_WORDS, type CodeIndicator } from "./chart";
 import { recheckPlan } from "./check";
@@ -75,13 +76,7 @@ export function resolveDriftOpenAction(
 
 /** Local draft input for decided answers so unrelated plan edits never overwrite in-progress typing, while unchanged commits snap back after flush. */
 function DraftAnswerInput(props: { value: string; ariaLabel: string; onCommit: (value: string) => void }) {
-	const [draft, setDraft] = createSignal(untrack(() => props.value));
-	createEffect(
-		() => props.value,
-		(v) => {
-			setDraft(v);
-		},
-	);
+	const [draft, setDraft] = createDraft(() => props.value);
 	return (
 		<input
 			value={draft()}
@@ -143,7 +138,7 @@ export function PlanAssistant(props: {
 	const run = () => a().run;
 	const STATUS = { pending: "Waiting", running: "Building", passed: "Passed", stuck: "Stuck", skipped: "Waiting on a stuck unit", kept: "Untouched" } as const;
 	/** A run of an earlier version of the chart: it cannot be reviewed against this one. */
-	const stale = () => Boolean(run() && run()!.planHash !== planHash(props.plan));
+	const stale = () => Boolean(run() && !planHashMatches(run()!.planHash, props.plan));
 	const built = () => builtOf(props.plan);
 	const changes = () => chartChanges(props.plan, run());
 	const uri = () => documents.get(props.path)?.model.uri.toString();
@@ -200,10 +195,11 @@ export function PlanAssistant(props: {
 	};
 
 	const specHint = createUniqueId();
-	const isLocal = () => {
-		const model = agent.models.find((m) => `${m.providerID}/${m.id}` === currentModel());
-		return model ? model.local : true;
-	};
+	// What is known of the chosen model's cost: said even before opencode has listed its models (`modelCostNote`).
+	const costNote = () => modelCostNote(agent.models, currentModel(), state.settings.agentOwnModels);
+	// The list is read here when opencode is already running (a reloaded page, a second window), so the note is of
+	// what is so. It is not started for this: the build starts it before it asks about the cost.
+	onSettled(() => void resume());
 
 	const Node = (p: { id?: string }) => (
 		<Show when={p.id && props.plan.nodes.some((n) => n.id === p.id)}>
@@ -252,7 +248,7 @@ export function PlanAssistant(props: {
 		const changed = anyChanges(changes());
 		const testCount = paths().paths.length;
 		const testsFile = built()?.tests;
-		const testsCurrent = Boolean(testsFile && testsFile.hash === planHash(props.plan));
+		const testsCurrent = Boolean(testsFile && testsHashMatches(testsFile.hash, props.plan));
 		return [
 			{
 				name: "Plan doc",
@@ -360,15 +356,15 @@ export function PlanAssistant(props: {
 
 				{/* 2x2 Pipeline Status Strip */}
 				<ol class="pa-pipeline" aria-label="Where the plan stands">
-					<For each={stages()}>
+					<For each={stages()} keyed={(stage) => stage.name}>
 						{(stage) => (
-							<li class={`pa-stage ${stage.state}`} title={`${stage.name}: ${stage.words}`}>
+							<li class={`pa-stage ${stage().state}`} title={`${stage().name}: ${stage().words}`}>
 								<span class="pa-stage-icon" aria-hidden="true">
-									<Icon name={stage.state === "done" ? "check" : stage.state === "warn" ? "warning" : "circle-outline"} />
+									<Icon name={stage().state === "done" ? "check" : stage().state === "warn" ? "warning" : "circle-outline"} />
 								</span>
 								<span class="pa-stage-body">
-									<span class="pa-stage-name">{stage.name}</span>
-									<span class="pa-stage-words">{stage.words}</span>
+									<span class="pa-stage-name">{stage().name}</span>
+									<span class="pa-stage-words">{stage().words}</span>
 								</span>
 							</li>
 						)}
@@ -379,7 +375,14 @@ export function PlanAssistant(props: {
 					<button type="button" class="link" title="Choose the model in the Agent panel" onClick={() => showPanel("agent")}>
 						{currentModel() || "Choose model in Agent panel"}
 					</button>
-					<Show when={!isLocal()}> · paid model</Show>
+					<Show when={costNote()}>
+						{(note) => (
+							<>
+								{" "}
+								· <span title={note().why}>{note().words}</span>
+							</>
+						)}
+					</Show>
 					<Show when={a().tokens}>
 						{" "}
 						· {a().tokens.toLocaleString()} tokens
@@ -598,10 +601,10 @@ export function PlanAssistant(props: {
 						<Show when={anyChanges(changes())}>
 							<div class="pa-subsection">
 								<h4 class="pa-subhead">Since it was built</h4>
-								<For each={[...changes().changed.map((id) => ({ id, what: "Changed" })), ...changes().added.map((id) => ({ id, what: "New" }))]}>
+								<For each={[...changes().changed.map((id) => ({ id, what: "Changed" })), ...changes().added.map((id) => ({ id, what: "New" }))]} keyed={(c) => `${c.what}:${c.id}`}>
 									{(c) => (
 										<p class="plan-change">
-											{c.what}: <Node id={c.id} />
+											{c().what}: <Node id={c().id} />
 										</p>
 									)}
 								</For>
@@ -731,18 +734,19 @@ export function PlanAssistant(props: {
 											return (
 												<p class={["plan-drift", { warning: d.severity === "warning" }]}>
 													{d.message}{" "}
-													<Show when={openAction()} keyed>
+													<Show when={openAction()}>
 														{(action) => (
 															<button
 																type="button"
 																class="link"
 																onClick={() => {
-																	if (action.kind === "unit") void openProcedure(uri(), action.unit);
-																	else if (action.kind === "script") void openScript(action.script);
-																	else props.onSelect(action.nodeId);
+																	const act = action();
+																	if (act.kind === "unit") void openProcedure(uri(), act.unit);
+																	else if (act.kind === "script") void openScript(act.script);
+																	else props.onSelect(act.nodeId);
 																}}
 															>
-																{action.kind === "node" ? "Show step" : "Open"}
+																{action().kind === "node" ? "Show step" : "Open"}
 															</button>
 														)}
 													</Show>
@@ -911,7 +915,7 @@ export function PlanAssistant(props: {
 										<button type="button" class="link" onClick={() => state.workspace && void openFile(joinPath(state.workspace.root, tests().script))}>
 											{tests().script}
 										</button>
-										{tests().hash === planHash(props.plan) ? "" : " was written before the chart last changed."}
+										{testsHashMatches(tests().hash, props.plan) ? "" : " was written before the chart or its test cases last changed."}
 									</p>
 								)}
 							</Show>

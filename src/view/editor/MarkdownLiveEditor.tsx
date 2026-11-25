@@ -82,7 +82,7 @@ import {
 	type HoverTarget,
 	type ImageLightboxInfo,
 } from "./cmLivePlugin";
-import { applyMarkdownFormatToTextarea, focusLiveWidgetAt, type MermaidLightboxInfo } from "./cmLiveShared";
+import { applyMarkdownFormatToTextarea, focusLiveWidgetAt, guardRenderedLinks, type MermaidLightboxInfo } from "./cmLiveShared";
 import { copyMermaidAsPng, downloadMermaidBlob, mermaidLivePreviewTheme, renderMermaidSvgForExport } from "./cmMermaid";
 import { cmMarkdownHighlight, cmStudioTheme } from "./cmTheme";
 import { buildFootnoteHoverPreview, buildHoverPreview, type HoverPreviewData } from "./hoverPreview";
@@ -199,6 +199,8 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	const [lightbox, setLightbox] = createSignal<(ImageLightboxInfo & { zoomFull?: boolean }) | null>(null);
 	const [mermaidBox, setMermaidBox] = createSignal<(MermaidLightboxInfo & { scale: number; x: number; y: number }) | null>(null);
 	let mermaidPan: { startX: number; startY: number; origX: number; origY: number } | null = null;
+	/** Whether the pointer moved since it went down in the diagram viewer: the click that ends a pan follows no link. */
+	let mermaidDragged = false;
 	const [activeHeadingId, setActiveHeadingId] = createSignal("");
 
 	let hostEl!: HTMLDivElement;
@@ -1282,7 +1284,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		const line = view.state.doc.lineAt(head);
 		const lineNumber = line.number;
 		const column = head - line.from + 1;
-		if (state.activeGroup === props.group) {
+		// The keyboard being here counts too: on a click into the other group the store's `activeGroup` still reads
+		// as the old group in this task (it changes at the next flush), and that click was not remembered as a place.
+		if (state.activeGroup === props.group || view.hasFocus) {
 			setState((s) => {
 				s.cursor = { line: lineNumber, column };
 			});
@@ -1774,6 +1778,8 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		};
 		window.addEventListener("keydown", onKeyDownGlobal);
 		window.addEventListener("mouseup", onMouseUpGlobal);
+		// No click in the rendered document may take the window away; a link no card follows itself (one in a diagram) is followed here.
+		const stopLinkGuard = guardRenderedLinks(hostEl, (href) => void followLink(href));
 
 		syncCursorState(cmView, false);
 		applyReveal();
@@ -1792,6 +1798,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			stopSplitSync();
 			window.removeEventListener("keydown", onKeyDownGlobal);
 			window.removeEventListener("mouseup", onMouseUpGlobal);
+			stopLinkGuard();
 			setMountedView(undefined);
 			modelSub?.dispose();
 			stopReveal();
@@ -2282,7 +2289,11 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 								<span class="md-hover-path">{card().relPath}</span>
 							</div>
 							<div
-								ref={hoverBodyEl}
+								ref={(el: HTMLDivElement) => {
+									hoverBodyEl = el;
+									// The card stands outside the editor's host, so it carries the guard itself; its own click handler below follows the link.
+									guardRenderedLinks(el);
+								}}
 								class="md-hover-body md"
 								innerHTML={card().html}
 								onClick={(e) => {
@@ -2491,6 +2502,19 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 						</div>
 						<div
 							class="md-lightbox-stage md-mermaid-lightbox-stage"
+							ref={(el: HTMLDivElement) => {
+								// A flowchart's `click A href "…"` is a live link in the drawing, and the viewer is outside the editor's host:
+								// a click on it took the window to the address. Here it closes the viewer and opens as the editor's links do,
+								// unless the click is the end of a drag that panned the drawing.
+								guardRenderedLinks(el, (href) => {
+									const panned = mermaidDragged;
+									mermaidDragged = false;
+									if (panned) return;
+									mermaidPan = null;
+									setMermaidBox(null);
+									void followLink(href);
+								});
+							}}
 							onWheel={(e) => {
 								e.preventDefault();
 								const delta = e.deltaY < 0 ? 0.15 : -0.15;
@@ -2501,12 +2525,14 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 								const cur = mermaidBox();
 								if (!cur) return;
 								mermaidPan = { startX: e.clientX, startY: e.clientY, origX: cur.x, origY: cur.y };
+								mermaidDragged = false;
 								(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 							}}
 							onPointerMove={(e) => {
 								if (!mermaidPan) return;
 								const dx = e.clientX - mermaidPan.startX;
 								const dy = e.clientY - mermaidPan.startY;
+								if (Math.abs(dx) + Math.abs(dy) > 4) mermaidDragged = true;
 								setMermaidBox((c) => (c ? { ...c, x: mermaidPan!.origX + dx, y: mermaidPan!.origY + dy } : null));
 							}}
 							onPointerUp={() => {

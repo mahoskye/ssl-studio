@@ -36,12 +36,15 @@ import {
 	buildStepAgentDraft,
 	buildTestsAgentDraft,
 	copyPlanSelection,
+	lineToKeep,
+	marqueeMoved,
 	marqueeNodeIds,
 	pastePlanSelection,
-	planHash,
+	planHashMatches,
 	planToMermaid,
 	previewPlan,
 	syncPlanMermaidInMarkdown,
+	toggleSelection,
 	type AlignAction,
 	type NodeRect,
 	type PlanClipboard,
@@ -923,11 +926,8 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	};
 	const toggleSelectNode = (id: string) => {
 		setEdge(null);
-		const next = new Set(activeSelectedIds());
-		if (next.has(id)) next.delete(id);
-		else next.add(id);
+		const { ids: next, lead } = toggleSelection(activeSelectedIds(), id);
 		setSelectedIds(next);
-		const lead = next.has(id) ? id : [...next][0] ?? null;
 		const p = plan();
 		const line = lead && p ? nodeLines(text(), p).get(lead) : undefined;
 		moveCursor(line ?? 1);
@@ -1145,7 +1145,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	const currentRun = () => {
 		const run = assistOf(props.path).run;
 		const p = plan();
-		return run && p && run.planHash === planHash(p) ? run : null;
+		return run && p && planHashMatches(run.planHash, p) ? run : null;
 	};
 	const unitStatuses = createMemo(() => nodeStatuses(currentRun()));
 	const changedOnly = createMemo(() => {
@@ -1508,7 +1508,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		if (!createdPath) return;
 		const rel = relativeTo(state.workspace?.root, createdPath).replace(/\\/g, "/");
 		const latest = plan();
-		if (latest) applyText(props.path, printPlan(addNodeDoc(latest, node.id, rel)));
+		if (latest) apply(addNodeDoc(latest, node.id, rel));
 		notify(`Linked ${baseName(createdPath)} to "${stepLabel}".`);
 	};
 	const runAlign = (action: AlignAction) => {
@@ -1517,7 +1517,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		if (!p || ids.size < 2) return;
 		const next = alignPlanNodes(p, ids, nodeRects(), action, direction());
 		if (next !== p) {
-			applyText(props.path, printPlan(next));
+			apply(next);
 			refocus();
 		}
 	};
@@ -1567,9 +1567,19 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	// --- Plan Mutations (each is one undoable text edit on doc.model) ---------
 
 	const apply = (next: Plan, selectId?: string | null) => {
+		const lead = selected();
+		const multi = selectedIds();
 		const printed = printPlan(next);
 		applyText(props.path, printed);
-		if (selectId !== undefined) select(selectId, false, { text: printed, plan: next });
+		if (selectId !== undefined) return select(selectId, false, { text: printed, plan: next });
+		// The selection is the node on the text cursor's line, and the cursor does not hold its line through an edit
+		// of several lines: after an auto-layout or a nudge of several nodes it sat on another node's line, so
+		// another node was selected and a selection of several fell back to that one. The cursor goes back to the
+		// node it was on, by id, and a selection of several stands.
+		const line = lineToKeep(printed, next, lead);
+		if (line === null) return;
+		moveCursor(line);
+		if (multi.size > 1) setSelectedIds(multi);
 	};
 	const applyEdit = (result: Edit | null, edit = false) => {
 		if (!result) return;
@@ -1842,7 +1852,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 					const stepPx = 12;
 					const dx = key === "ArrowLeft" ? -stepPx : key === "ArrowRight" ? stepPx : 0;
 					const dy = key === "ArrowUp" ? -stepPx : key === "ArrowDown" ? stepPx : 0;
-					applyText(props.path, printPlan(batchOffsetPlanNodes(p, selectedIds(), dx, dy, direction())));
+					apply(batchOffsetPlanNodes(p, selectedIds(), dx, dy, direction()));
 					return;
 				}
 			}
@@ -2125,7 +2135,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			const p = plan();
 			if (!p) return;
 			if (cur.multiIds && cur.multiIds.length > 1 && cur.delta) {
-				applyText(props.path, printPlan(batchOffsetPlanNodes(p, new Set(cur.multiIds), cur.delta.x, cur.delta.y, dir)));
+				apply(batchOffsetPlanNodes(p, new Set(cur.multiIds), cur.delta.x, cur.delta.y, dir));
 			} else {
 				const nextOffset: PlanOffset = { x: cur.curOffset.x, y: cur.curOffset.y, ...(dir === "RIGHT" ? { dir: "RIGHT" } : {}) };
 				apply(setNodeOffset(p, cur.id, nextOffset), cur.id);
@@ -2841,6 +2851,8 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		e.preventDefault();
 		cancelActiveDrag?.();
 		const start = clientToCanvas(e.clientX, e.clientY);
+		const pressed = { x: e.clientX, y: e.clientY };
+		let moved = false;
 		let box = { start, cur: start };
 		setMarquee(box);
 		const cleanup = () => {
@@ -2855,6 +2867,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		};
 		const onMove = (ev: MouseEvent) => {
 			if (ev.buttons === 0) return onUp();
+			moved = moved || marqueeMoved(pressed, { x: ev.clientX, y: ev.clientY });
 			const curPt = clientToCanvas(ev.clientX, ev.clientY);
 			box = { start, cur: curPt };
 			setMarquee(box);
@@ -2862,7 +2875,16 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const onUp = () => {
 			cleanup();
 			setMarquee(null);
+			// A Shift+click on a node comes through here too, since Shift+press begins a marquee wherever it lands. One
+			// of no size selected the node under the pointer, and the click that followed took it out again: Shift+click
+			// left nothing selected. A press that never moved is left to the click.
+			if (!moved) {
+				panned = 0;
+				return;
+			}
 			panned = 10;
+			// A marquee that began on a node and ended on it is followed by that node's click: it is not a Shift+click.
+			justDraggedNodeAt = performance.now();
 			const hits = marqueeNodeIds(nodeRects(), {
 				x: box.start.x,
 				y: box.start.y,

@@ -16,6 +16,24 @@ import { pathMatchesRef } from "./workContext";
 /** A broken `[[wikilink]]` to rewrite: where it stands, its current name, and the suggested replacement name. */
 export type WikiLinkMend = { line: number; column: number; name: string; href: string; instead: string };
 
+/** A name as two spellings of it are compared: its last part, without a Markdown ending, its letters and digits alone. */
+const spelled = (name: string) =>
+	(name.split("\\").join("/").split("/").pop() ?? "")
+		.replace(/\.(md|markdown)$/i, "")
+		.toLowerCase()
+		.replace(/[^\p{L}\p{N}]+/gu, "");
+
+/**
+ * Whether a wikilink's mend keeps the name the link was written with: the same file at the place it moved to, or
+ * the same name spelled the way the file spells it (`[[DueSoonReport]]` for `Due-soon-report`). Any other mend
+ * names a different note, found by its likeness, and is a guess: the link may be to a note nobody has written
+ * yet. A guess is never made without showing both names and asking.
+ */
+export function mendKeepsName(mend: Pick<WikiLinkMend, "name" | "instead">): boolean {
+	const was = spelled(mend.name);
+	return was.length > 0 && was === spelled(mend.instead);
+}
+
 export type DocCheckFix =
 	| { kind: "catalogs" }
 	| { kind: "ticket"; key: string; related?: string }

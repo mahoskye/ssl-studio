@@ -193,6 +193,21 @@ export const [agent, setAgent] = createStore({
 	chatSession: null as string | null,
 });
 
+/**
+ * How many times the conversation's session has been ended: a new conversation, another thread, another model,
+ * opencode stopped or failed. A turn that was running when that happened still returns its session id, and
+ * taking it up again would carry the conversation on in the session that was just ended (on the model that was
+ * just changed away from). The panel compares this count from before the turn with the one after.
+ */
+let chatEpoch = 0;
+export const chatSessionEpoch = () => chatEpoch;
+
+/** Ends the conversation's session: the next question starts a new one. */
+function dropChatSession(s: { chatSession: string | null }) {
+	s.chatSession = null;
+	chatEpoch++;
+}
+
 let nextEntry = 1;
 /** The reply being written, by session: the entry its text goes into. */
 const streaming = new Map<string, number>();
@@ -261,7 +276,7 @@ export function syncWorkspaceThreads(canonRoot: string | null) {
 			s.threads = [];
 			s.activeThreadId = null;
 			s.entries = [];
-			s.chatSession = null;
+			dropChatSession(s);
 		});
 		return;
 	}
@@ -273,14 +288,14 @@ export function syncWorkspaceThreads(canonRoot: string | null) {
 			s.threads = loaded;
 			s.activeThreadId = latest.id;
 			s.entries = restored;
-			s.chatSession = null;
+			dropChatSession(s);
 		});
 	} else {
 		setAgent((s) => {
 			s.threads = [];
 			s.activeThreadId = null;
 			s.entries = [];
-			s.chatSession = null;
+			dropChatSession(s);
 		});
 	}
 }
@@ -297,7 +312,7 @@ export function switchThread(threadId: string) {
 	setAgent((s) => {
 		s.entries = restored;
 		s.activeThreadId = target.id;
-		s.chatSession = null;
+		dropChatSession(s);
 	});
 }
 
@@ -311,7 +326,7 @@ export function startNewThread(noteText?: string) {
 	setAgent((s) => {
 		s.entries = entries;
 		s.activeThreadId = null;
-		s.chatSession = null;
+		dropChatSession(s);
 	});
 }
 
@@ -331,7 +346,7 @@ export function clearSavedThreads() {
 		s.threads = [];
 		s.activeThreadId = null;
 		s.entries = [];
-		s.chatSession = null;
+		dropChatSession(s);
 	});
 }
 
@@ -341,7 +356,7 @@ export function clearEntries() {
 	setAgent((s) => {
 		s.entries = [];
 		s.activeThreadId = null;
-		s.chatSession = null;
+		dropChatSession(s);
 	});
 }
 
@@ -355,7 +370,7 @@ on("agent", ({ type, data }) => {
 		const nextStatus = d as AgentStatus;
 		setAgent((s) => {
 			s.status = nextStatus;
-			if (nextStatus?.state === "off" || nextStatus?.state === "failed") s.chatSession = null;
+			if (nextStatus?.state === "off" || nextStatus?.state === "failed") dropChatSession(s);
 		});
 		return;
 	}
@@ -405,7 +420,7 @@ export async function resume() {
 		if (status.state === "failed") {
 			setAgent((s) => {
 				s.status = status;
-				s.chatSession = null;
+				dropChatSession(s);
 			});
 		} else {
 			setAgent((s) => {
@@ -427,7 +442,7 @@ export async function start() {
 		if (status.state === "off" || status.state === "failed") {
 			setAgent((s) => {
 				s.status = status;
-				s.chatSession = null;
+				dropChatSession(s);
 			});
 		} else {
 			const models = (await backend.agent("models", [])) as AgentModel[];
@@ -440,7 +455,7 @@ export async function start() {
 		// The panel shows the message under the status line; Output keeps it.
 		setAgent((s) => {
 			s.status = { state: "failed", message: errorText(e) };
-			s.chatSession = null;
+			dropChatSession(s);
 		});
 		log(`opencode did not start: ${errorText(e)}`);
 	}
@@ -452,7 +467,7 @@ export async function stop() {
 		const status = (await backend.agent("stop", [])) as AgentStatus;
 		setAgent((s) => {
 			s.status = status;
-			s.chatSession = null;
+			dropChatSession(s);
 		});
 	});
 }
@@ -479,7 +494,7 @@ export async function chooseModel(ref: string): Promise<boolean> {
 	const models = (await backend.agent("models", [])) as AgentModel[];
 	setAgent((s) => {
 		s.models = models;
-		s.chatSession = null;
+		dropChatSession(s);
 	});
 	return true;
 }

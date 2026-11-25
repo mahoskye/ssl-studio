@@ -10,6 +10,7 @@ import { docAuditData } from "./docAudit";
 import { Dialogs } from "./dialogs";
 import { RowMenu } from "./panels/RowMenu";
 import { review, ReviewView } from "./editor/Review";
+import { RegionBoundary } from "./RegionBoundary";
 import { CenterTabStrip } from "./editor/CenterTabStrip";
 import { EditorGroup } from "./editor/EditorGroup";
 import { commands, keysFor } from "./commands";
@@ -214,6 +215,19 @@ function useLayoutPersistence(isTemporaryNarrowLeft: () => boolean) {
 
 /** One panel by id, whichever side it is docked on. */
 function Panel(props: { id: PanelId }) {
+	return (
+		// Keyed by the panel: a boundary that caught one panel's failure is not carried over to the next one shown.
+		<Show when={props.id} keyed>
+			{(_id) => (
+				<RegionBoundary what="This panel">
+					<PanelBody id={props.id} />
+				</RegionBoundary>
+			)}
+		</Show>
+	);
+}
+
+function PanelBody(props: { id: PanelId }) {
 	return (
 		<Switch>
 			<Match when={props.id === "explorer"}>
@@ -1030,7 +1044,9 @@ export function App() {
 									"min-height": "0",
 								}}
 							>
-								<GraphView />
+								<RegionBoundary what="The call graph">
+									<GraphView />
+								</RegionBoundary>
 							</div>
 						</Show>
 						<Show when={state.centerView === "welcome"}>
@@ -1039,8 +1055,24 @@ export function App() {
 							</CenterTabStrip>
 						</Show>
 						<Show when={state.centerView === "editors"}>
-							<Show when={review()} keyed fallback={<For each={state.groups}>{(_, i) => <EditorGroup index={i()} />}</For>}>
-								{(_r) => <ReviewView />}
+							<Show
+								when={review()}
+								keyed
+								fallback={
+									<For each={state.groups}>
+										{(_, i) => (
+											<RegionBoundary what="This editor group">
+												<EditorGroup index={i()} />
+											</RegionBoundary>
+										)}
+									</For>
+								}
+							>
+								{(_r) => (
+									<RegionBoundary what="This comparison">
+										<ReviewView />
+									</RegionBoundary>
+								)}
 							</Show>
 						</Show>
 					</Show>
@@ -1103,14 +1135,20 @@ export function App() {
 								<Icon name="close" />
 							</button>
 						</div>
-						<Switch>
-							<Match when={state.bottomView === "problems"}>
-								<Problems />
-							</Match>
-							<Match when={state.bottomView === "output"}>
-								<Output />
-							</Match>
-						</Switch>
+						<Show when={state.bottomView} keyed>
+							{(_view) => (
+								<RegionBoundary what="This panel">
+									<Switch>
+										<Match when={state.bottomView === "problems"}>
+											<Problems />
+										</Match>
+										<Match when={state.bottomView === "output"}>
+											<Output />
+										</Match>
+									</Switch>
+								</RegionBoundary>
+							)}
+						</Show>
 					</section>
 				</Show>
 			</main>

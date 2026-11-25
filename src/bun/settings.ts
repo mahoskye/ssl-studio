@@ -1,18 +1,24 @@
 // User settings in ~/.config/ssl-studio, then the project's own
 // (.ssl-studio/project.toml), then what the IDE saved for this workspace
-// (.ssl-studio/settings.json): each later one wins.
+// (.ssl-studio/settings.json): each later one wins. The agent's model alone
+// goes the other way, the user's over the project's (SettingsStore.load).
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { closeSync, constants, existsSync, fchmodSync, mkdirSync, openSync, readdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parseJsonc } from "../shared/jsonc";
 import { DEFAULT_SETTINGS, type Settings, type SettingsPatch, type SettingsScope, type ThemeFile } from "../shared/protocol";
 import { HOUSE_STYLE } from "../shared/styleProfile";
+import { isLocalModelRef } from "./agent";
 import { renameReplacing } from "./atomic";
 import { dirs, workspaceDir } from "./paths";
 import { projectSettings, readProject } from "./project";
 import { Serial } from "./serial";
+import { assertPathInsideRoot } from "./workspace";
 
-/** Settings that control executable paths, remote servers, billing trust, or personal keybindings: never honored from workspace files. */
+/**
+ * Settings that control executable paths, remote servers, billing trust, or personal keybindings: never honored from
+ * workspace files. One thing is let through, and not by this list: the local model a project names (`load`).
+ */
 export const USER_ONLY_SETTINGS = new Set(["lspPath", "agentServerUrl", "agentServerConfig", "agentOwnModels", "agentModel", "keys"]);
 
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
@@ -42,17 +48,55 @@ function stripUserOnly<T extends Record<string, unknown>>(obj: T): Partial<Setti
 	return out as Partial<Settings>;
 }
 
-async function atomicWrite(path: string, content: string): Promise<void> {
+/**
+ * Who a new file is for. `shared`: a workspace's own file, committed and read by everyone who has the checkout,
+ * so it gets what any new file there gets. `private`: the user's own (settings, themes, recent folders).
+ */
+type Access = "shared" | "private";
+
+/** The access the written file ends up with: what it had, or for a new file what `access` says. Not on Windows. */
+function modeFor(path: string, access: Access): number | undefined {
+	if (process.platform === "win32") return undefined;
+	try {
+		return statSync(path).mode & 0o777;
+	} catch {
+		return access === "shared" ? 0o666 & ~process.umask() : 0o600;
+	}
+}
+
+async function atomicWrite(path: string, content: string, access: Access = "private"): Promise<void> {
 	mkdirSync(dirname(path), { recursive: true });
 	const temp = `${path}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+	// Read before the temp file takes the name: the temp file is made private (it is renamed over the file, and
+	// that used to leave a workspace's shared settings.json readable by its writer alone), then given this.
+	const mode = modeFor(path, access);
+	const flags =
+		process.platform === "win32"
+			? "wx"
+			: constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+	let created = false;
 	try {
-		await Bun.write(temp, content);
-		await renameReplacing(temp, path);
-	} catch (err) {
+		const fd = openSync(temp, flags, 0o600);
+		created = true;
 		try {
-			rmSync(temp, { force: true });
-		} catch {
-			// Best-effort cleanup of temp file.
+			const buf = Buffer.from(content, "utf8");
+			let offset = 0;
+			while (offset < buf.length) {
+				offset += writeSync(fd, buf, offset, buf.length - offset);
+			}
+			if (mode !== undefined && mode !== 0o600) fchmodSync(fd, mode);
+		} finally {
+			closeSync(fd);
+		}
+		await renameReplacing(temp, path);
+		created = false;
+	} catch (err) {
+		if (created) {
+			try {
+				rmSync(temp, { force: true });
+			} catch {
+				// Best-effort cleanup of temp file.
+			}
 		}
 		throw err;
 	}
@@ -145,17 +189,37 @@ export class SettingsStore {
 
 	private path(scope: SettingsScope) {
 		const root = this.root();
-		if (scope === "workspace" && !root) throw new Error("no workspace open");
-		return scope === "user" ? join(dirs.config, "settings.json") : join(workspaceDir(root!), "settings.json");
+		if (scope === "workspace") {
+			if (!root) throw new Error("no workspace open");
+			return assertPathInsideRoot(root, join(workspaceDir(root), "settings.json"), true);
+		}
+		return join(dirs.config, "settings.json");
 	}
 
 	async load() {
 		const user = await readJson<Partial<Settings>>(this.path("user"), {}, isPlainObject);
 		const root = this.root();
-		const rawWorkspace = root ? await readJson<Partial<Settings>>(this.path("workspace"), {}, isPlainObject) : {};
+		let rawWorkspace: Partial<Settings> = {};
+		if (root) {
+			try {
+				rawWorkspace = await readJson<Partial<Settings>>(this.path("workspace"), {}, isPlainObject);
+			} catch {
+				// Reject symlinked workspace `.ssl-studio` escaping outside `root` without blocking user settings load.
+				rawWorkspace = {};
+			}
+		}
 		const workspace = stripUserOnly(rawWorkspace as Record<string, unknown>);
-		const project = root ? stripUserOnly(projectSettings(await readProject(root)) as Record<string, unknown>) : {};
-		return { effective: merge(user, project, workspace), user, workspace };
+		const chosen: Partial<Settings> = root ? projectSettings(await readProject(root)) : {};
+		const project = stripUserOnly(chosen as Record<string, unknown>);
+		const effective = merge(user, project, workspace);
+		// The model a project names (`[agent] model` in project.toml) is the model until the user chooses their own.
+		// It was stripped with the settings a workspace may not set, so it was never applied. It is not laid over the
+		// user's as the project's other settings are: the model picker saves the user's choice, and a project's model
+		// on top would hide it. A folder never picks what is paid for, so only a local model is taken:
+		// `projectSettings` gives no other, and it is asked once more here.
+		const own = typeof user.agentModel === "string" && user.agentModel.trim() !== "";
+		if (!own && isLocalModelRef(chosen.agentModel)) effective.agentModel = chosen.agentModel;
+		return { effective, user, workspace };
 	}
 
 	/**
@@ -170,8 +234,10 @@ export class SettingsStore {
 	 * everything the file held.
 	 */
 	async save(scope: SettingsScope, patch: SettingsPatch) {
+		const root = scope === "workspace" ? this.root() : null;
 		const path = this.path(scope);
 		return this.saves.run("settings", async () => {
+			if (scope === "workspace") assertPathInsideRoot(root!, path, true);
 			const current = await this.held(path);
 			// A value of null takes the setting out of this file, so the layer below shows through.
 			// (undefined cannot say it: it does not survive the trip from the view.)
@@ -189,7 +255,8 @@ export class SettingsStore {
 					else next[key] = value;
 				}
 			}
-			await atomicWrite(path, JSON.stringify(next, null, 2) + "\n");
+			if (scope === "workspace") assertPathInsideRoot(root!, path, true);
+			await atomicWrite(path, JSON.stringify(next, null, 2) + "\n", scope === "workspace" ? "shared" : "private");
 			return (await this.load()).effective;
 		});
 	}

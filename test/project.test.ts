@@ -46,7 +46,9 @@ test("project.toml chooses the name, docs folder, model and style", async () => 
 	);
 	const project = await readProject(root);
 	expect(project).toMatchObject({ name: "Orders", description: "Order entry", docs: "notes", schema: "db", tests: "tests", code: ".", agentModel: "ollama/qwen3:14b", stylePreset: "server" });
-	// The user's setting, then the project's, then what the IDE saved for the workspace.
+	// The user's setting, then the project's, then what the IDE saved for the workspace. (That is `merge`, laying
+	// one over the next. For the model, SettingsStore.load puts the user's own over the project's and takes none
+	// from the workspace's settings.json: test/pass3MediumsBackend.test.ts.)
 	expect(merge({ agentModel: "a/user" }, projectSettings(project)).agentModel).toBe("ollama/qwen3:14b");
 	expect(merge({ agentModel: "a/user" }, projectSettings(project), { agentModel: "b/workspace" }).agentModel).toBe("b/workspace");
 	expect(merge({ agentModel: "a/user" }, projectSettings(await readProject(fresh("none")))).agentModel).toBe("a/user");

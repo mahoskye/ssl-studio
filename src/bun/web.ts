@@ -12,7 +12,7 @@ import { createBackend, dispatch } from "./backend";
 
 const MAX_WS_PAYLOAD = 32 * 1024 * 1024;
 export const HTML_CSP =
-	"default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
+	"default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'";
 
 function withSep(p: string): string {
 	return p.endsWith(sep) ? p : p + sep;
@@ -130,6 +130,7 @@ export function startWebHost(options?: { port?: number; dist?: string; folder?: 
 	const folder = options?.folder;
 	const token = options?.token ?? randomUUID();
 	const sockets = new Set<ServerWebSocket<unknown>>();
+	let stopFn: (() => void) | undefined;
 
 	const backend = createBackend(
 		{
@@ -137,7 +138,12 @@ export function startWebHost(options?: { port?: number; dist?: string; folder?: 
 			kind: "browser",
 			isWebHost: true,
 			restrictPaths: true,
-			quit: options?.quit ?? (() => process.exit(0)),
+			quit:
+				options?.quit ??
+				(() => {
+					stopFn?.();
+					process.exit(0);
+				}),
 			emit: (event, payload) => {
 				const text = JSON.stringify({ event, payload } satisfies Push);
 				for (const ws of sockets) safeSend(ws, text, sockets);
@@ -237,7 +243,10 @@ export function startWebHost(options?: { port?: number; dist?: string; folder?: 
 		},
 	});
 
+	let stopped = false;
 	const stop = () => {
+		if (stopped) return;
+		stopped = true;
 		for (const ws of sockets) {
 			try {
 				ws.close();
@@ -249,19 +258,19 @@ export function startWebHost(options?: { port?: number; dist?: string; folder?: 
 		backend.dispose();
 		server.stop();
 	};
+	stopFn = stop;
 
 	return { server, backend, token, stop };
 }
 
 if (import.meta.main) {
 	const folder = process.argv[2] ?? process.env.SSL_STUDIO_FOLDER;
-	const { server, backend } = startWebHost({ folder });
+	const { server, stop } = startWebHost({ folder });
 	let shuttingDown = false;
 	const shutdown = () => {
 		if (shuttingDown) return;
 		shuttingDown = true;
-		backend.dispose();
-		server.stop();
+		stop();
 		process.exit(0);
 	};
 	process.on("SIGINT", shutdown);

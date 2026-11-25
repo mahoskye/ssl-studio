@@ -199,50 +199,60 @@ export function Problems() {
 					</p>
 				}
 			>
-				<For each={files()}>
-					{([uri, list]) => (
-						<RowGroup
-							headClass="tree-row file-head"
-							title={isUntitled(uri) ? displayName(uri) : problemPath(uri)}
-							head={
-								<>
-									<FileMark name={rel(uri)} />
-									<span class="label">{rel(uri)}</span>
-									{/* How many of each: a file with one error among twenty notes says so at a glance. */}
-									<span class="meta tally">
-										<For each={[1, 2, 3, 4].filter((severity) => list.some((d) => d.severity === severity))}>
-											{(severity) => (
-												<span title={`${list.filter((d) => d.severity === severity).length} × ${SEVERITY[severity]!.toLowerCase()}`}>
-													<SeverityMark severity={severity} /> {list.filter((d) => d.severity === severity).length}
-												</span>
-											)}
-										</For>
-									</span>
-								</>
-							}
-						>
-							<For each={[...list].sort((a, b) => a.severity - b.severity || a.line - b.line)}>
-								{(d) => (
-									<Row
-										class="tree-row problem"
-										key={problemRowKey(uri, d)}
-										style={{ "padding-left": "22px" }}
-										title={`${SEVERITY[d.severity]}: ${d.message}${d.code ? ` [${d.code}]` : ""} (line ${d.line}, column ${d.column})`}
-										onActivate={() => void openFile(problemPath(uri), { reveal: { line: d.line, column: d.column, endLine: d.endLine, endColumn: d.endColumn } })}
-									>
-										<SeverityMark severity={d.severity} />
-										<span class="label">{d.message}</span>
-										<Show when={d.code}>
-											<span class="code">{d.code}</span>
-										</Show>
-										<span class="meta">
-											{d.line}:{d.column}
+				<For each={files()} keyed={([uri]) => uri}>
+					{(entry) => {
+						const uri = () => entry()[0];
+						const list = () => entry()[1];
+						const sorted = createMemo(() => [...list()].sort((a, b) => a.severity - b.severity || a.line - b.line));
+						return (
+							<RowGroup
+								headClass="tree-row file-head"
+								title={isUntitled(uri()) ? displayName(uri()) : problemPath(uri())}
+								head={
+									<>
+										<FileMark name={rel(uri())} />
+										<span class="label">{rel(uri())}</span>
+										{/* How many of each: a file with one error among twenty notes says so at a glance. */}
+										<span class="meta tally">
+											<For each={[1, 2, 3, 4].filter((severity) => list().some((d) => d.severity === severity))}>
+												{(severity) => (
+													<span title={`${list().filter((d) => d.severity === severity).length} × ${SEVERITY[severity]!.toLowerCase()}`}>
+														<SeverityMark severity={severity} /> {list().filter((d) => d.severity === severity).length}
+													</span>
+												)}
+											</For>
 										</span>
-									</Row>
-								)}
-							</For>
-						</RowGroup>
-					)}
+									</>
+								}
+							>
+								<For each={sorted()} keyed={(d) => problemRowKey(uri(), d)}>
+									{(d) => (
+										<Row
+											class="tree-row problem"
+											key={problemRowKey(uri(), d())}
+											style={{ "padding-left": "22px" }}
+											title={`${SEVERITY[d().severity]}: ${d().message}${d().code ? ` [${d().code}]` : ""} (line ${d().line}, column ${d().column})`}
+											onActivate={() => {
+												const diag = d();
+												void openFile(problemPath(uri()), {
+													reveal: { line: diag.line, column: diag.column, endLine: diag.endLine, endColumn: diag.endColumn },
+												});
+											}}
+										>
+											<SeverityMark severity={d().severity} />
+											<span class="label">{d().message}</span>
+											<Show when={d().code}>
+												<span class="code">{d().code}</span>
+											</Show>
+											<span class="meta">
+												{d().line}:{d().column}
+											</span>
+										</Row>
+									)}
+								</For>
+							</RowGroup>
+						);
+					}}
 				</For>
 			</Show>
 		</Rows>

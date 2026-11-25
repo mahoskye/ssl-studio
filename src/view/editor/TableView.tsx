@@ -13,8 +13,11 @@ import {
 	addCsvColumn,
 	appendRowEdit,
 	columnOf,
+	compareCellText,
 	convertCsvDelimiter,
 	csvCell,
+	csvDelimiterForPath,
+	csvDelimiterOf,
 	csvDuplicateKeys,
 	csvRow,
 	deleteCsvColumn,
@@ -24,6 +27,7 @@ import {
 	parseClipboardGrid,
 	parseCsv,
 	rawRowText,
+	readingAfterConvert,
 	renameCsvColumn,
 	reorderCsvColumns,
 	rowSpan,
@@ -35,7 +39,7 @@ import {
 } from "../../shared/csv";
 import {
 	badgeToneForValue,
-	columnValueOptions,
+	columnValueOptionsOnce,
 	describeColumnFilter,
 	effectiveCsvTableConfig,
 	fullColumnOrder,
@@ -84,6 +88,7 @@ import { modalOpen } from "../modal";
 import { placeAnchoredMenu, submenuOrInline } from "../../shared/contextMenu";
 import {
 	AUTOFIT_SAMPLE_LIMIT,
+	cellEditGuard,
 	cellsToMarkdownTable,
 	compareRowsBySorts,
 	compileCellMatcher,
@@ -98,6 +103,7 @@ import {
 	isSchemaTableColumn,
 	nextTableIssueIndex,
 	parseTableViewStateStore,
+	pasteStart,
 	pruneSortSpecs,
 	remapSortSpecs,
 	replaceCellMatches,
@@ -118,7 +124,7 @@ import {
 import { chooseFromMenu, rowMenuOpen, type RowMenuEntry } from "../panels/RowMenu";
 import { searchFor } from "../panels/Search";
 import { docs } from "../project";
-import { canonical, documents, notify, openFile, revealSignal, saveSetting, state, takeReveal, type Reveal } from "../state";
+import { canonical, documents, holdsPendingEdit, notify, openFile, revealSignal, saveSetting, state, takeReveal, type Reveal } from "../state";
 import { CsvCodeCheckDialog } from "./CsvCodeCheckDialog";
 import { CsvFormatDialog } from "./CsvFormatDialog";
 import { registerTableColumnJump, registerTableFind } from "./liveBridge";
@@ -431,14 +437,34 @@ export function TableView(props: { path: string; group?: number }) {
 	/** Per-view format overrides (visual projection until converted in-file — ADR 0002). */
 	const [delimiterOverride, setDelimiterOverride] = createSignal<CsvDelimiter | "auto">("auto");
 	const [hasHeader, setHasHeader] = createSignal(true);
+	// One parse for one text. The model's listener needs the new row count at once (the `table` memo is not up to
+	// date until the next flush), the memo then asks for the same text, and so does the detected delimiter: each
+	// used to parse the whole file again, three passes over a large file for every edit.
+	let lastParse: { raw: string; delim: CsvDelimiter | "auto"; header: boolean; prefer: CsvDelimiter | undefined; table: ReturnType<typeof parseCsv> } | undefined;
 	const parseCurrentCsv = (raw: string) => {
 		const delim = delimiterOverride();
-		return parseCsv(raw, {
+		const header = hasHeader();
+		// On Auto the file's name is heard too: a .tsv with a tab in its first record is tab-separated, though one of
+		// its column names holds a comma. The first record alone made such a file a comma-separated one of two columns.
+		const prefer = csvDelimiterForPath(props.path);
+		if (lastParse && lastParse.raw === raw && lastParse.delim === delim && lastParse.header === header && lastParse.prefer === prefer) return lastParse.table;
+		const table = parseCsv(raw, {
 			delimiter: delim === "auto" ? undefined : delim,
-			hasHeader: hasHeader(),
+			hasHeader: header,
+			prefer,
 		});
+		lastParse = { raw, delim, header, prefer, table };
+		return table;
 	};
-	const autoDelimiter = createMemo(() => parseCsv(text()).delimiter);
+	// What Auto reads the file with (its name and its first record), whatever this view is set to read it with.
+	const autoDelimiter = createMemo(() =>
+		delimiterOverride() === "auto" ? parseCurrentCsv(text()).delimiter : csvDelimiterOf(text(), csvDelimiterForPath(props.path)),
+	);
+	/**
+	 * What the view read the file with on each side of a change of the file's delimiter, by the change's direction
+	 * (`colSnapshotTransitionKey`): undoing or redoing the change puts the reading back along with the text.
+	 */
+	const delimiterAcross = new Map<string, CsvDelimiter | "auto">();
 
 	/** Optional collapsible group-by column index (visual projection only). */
 	const [groupByCol, setGroupByCol] = createSignal<number | null>(null);
@@ -481,6 +507,8 @@ export function TableView(props: { path: string; group?: number }) {
 		setCodeCheck(snap.codeCheck ? { ...snap.codeCheck } : null);
 		setGroupByCol(snap.groupByCol);
 	};
+	/** Whether the text is still the one the open cell editor was opened on. */
+	const editGuard = cellEditGuard();
 	const listener = model?.onDidChangeContent(() => {
 		const prevAlt = lastAltVersion;
 		const curAlt = model.getAlternativeVersionId();
@@ -488,6 +516,20 @@ export function TableView(props: { path: string; group?: number }) {
 		const prevCount = table().rows.length;
 		const next = model.getValue();
 		setText(next);
+		// The text changed under an open cell editor, and not by that editor's own commit: the file was reloaded from
+		// disk, or edited in another view. The row the editor was opened on may be another row now, and Enter or a
+		// click away wrote what was typed into whichever row had its number. The editor is closed instead and writes
+		// nothing. One on the blank last row stays: it adds a row to the text as it now is, at no row's number.
+		if (editGuard.changed()) {
+			const ed = untrack(editing);
+			if (ed && !ed.ghost) {
+				setEditing(null);
+				notify("The file changed under the cell being edited. The edit was closed and nothing was written.");
+				if (rootEl?.contains(document.activeElement)) queueMicrotask(() => rootEl?.focus());
+			}
+		}
+		const readWith = delimiterAcross.get(colSnapshotTransitionKey(prevAlt, curAlt));
+		if (readWith !== undefined) setDelimiterOverride(readWith);
 		const snap = colSnapshots.get(colSnapshotTransitionKey(prevAlt, curAlt));
 		if (snap) {
 			restoreColUi(snap);
@@ -869,6 +911,17 @@ export function TableView(props: { path: string; group?: number }) {
 	let activeInputEl: HTMLInputElement | undefined;
 	let commitActiveEdit: ((val: string, move: CommitMove) => void) | null = null;
 	const pickerListboxId = createUniqueId();
+	// The cell being edited is committed, staying on it, before this file is saved, its tab closed, or unsaved
+	// changes are asked about (state.ts). What is typed is in the editor's input until Enter, Tab or a blur: Ctrl+S
+	// wrote the file without it, and Ctrl+W closed the tab with no question, since nothing was unsaved yet.
+	onCleanup(
+		holdsPendingEdit(() => {
+			const commit = commitActiveEdit;
+			if (!untrack(editing) || !commit) return;
+			const el = activeInputEl?.isConnected ? activeInputEl : rootEl?.querySelector<HTMLTextAreaElement>("textarea.table-cell-multiline");
+			if (el) commit(el.value, "stay");
+		}),
+	);
 
 	createEffect(
 		() => editing(),
@@ -1639,13 +1692,11 @@ export function TableView(props: { path: string; group?: number }) {
 		return list;
 	});
 
-	const optionsForColumn = (column: number) =>
-		columnValueOptions(
-			table().rows,
-			baseRows().map((r) => r.cells),
-			column,
-			colFilters(),
-		);
+	// A column's values are counted and ordered once for one state of the table and its filters, however many ask:
+	// every filter chip, the header's tooltip and the open filter menu each worked the whole column out again,
+	// on every edit.
+	const columnOptions = createMemo(() => columnValueOptionsOnce(table().rows, baseRows(), colFilters()));
+	const optionsForColumn = (column: number) => columnOptions()(column);
 
 	const activeFilterCols = createMemo(() =>
 		[...colFilters().entries()]
@@ -1785,7 +1836,7 @@ export function TableView(props: { path: string; group?: number }) {
 		if (order()[0]?.column !== gCol) {
 			groups.sort((a, b) => {
 				if ((a.key === "") !== (b.key === "")) return a.key === "" ? 1 : -1;
-				return a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: "base" });
+				return compareCellText(a.label, b.label);
 			});
 		}
 		return groups;
@@ -2049,6 +2100,7 @@ export function TableView(props: { path: string; group?: number }) {
 
 	const toggleSelectAllDrawn = () => {
 		const list = rows();
+		if (!list.length) return;
 		if (allDrawnSelected()) {
 			setSelectedRows((prev) => {
 				const next = new Set(prev);
@@ -3603,8 +3655,18 @@ export function TableView(props: { path: string; group?: number }) {
 		const fresh = parseCurrentCsv(raw);
 		const next = convertCsvDelimiter(raw, fresh, target);
 		if (next === raw) return;
-		setDelimiterOverride("auto");
+		// The view goes on reading the file with the delimiter it was just given: on Auto where Auto reads the new
+		// text with it, set to it where Auto would not. Always put back on Auto, such a table fell into one column.
+		const before = delimiterOverride();
+		const after = readingAfterConvert(next, props.path, target);
+		const beforeAlt = model.getAlternativeVersionId();
+		setDelimiterOverride(after);
 		applyFullText(next, `Converted file delimiter to ${delimiterLabel(target)} (Ctrl+Z to undo).`);
+		const afterAlt = model.getAlternativeVersionId();
+		if (afterAlt !== beforeAlt && after !== before) {
+			delimiterAcross.set(colSnapshotTransitionKey(afterAlt, beforeAlt), before);
+			delimiterAcross.set(colSnapshotTransitionKey(beforeAlt, afterAlt), after);
+		}
 	};
 
 	const copySelectedAsCsv = async () => {
@@ -3832,24 +3894,31 @@ export function TableView(props: { path: string; group?: number }) {
 		}
 	};
 
-	/** Pastes a single cell or multi-row/multi-column TSV grid starting at the active cell via minimal per-cell edits (preserving ragged trailing cells and untouched quoting — ADR 0002). */
+	/** Pastes a single cell or multi-row/multi-column TSV grid starting at the active cell (the top-left cell of a selection of several) via minimal per-cell edits (preserving ragged trailing cells and untouched quoting — ADR 0002). */
 	const pasteGridAt = async (raw: string) => {
 		const ac = activeCell();
 		if (!model || !ac) return;
 		const grid = parseClipboardGrid(raw);
 		if (!grid.length) return;
 		const cols = visibleColumns();
-		const startVisCol = cols.indexOf(ac.column);
+		// With more than one cell selected the paste starts at the selection's top-left cell, as in Excel and Sheets.
+		// It started at the active cell, which is the corner the selection was last dragged or extended to: a block
+		// pasted over a selection dragged downwards started at the selection's last cell.
+		const shown = displayRows();
+		const start = pasteStart(ac.ghost ? shown.length : shown.findIndex((r) => r.index === ac.row), cols.indexOf(ac.column), cellRange());
+		const startVisCol = start.visCol;
 		if (startVisCol < 0) return;
+		/** The row the paste starts at, by its place in the file; null on the blank last row. */
+		const startRow = ac.ghost ? null : (shown[start.visRow]?.index ?? ac.row);
 
 		// Single-cell paste on an existing row uses `changeCell` directly (minimal edit).
-		if (!ac.ghost && grid.length === 1 && grid[0]!.length === 1) {
-			changeCell(ac.row, ac.column, grid[0]![0]!);
+		if (startRow !== null && grid.length === 1 && grid[0]!.length === 1) {
+			changeCell(startRow, cols[startVisCol]!, grid[0]![0]!);
 			return;
 		}
 		if (grid.length > 1 && hasActiveFilters()) {
 			const curList = displayRows();
-			const startVis = ac.ghost ? curList.length : curList.findIndex((r) => r.index === ac.row);
+			const startVis = startRow === null ? curList.length : curList.findIndex((r) => r.index === startRow);
 			const remainingVis = startVis >= 0 ? Math.max(0, curList.length - startVis) : 0;
 			const willUpdate = Math.min(grid.length, remainingVis);
 			const willAppend = Math.max(0, grid.length - willUpdate);
@@ -3867,7 +3936,7 @@ export function TableView(props: { path: string; group?: number }) {
 		const t = parseCurrentCsv(curText);
 		// Index the FULL filtered/sorted/display `displayRows()` array (not virtualized slice) so pasting past the viewport updates real rows instead of duplicating at EOF.
 		const list = displayRows();
-		const startVisRow = ac.ghost ? list.length : list.findIndex((r) => r.index === ac.row);
+		const startVisRow = startRow === null ? list.length : list.findIndex((r) => r.index === startRow);
 		if (startVisRow < 0) return;
 
 		// Build strictly minimal cell-level edits so ragged trailing cells and untouched cell formatting stay verbatim.
@@ -6272,9 +6341,16 @@ export function TableView(props: { path: string; group?: number }) {
 										<input
 											type="checkbox"
 											checked={allDrawnSelected()}
+											disabled={rows().length === 0}
 											aria-label="Select all visible rows"
 											title="Select all visible rows"
-											onChange={toggleSelectAllDrawn}
+											onChange={(e) => {
+												if (!rows().length) {
+													e.currentTarget.checked = false;
+													return;
+												}
+												toggleSelectAllDrawn();
+											}}
 										/>
 									</div>
 								</th>
@@ -6756,10 +6832,13 @@ export function TableView(props: { path: string; group?: number }) {
 																const seed = ed.seed;
 																const initialCellText = untrack(value);
 																const initVal = seed !== undefined ? seed : initialCellText;
+																const openedOn = editGuard.stamp();
 																const finish = (val: string, move: CommitMove) => {
 																	if (done) return;
 																	done = true;
-																	commitCell(rowIdx, targetCol, val, move);
+																	// The text is no longer the one this row and column were taken from: nothing is written.
+																	if (!editGuard.fresh(openedOn)) return;
+																	editGuard.commit(() => commitCell(rowIdx, targetCol, val, move));
 																};
 																commitActiveEdit = finish;
 																const multiline = Boolean(ed.forceMultiline) || (seed === undefined && /[\r\n]/.test(initialCellText));
@@ -6956,7 +7035,7 @@ export function TableView(props: { path: string; group?: number }) {
 														const finish = (val: string, move: CommitMove) => {
 															if (done) return;
 															done = true;
-															commitGhost(targetCol, val, move);
+															editGuard.commit(() => commitGhost(targetCol, val, move));
 														};
 														commitActiveEdit = finish;
 														return (
@@ -7209,6 +7288,10 @@ export function TableView(props: { path: string; group?: number }) {
 			{/* Portaled per-column header filter popover (measured post-mount via placeAnchoredMenu so it flips cleanly in split panes). */}
 			<Show when={filterMenu()}>
 				{(menu) => {
+					let disposed = false;
+					onCleanup(() => {
+						disposed = true;
+					});
 					const col = () => menu().column;
 					const colName = () => headerName(col()) || `Column ${col() + 1}`;
 					const curFilter = () => colFilters().get(col());
@@ -7248,8 +7331,9 @@ export function TableView(props: { path: string; group?: number }) {
 					}));
 					let popEl: HTMLDivElement | undefined;
 					const remeasurePopover = () => {
+						if (disposed || !popEl?.isConnected) return;
 						const cur = menu();
-						if (!popEl || !cur.anchor.isConnected) return;
+						if (!cur.anchor.isConnected) return;
 						const anchorRect = cur.anchor.getBoundingClientRect();
 						const popRect = popEl.getBoundingClientRect();
 						const measuredW = Math.ceil(popRect.width) || Math.min(280, window.innerWidth - 16);
@@ -7339,7 +7423,7 @@ export function TableView(props: { path: string; group?: number }) {
 										placeholder={`Filter ${colName()}…`}
 										aria-label={`Filter ${colName()} by text`}
 										value={curFilter()?.text ?? ""}
-										ref={(el) => queueMicrotask(() => el.focus())}
+										ref={(el) => queueMicrotask(() => { if (!disposed && el.isConnected) el.focus(); })}
 										onInput={(e) => setTextFilter(e.currentTarget.value)}
 									/>
 								</div>

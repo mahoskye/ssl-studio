@@ -7,6 +7,11 @@ export type CsvDelimiter = "," | "\t" | ";" | "|";
 export type ParseCsvOptions = {
 	delimiter?: CsvDelimiter;
 	hasHeader?: boolean;
+	/**
+	 * What the file's name says its values are separated with (`csvDelimiterForPath`). It is taken when the first
+	 * record holds it at all, whatever else that record holds; a first record without it is read as any other.
+	 */
+	prefer?: CsvDelimiter;
 };
 
 export type Cell = {
@@ -27,7 +32,7 @@ export type Table = {
 };
 export type CsvTable = Table;
 
-function detectCsvDelimiter(text: string, bomOffset: number): CsvDelimiter {
+function detectCsvDelimiter(text: string, bomOffset: number, prefer?: CsvDelimiter): CsvDelimiter {
 	const n = text.length;
 	let i = bomOffset;
 	// Skip leading blank lines starting after BOM before inspecting the first logical record.
@@ -59,17 +64,38 @@ function detectCsvDelimiter(text: string, bomOffset: number): CsvDelimiter {
 		atFieldStart = ch === "," || ch === "\t" || ch === ";" || ch === "|";
 		i++;
 	}
+	// A .tsv whose header has a bare comma in one name (`id<tab>Last, First<tab>status`) is still tab-separated.
+	if (prefer && unquoted.includes(prefer)) return prefer;
 	if (unquoted.includes("\t") && !unquoted.includes(",")) return "\t";
 	if (unquoted.includes(";") && !unquoted.includes(",") && !unquoted.includes("\t")) return ";";
 	if (unquoted.includes("|") && !unquoted.includes(",") && !unquoted.includes("\t") && !unquoted.includes(";")) return "|";
 	return ",";
 }
 
+/** What the text's first record says its values are separated with: what `parseCsv` reads it with when it is not told. */
+export function csvDelimiterOf(text: string, prefer?: CsvDelimiter): CsvDelimiter {
+	return detectCsvDelimiter(text, text.startsWith("\uFEFF") ? 1 : 0, prefer);
+}
+
+/** What a file's name says its values are separated with: tabs for a .tsv or .tab file. Other names say nothing. */
+export function csvDelimiterForPath(path: string): CsvDelimiter | undefined {
+	return /\.(tsv|tab)$/i.test(path) ? "\t" : undefined;
+}
+
+/**
+ * What a view of a file is set to read it with once its text has been given the delimiter `target`: "auto" where
+ * the file's name and first record say `target` themselves, and `target` where they would not (a file of one
+ * column, or one whose first line has fewer cells than the rest, says nothing of its delimiter).
+ */
+export function readingAfterConvert(text: string, path: string, target: CsvDelimiter): CsvDelimiter | "auto" {
+	return csvDelimiterOf(text, csvDelimiterForPath(path)) === target ? "auto" : target;
+}
+
 /** Reads the rows, a quoted cell holding the delimiter, a line end or a doubled quote as itself. Blank lines are passed over. */
 export function parseCsv(text: string, options?: ParseCsvOptions): Table {
 	// Skip UTF-8 BOM without shifting offsets into `text` so cell edits land on exact byte/char ranges.
 	const bomOffset = text.startsWith("\uFEFF") ? 1 : 0;
-	const delimiter: CsvDelimiter = options?.delimiter ?? detectCsvDelimiter(text, bomOffset);
+	const delimiter: CsvDelimiter = options?.delimiter ?? detectCsvDelimiter(text, bomOffset, options?.prefer);
 	const all: Cell[][] = [];
 	let row: Cell[] = [];
 	let i = bomOffset;
@@ -150,12 +176,29 @@ export function csvCell(value: string, delimiter: Table["delimiter"] = ","): str
 	return value.includes(delimiter) || /["\r\n]/.test(value) || value !== value.trim() ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
+/**
+ * A value as it is written in the first record. What separates a file's values is read from that record, where any
+ * bare comma, tab, semicolon or pipe counts, so a value holding any of the four is quoted there, not only one
+ * holding the file's own: `Last, First` written bare into the header of a tab-separated file made every later
+ * reading of it a comma-separated file of two columns.
+ */
+export function csvFirstRecordCell(value: string, delimiter: Table["delimiter"] = ","): string {
+	return /[,\t;|]/.test(value) ? `"${value.replace(/"/g, '""')}"` : csvCell(value, delimiter);
+}
+
 /** A whole row as a line of text. Preserves a 1-column empty row as `""` so re-parsing never drops it as a blank line. */
 export const csvRow = (values: readonly string[], delimiter: Table["delimiter"] = ",") =>
 	values.length === 1 && values[0] === "" ? '""' : values.map((v) => csvCell(v, delimiter)).join(delimiter);
 
 /** The place of the column of that name, whatever its case; -1 when there is none. */
 export const columnOf = (table: Pick<Table, "header">, name: string) => table.header.findIndex((c) => c.text.trim().toLowerCase() === name.toLowerCase());
+
+// One collator for every comparison. `a.localeCompare(b, undefined, options)` makes one for each pair it is given:
+// sorting 5,000 rows that way took 300 ms, and a sorted table was sorted again after every edit.
+const cellOrder = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+/** Orders two cell texts as a person reads them: digits by their number (`a2` before `a10`), case and accents aside. */
+export const compareCellText = (a: string, b: string): number => cellOrder.compare(a, b);
 
 /**
  * How far along a registry is: how many of its rows have each word in their
@@ -302,7 +345,9 @@ export function addCsvColumn(text: string, table: Table, name: string, defaultVa
 		const insertAt = isLongRagged ? cells[count - 1]!.end : cells[cells.length - 1]!.end;
 		out += text.slice(cursor, insertAt);
 		const padCount = isHeaderRow ? 0 : Math.max(0, count - cells.length);
-		const val = isHeaderRow ? csvCell(trimmed, table.delimiter) : csvCell(defaultValue, table.delimiter);
+		const value = isHeaderRow ? trimmed : defaultValue;
+		// The first row is the first record with or without a header.
+		const val = r === 0 ? csvFirstRecordCell(value, table.delimiter) : csvCell(value, table.delimiter);
 		out += table.delimiter.repeat(padCount + 1) + val;
 		cursor = insertAt;
 	}
@@ -317,7 +362,7 @@ export function renameCsvColumn(text: string, table: Table, colIdx: number, newN
 	const cell = table.header[colIdx];
 	if (!trimmed || !cell) return null;
 	if (cell.text === trimmed) return null;
-	return text.slice(0, cell.start) + csvCell(trimmed, table.delimiter) + text.slice(cell.end);
+	return text.slice(0, cell.start) + csvFirstRecordCell(trimmed, table.delimiter) + text.slice(cell.end);
 }
 
 /**
@@ -406,6 +451,9 @@ export function convertCsvDelimiter(text: string, table: CsvTable, nextDelimiter
 	const allRows: Cell[][] = table.hasHeader === false ? table.rows : [table.header, ...table.rows];
 	let out = "";
 	let cursor = 0;
+	// The first record's cells are quoted when they hold any delimiter, not only the new one: a comma left bare
+	// there (`id<tab>Last, First`) makes the file a comma-separated one to whatever reads it next.
+	let first = true;
 	for (const cells of allRows) {
 		if (!cells.length) continue;
 		const rowStart = cells[0]!.start;
@@ -414,8 +462,10 @@ export function convertCsvDelimiter(text: string, table: CsvTable, nextDelimiter
 		if (cells.length === 1 && cells[0]!.text === "") {
 			out += '""';
 		} else {
-			out += cells.map((c) => csvCell(c.text, nextDelimiter)).join(nextDelimiter);
+			const written = first ? csvFirstRecordCell : csvCell;
+			out += cells.map((c) => written(c.text, nextDelimiter)).join(nextDelimiter);
 		}
+		first = false;
 		cursor = rowEnd;
 	}
 	out += text.slice(cursor);
@@ -544,4 +594,98 @@ export function parseClipboardGrid(raw: string): string[][] {
 		}
 	}
 	return grid;
+}
+
+/**
+ * Goes over the line breaks of a table's text, saying of each where it starts and ends and whether it is inside a
+ * quoted cell. A quote opens a cell where `parseCsv` takes it to: at the start of a row, or right after the
+ * delimiter. Anywhere else it is a character of its cell (`Join(list, ",")` in a tab-separated file opens nothing).
+ */
+function eachLineBreak(text: string, delimiter: CsvDelimiter, visit: (start: number, end: number, inCell: boolean) => void): void {
+	const n = text.length;
+	let i = text.startsWith("\uFEFF") ? 1 : 0;
+	let atCellStart = true;
+	while (i < n) {
+		const ch = text[i]!;
+		if (atCellStart && ch === '"') {
+			i++;
+			while (i < n) {
+				const inner = text[i]!;
+				if (inner === '"') {
+					if (text[i + 1] === '"') {
+						i += 2;
+						continue;
+					}
+					i++;
+					break;
+				}
+				if (inner === "\r" || inner === "\n") {
+					const end = inner === "\r" && text[i + 1] === "\n" ? i + 2 : i + 1;
+					visit(i, end, true);
+					i = end;
+					continue;
+				}
+				i++;
+			}
+			atCellStart = false;
+			continue;
+		}
+		if (ch === "\r" || ch === "\n") {
+			const end = ch === "\r" && text[i + 1] === "\n" ? i + 2 : i + 1;
+			visit(i, end, false);
+			i = end;
+			atCellStart = true;
+			continue;
+		}
+		atCellStart = ch === delimiter;
+		i++;
+	}
+}
+
+/**
+ * Whether the text has the line ends Excel gives a table: CRLF after every row, and a bare LF for every line break
+ * inside a quoted cell. True only when it has both kinds and nothing else: a text whose line ends are mixed in
+ * some other way is not one whose in-cell breaks can be told from its row ends by their kind.
+ */
+export function csvHasBareCellBreaks(text: string, delimiter: CsvDelimiter = csvDelimiterOf(text)): boolean {
+	let rowEnds = 0;
+	let cellBreaks = 0;
+	let other = false;
+	eachLineBreak(text, delimiter, (start, end, inCell) => {
+		const crlf = end - start === 2;
+		if (inCell) {
+			if (!crlf && text[start] === "\n") cellBreaks++;
+			else other = true;
+		} else if (crlf) rowEnds++;
+		else other = true;
+	});
+	return !other && rowEnds > 0 && cellBreaks > 0;
+}
+
+/** The text with every CRLF inside a quoted cell made a bare LF again. Row ends, and everything else, are as given. */
+export function csvCellBreaksToLf(text: string, delimiter: CsvDelimiter = csvDelimiterOf(text)): string {
+	let out = "";
+	let from = 0;
+	eachLineBreak(text, delimiter, (start, end, inCell) => {
+		if (!inCell || end - start !== 2) return;
+		out += `${text.slice(from, start)}\n`;
+		from = end;
+	});
+	return from === 0 ? text : out + text.slice(from);
+}
+
+/**
+ * The text to write for a table file, given what is in the editor and what the file has on disk. The editor gives
+ * a text one kind of line end, the kind it has most of, so a file Excel wrote (CRLF after each row, a bare LF
+ * inside a cell) is all CRLF once it is open, and saving it wrote every cell of several lines anew. Such a file
+ * keeps its bare LF inside cells. Another kind of file, or a table whose line ends were not so on disk, is
+ * written as it is in the editor; so is one the user has since changed to LF throughout, which has no CRLF left.
+ * (So, still, is such a file with more line breaks inside its cells than rows: the editor opens that one as LF
+ * throughout, and its text here cannot be told from one the user changed to LF.)
+ */
+export function tableTextToWrite(path: string, text: string, onDisk: string): string {
+	if (!/\.(csv|tsv)$/i.test(path) || !text.includes("\r\n")) return text;
+	const prefer = csvDelimiterForPath(path);
+	if (!csvHasBareCellBreaks(onDisk, csvDelimiterOf(onDisk, prefer))) return text;
+	return csvCellBreaksToLf(text, csvDelimiterOf(text, prefer));
 }

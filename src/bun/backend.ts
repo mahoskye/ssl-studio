@@ -174,14 +174,20 @@ export function createBackend(host: Host, initial?: string) {
 		});
 
 		let startedLsp: LspProcess | null = null;
+		// From here the folder is open: the files, the history and the watcher are the new folder's and the old one's
+		// are closed. So nothing below fails the open, unless a later open has overtaken it. Each step that can fail
+		// says so in its own place (the log, the language server's state), and the view is told of the folder the
+		// backend is on. The list of recent folders used to fail it: where the list could not be written (a state
+		// folder that is full, or read-only) the view stayed on the old folder with the backend on the new one, every
+		// save "outside the workspace".
 		try {
-			await recent(nextFiles.root);
+			await recent(nextFiles.root).catch((e) => console.error(`The list of recent folders was not written: ${e?.message ?? e}`));
 			if (isStale()) {
 				nextFiles.close();
 				return { root: nextFiles.root, name: basename(nextFiles.root) };
 			}
 			if (restartSeq === lspRestartSeq) {
-				const { lsp: status } = await loadInfo();
+				const { lsp: status } = await loadInfo().catch((e): Pick<Info, "lsp"> => ({ lsp: { ok: false, message: `The language server was not looked for: ${e?.message ?? e}` } }));
 				if (isStale()) {
 					nextFiles.close();
 					return { root: nextFiles.root, name: basename(nextFiles.root) };
@@ -206,7 +212,7 @@ export function createBackend(host: Host, initial?: string) {
 					}
 				}
 			}
-			await agent.workspaceChanged();
+			await agent.workspaceChanged().catch((e) => console.error(`The agent's sessions of the folder before were not ended: ${e?.message ?? e}`));
 			if (isStale()) {
 				nextFiles.close();
 				startedLsp?.stop();
@@ -217,8 +223,12 @@ export function createBackend(host: Host, initial?: string) {
 			if (isStale()) {
 				nextFiles.close();
 				startedLsp?.stop();
+				throw e;
 			}
-			throw e;
+			// What is left to fail is the start of the language server: said as its state, with the folder open.
+			console.error(e);
+			if (lsp === startedLsp) emitLspState({ state: "failed", message: `The language server was not started: ${(e as any)?.message ?? e}` });
+			return { root: nextFiles.root, name: basename(nextFiles.root) };
 		}
 	}
 
@@ -329,6 +339,7 @@ export function createBackend(host: Host, initial?: string) {
 			await ws.alone(full, () => host.trash(full));
 		},
 		search: (query, options) => need().search(query, options),
+		searchScan: (query, options) => need().searchScan(query, options),
 		replace: async (query, replacement, options, paths) => {
 			const ws = need();
 			const hist = history!;
@@ -476,6 +487,11 @@ export function createBackend(host: Host, initial?: string) {
 				return candidate;
 			};
 
+			// A Word document is read before anything is asked or touched. A file that is not one (an old .doc under
+			// the name, one behind a password, half a download) used to import as an empty document, and with
+			// Overwrite it took the place of the Markdown that was there, after a history snapshot nobody asked for.
+			const docx = kind === "docx" ? (parseDocxToMarkdown(new Uint8Array(await Bun.file(src).arrayBuffer()), basename(src)) as ReturnType<typeof parseDocxToMarkdown> & { warnings?: string[] }) : null;
+
 			let destPath = baseDestPath;
 			if (pathTaken(baseDestPath)) {
 				if (mode === "prompt") {
@@ -495,9 +511,8 @@ export function createBackend(host: Host, initial?: string) {
 
 			const savedImages: string[] = [];
 			const reservedImgs = new Set<string>();
-			if (kind === "docx") {
-				const bytes = new Uint8Array(await Bun.file(src).arrayBuffer());
-				const parsed = parseDocxToMarkdown(bytes) as ReturnType<typeof parseDocxToMarkdown> & { warnings?: string[] };
+			if (docx) {
+				const parsed = docx;
 				let md = parsed.markdown;
 				if (parsed.images.length) {
 					for (const img of parsed.images) {
@@ -583,6 +598,9 @@ export function createBackend(host: Host, initial?: string) {
 				return candidate;
 			};
 
+			// Read before anything is asked or touched, as in `importDocFile`: what is not a Word document fails here.
+			const parsed = parseDocxToMarkdown(bytes, request.fileName || "document.docx") as ReturnType<typeof parseDocxToMarkdown> & { warnings?: string[] };
+
 			let destPath = baseDestPath;
 			if (pathTaken(baseDestPath)) {
 				if (mode === "prompt") {
@@ -600,7 +618,6 @@ export function createBackend(host: Host, initial?: string) {
 				}
 			}
 
-			const parsed = parseDocxToMarkdown(bytes) as ReturnType<typeof parseDocxToMarkdown> & { warnings?: string[] };
 			let md = parsed.markdown;
 			const savedImages: string[] = [];
 			const reservedImgs = new Set<string>();

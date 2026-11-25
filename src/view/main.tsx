@@ -1,6 +1,6 @@
 import { registerMarkdownLinks } from "./editor/markdownLinks";
 import "./style.css";
-import { Errored, snapshot } from "solid-js";
+import { Errored, Show, snapshot } from "solid-js";
 import { render } from "@solidjs/web";
 import { App } from "./App";
 import { connect, backend, onConnectionLost } from "./backend";
@@ -11,7 +11,7 @@ import "./editor/opener";
 import { loadGrammar } from "./editor/textmate";
 import { registerProviders, session } from "./lsp/session";
 import { syncWorkspaceThreads } from "./agent/store";
-import { canonical, loadProject, loadSettings, log, notify, restoreTabs, setState, snapshotUnsavedPaths, state } from "./state";
+import { canonical, commitPendingEdits, loadProject, loadSettings, log, notify, reloadWithoutTabs, restoreTabs, saveAll, setState, snapshotUnsavedPaths, state, unsavedPaths } from "./state";
 import { applyFonts, applyTheme, resolveTheme, shapeEditorMenus } from "./themes/themes";
 
 export const errors: string[] = [];
@@ -59,6 +59,8 @@ async function start() {
 	window.addEventListener("drop", preventFileDropNavigation);
 	// Closing or reloading the window with edits that are not on disk asks first.
 	window.addEventListener("beforeunload", (e) => {
+		// A cell still being typed in counts: it is put in its document first, so the question is asked for it too.
+		commitPendingEdits();
 		if (snapshot(state).info?.selftest || !snapshotUnsavedPaths().length) return;
 		e.preventDefault();
 		e.returnValue = "";
@@ -98,7 +100,9 @@ async function start() {
 								padding: "24px",
 								margin: "48px auto",
 								"max-width": "560px",
-								background: "var(--panel, #1e1e1e)",
+								// The side panels' own colour, which every theme sets (`--panel` was never one: the card stayed dark
+								// under the light themes' dark text, and could not be read).
+								background: "var(--side-bg, #1e1e1e)",
 								color: "var(--fg, #e0e0e0)",
 								border: "1px solid var(--border, #3c3c3c)",
 								"border-radius": "6px",
@@ -109,12 +113,30 @@ async function start() {
 							<p style={{ margin: "0", "font-size": "13px", opacity: "0.85", "white-space": "pre-wrap", "word-break": "break-word" }}>
 								{message()}
 							</p>
-							<div style={{ display: "flex", gap: "8px" }}>
+							{/* The documents are still held behind this card, so what is unsaved can be saved before a reload drops it. */}
+							<Show when={unsavedPaths().length > 0}>
+								<p style={{ margin: "0", "font-size": "13px", "word-break": "break-word" }}>
+									{unsavedPaths().length === 1 ? "1 file has" : `${unsavedPaths().length} files have`} unsaved changes (
+									{unsavedPaths()
+										.map((path) => path.split(/[\\/]/).pop())
+										.join(", ")}
+									). Reloading discards them.
+								</p>
+							</Show>
+							<div style={{ display: "flex", "flex-wrap": "wrap", gap: "8px" }}>
 								<button type="button" class="primary" onClick={() => reset()}>
 									Try again
 								</button>
+								<Show when={unsavedPaths().length > 0}>
+									<button type="button" onClick={() => void saveAll()}>
+										Save all
+									</button>
+								</Show>
 								<button type="button" onClick={() => window.location.reload()}>
 									Reload window
+								</button>
+								<button type="button" title="Reloads with no tabs open, for when a reopened tab is what fails" onClick={() => reloadWithoutTabs()}>
+									Reload without reopening tabs
 								</button>
 							</div>
 						</div>

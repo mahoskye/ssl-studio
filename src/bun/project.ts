@@ -2,7 +2,7 @@
 // README.md and an AGENTS.md at its root. The IDE writes all three once, from
 // the templates below, and after that only reads them: project.toml is edited
 // as text, so its comments survive.
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmdirSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, rmdirSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { decode, decodePart, textOf } from "./encoding";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -25,7 +25,7 @@ import { classifyTicketEntries, type ScannedTicketEntry } from "../shared/ticket
 import type { AuditCitationIssue, DocAuditResult, DocFile, LinkTo, ManifestFile, NameIn, OpenTaskItem, Project, SchemaDriftItem, Settings, UndocumentedSchemaRef, WorkspaceDocIssue } from "../shared/protocol";
 import { workspaceDir } from "./paths";
 import { isLocalModelRef } from "./agent";
-import { WorkspaceFiles } from "./workspace";
+import { assertPathInsideRoot, isPathInsideRoot, withSep, WorkspaceFiles } from "./workspace";
 
 export const PROJECT_FILE = "project.toml";
 export const DOC_LIMIT = 500;
@@ -50,7 +50,12 @@ const folder = (value: unknown, fallback: string) => {
 
 export async function readProject(root: string): Promise<Project> {
 	const path = join(workspaceDir(root), PROJECT_FILE);
-	const project: Project = { configured: existsSync(path), path, name: basename(root), description: "", docs: "docs", schema: "schema", tests: "tests", code: "src", plans: "design" };
+	const inside = isPathInsideRoot(root, path, true);
+	const project: Project = { configured: inside && existsSync(path), path, name: basename(root), description: "", docs: "docs", schema: "schema", tests: "tests", code: "src", plans: "design" };
+	if (!inside) {
+		project.error = `outside the workspace: ${path}`;
+		return project;
+	}
 	if (!project.configured) return project;
 	try {
 		const toml = Bun.TOML.parse(await Bun.file(path).text()) as Record<string, any>;
@@ -87,35 +92,17 @@ function found(root: string, name: string): string | undefined {
 const fileStamp = (st: { size: number; mtimeMs: number; ctimeMs: number; ino: number }) =>
 	`${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.ino}`;
 
-/** Lexical + realpath containment check ensuring `target` stays inside `root` (blocks `..` and escaping symlinks). */
-function isInsideWorkspace(root: string, target: string): boolean {
+const ESCAPES_RELATIVE = /^\.\.(?:[\\/]|$)/;
+const foldFsPath = (p: string) => (process.platform === "win32" || process.platform === "darwin" ? p.toLowerCase() : p);
+const isUnderDir = (path: string, dir: string) => foldFsPath(path).startsWith(withSep(foldFsPath(dir)));
+
+/** Lexical + realpath containment check ensuring `target` stays inside `root` (blocks `..`, escaping symlinks, and dangling symlink escapes). */
+export function isInsideWorkspace(root: string, target: string): boolean {
 	const resolvedRoot = resolve(root);
 	const resolvedTarget = resolve(target);
 	const rel = relative(resolvedRoot, resolvedTarget);
-	if (rel.startsWith("..") || isAbsolute(rel)) return false;
-	try {
-		const realRoot = realpathSync(resolvedRoot);
-		const realTarget = realpathSync(resolvedTarget);
-		const realRel = relative(realRoot, realTarget);
-		return !realRel.startsWith("..") && !isAbsolute(realRel);
-	} catch {
-		// Target may not exist; verify its nearest existing ancestor does not symlink outside root.
-		try {
-			const realRoot = realpathSync(resolvedRoot);
-			let cur = dirname(resolvedTarget);
-			while (cur && cur !== dirname(cur)) {
-				if (existsSync(cur)) {
-					const realCur = realpathSync(cur);
-					const curRel = relative(realRoot, realCur);
-					return !curRel.startsWith("..") && !isAbsolute(curRel);
-				}
-				cur = dirname(cur);
-			}
-		} catch {
-			return false;
-		}
-		return true;
-	}
+	if (ESCAPES_RELATIVE.test(rel) || isAbsolute(rel)) return false;
+	return isPathInsideRoot(resolvedRoot, resolvedTarget, false);
 }
 
 /** Checks workspace containment BEFORE probing existence, then verifies realpath containment to avoid outside-root oracles. */
@@ -123,16 +110,9 @@ function existsInWorkspace(root: string, target: string): boolean {
 	const resolvedRoot = resolve(root);
 	const resolvedTarget = resolve(target);
 	const rel = relative(resolvedRoot, resolvedTarget);
-	if (rel.startsWith("..") || isAbsolute(rel)) return false;
-	if (!existsSync(resolvedTarget)) return false;
-	try {
-		const realRoot = realpathSync(resolvedRoot);
-		const realTarget = realpathSync(resolvedTarget);
-		const realRel = relative(realRoot, realTarget);
-		return !realRel.startsWith("..") && !isAbsolute(realRel);
-	} catch {
-		return false;
-	}
+	if (ESCAPES_RELATIVE.test(rel) || isAbsolute(rel)) return false;
+	if (!isPathInsideRoot(resolvedRoot, resolvedTarget, false)) return false;
+	return existsSync(resolvedTarget);
 }
 
 /** The most of a small snippet that is read for its header comment. */
@@ -295,7 +275,7 @@ function markdownCodeRefs(root: string, path: string, text: string, precomputedL
 		if (!CODE_FILE_EXT_RE.test(link.file)) continue;
 		const target = linkTarget(root, path, link.file);
 		const rel = relative(root, target).split(sep).join("/");
-		if (!rel.startsWith("..") && !isAbsolute(rel)) refs.add(rel);
+		if (!ESCAPES_RELATIVE.test(rel) && !isAbsolute(rel)) refs.add(rel);
 	}
 	if (text.includes("`")) {
 		const fences = fenced(text);
@@ -459,7 +439,7 @@ function checkMissingSource(source: string | undefined, root?: string, path?: st
 	if (!clean) return undefined;
 	const target = path && /^\.{1,2}[\\/]/.test(clean) ? resolve(dirname(path), clean) : join(root, clean);
 	const rel = relative(resolve(root), resolve(target));
-	if (rel.startsWith("..") || isAbsolute(rel)) return undefined;
+	if (ESCAPES_RELATIVE.test(rel) || isAbsolute(rel)) return undefined;
 	return !existsInWorkspace(root, target) ? source : undefined;
 }
 
@@ -666,7 +646,7 @@ function brokenLinksFrom(root: string, path: string, links: readonly DocLink[], 
 			const target = linkTarget(root, path, link.file);
 			// What is outside the project is not this project's to say: it may well be there on another machine.
 			const from = relative(resolve(root), resolve(target));
-			return !from.startsWith("..") && !isAbsolute(from) && !existsInWorkspace(root, target);
+			return !ESCAPES_RELATIVE.test(from) && !isAbsolute(from) && !existsInWorkspace(root, target);
 		})
 		.map(({ href, file, line, column }) => {
 			// One file of that name elsewhere in the project is where it went, most likely. Two, and it is not ours to pick.
@@ -1116,10 +1096,10 @@ export function docsTruncated(
 	const customTemplatesRel = (options?.templatesFolder ?? "").trim().replace(/\\/g, "/").replace(/^[./]+|\/+$/g, "");
 	const customTemplatesDir = customTemplatesRel ? join(root, customTemplatesRel) : "";
 	const inArea = (path: string) =>
-		(Object.keys(DOC_FOLDERS) as DocArea[]).some((name) => path.startsWith(area(name) + sep)) ||
-		path.startsWith(templatesDir + sep) ||
-		path.startsWith(exportsDir + sep) ||
-		Boolean(customTemplatesDir && path.startsWith(customTemplatesDir + sep));
+		(Object.keys(DOC_FOLDERS) as DocArea[]).some((name) => isUnderDir(path, area(name))) ||
+		isUnderDir(path, templatesDir) ||
+		isUnderDir(path, exportsDir) ||
+		Boolean(customTemplatesDir && isUnderDir(path, customTemplatesDir));
 
 	const out: { folder: string; limit: number; total: number }[] = [];
 	const seen = new Set<string>();
@@ -1242,10 +1222,10 @@ export async function listDocs(
 	const customTemplatesRel = (options?.templatesFolder ?? "").trim().replace(/\\/g, "/").replace(/^[./]+|\/+$/g, "");
 	const customTemplatesDir = customTemplatesRel ? join(root, customTemplatesRel) : "";
 	const inArea = (path: string) =>
-		(Object.keys(DOC_FOLDERS) as DocArea[]).some((name) => path.startsWith(area(name) + sep)) ||
-		path.startsWith(templatesDir + sep) ||
-		path.startsWith(exportsDir + sep) ||
-		Boolean(customTemplatesDir && path.startsWith(customTemplatesDir + sep));
+		(Object.keys(DOC_FOLDERS) as DocArea[]).some((name) => isUnderDir(path, area(name))) ||
+		isUnderDir(path, templatesDir) ||
+		isUnderDir(path, exportsDir) ||
+		Boolean(customTemplatesDir && isUnderDir(path, customTemplatesDir));
 
 	// Keep summaries indexed during this listing pass so the broken-wikilink check reuses them with zero extra I/O.
 	const passSummaries = new Map<string, CachedMdSummary>();
@@ -1617,13 +1597,17 @@ export async function listDocs(
 		// 3. Guarded Levenshtein fuzzy match for typos (never suggest a different ticket number like DEMO-103 for DEMO-104)
 		if (qNorm.length >= 4 && !/^[A-Za-z]{2,12}-\d+$/.test(baseNoExt)) {
 			const maxDist = qNorm.length >= 7 ? 2 : 1;
+			const qDigits = qNorm.replace(/\D+/g, "");
+			const sameDigits = (norm: string) => norm.replace(/\D+/g, "") === qDigits;
 			let bestDist = maxDist + 1;
 			let bestDoc: DocFile | null = null;
 			let tied = false;
 			for (const c of candidateDocs) {
 				if (c.doc.path === sourceDoc.path) continue;
-				const dStem = c.stemNorm ? boundedLevenshtein(qNorm, c.stemNorm, maxDist) : maxDist + 1;
-				const dTitle = c.titleNorm ? boundedLevenshtein(qNorm, c.titleNorm, maxDist) : maxDist + 1;
+				// A name that differs in a digit is another note (the next release's, the second test plan), not a
+				// slip of the hand: only a name with the same digits is offered.
+				const dStem = c.stemNorm && sameDigits(c.stemNorm) ? boundedLevenshtein(qNorm, c.stemNorm, maxDist) : maxDist + 1;
+				const dTitle = c.titleNorm && sameDigits(c.titleNorm) ? boundedLevenshtein(qNorm, c.titleNorm, maxDist) : maxDist + 1;
 				const dist = Math.min(dStem, dTitle);
 				if (dist > maxDist) continue;
 				if (dist < bestDist) {
@@ -1819,35 +1803,60 @@ const withKinds = (catalog: string) =>
  */
 export async function setupProject(root: string, dryRun = false): Promise<string[]> {
 	const project = await readProject(root);
-	const made: string[] = [];
-	const wrote = new Map<string, string>();
-	const put = async (path: string, content: string) => {
-		if (existsSync(path)) return;
-		made.push(relative(root, path));
-		if (dryRun) return;
-		mkdirSync(dirname(path), { recursive: true });
-		await Bun.write(path, content);
-		wrote.set(path, content);
+	// What is to be written is worked out and checked first, and only then written. A target that turns out to be
+	// outside the folder (through a link, or a path in project.toml) used to be found half-way, with the first
+	// files already written and nothing recorded for Undo to take back.
+	const plan: [path: string, content: string][] = [];
+	const want = (path: string, content: string) => {
+		if (!existsSync(path)) plan.push([path, content]);
 	};
-	await put(project.path, projectToml(project.name));
-	if (!found(root, "README.md")) await put(join(root, "README.md"), readme(project));
-	if (!found(root, "AGENTS.md")) await put(join(root, "AGENTS.md"), agents(project));
-	// A folder that is already there is left as it is. A new one starts as its catalog, which says what the folder is
-	// for and lists what comes to be in it: nothing is written once and left to go stale.
-	const start = async (dir: string, area: "docs" | "tests" | "code") => {
-		if (!existsSync(join(root, dir))) await put(join(root, dir, CATALOG_FILE), catalogTemplate(area));
+	want(project.path, projectToml(project.name));
+	if (!found(root, "README.md")) want(join(root, "README.md"), readme(project));
+	if (!found(root, "AGENTS.md")) want(join(root, "AGENTS.md"), agents(project));
+	// A folder that is already there is left as it is, also one that is a link to a folder somewhere else: nothing is
+	// written in it. A new one starts as its catalog, which says what the folder is for and lists what comes to be
+	// in it: nothing is written once and left to go stale.
+	const start = (dir: string, area: "docs" | "tests" | "code" | "schema") => {
+		const dirFull = join(root, dir);
+		// There already, or about to be: a folder made on the way to another area's catalog inside it is not a new one.
+		if (existsSync(dirFull) || plan.some(([path]) => path.startsWith(dirFull + sep))) return;
+		// The schema folder's names the kinds it can hold; a kind's folder is made with the first thing described in it.
+		want(join(dirFull, CATALOG_FILE), area === "schema" ? withKinds(catalogTemplate("schema")) : catalogTemplate(area));
 	};
-	await start(project.docs, "docs");
-	// The schema folder's names the kinds it can hold; a kind's folder is made with the first thing described in it.
-	if (!existsSync(join(root, project.schema))) await put(join(root, project.schema, CATALOG_FILE), withKinds(catalogTemplate("schema")));
+	start(project.docs, "docs");
+	start(project.schema, "schema");
 	// A folder for the code only where there is none yet: an export brings its own layout. The code before the tests:
 	// where a project keeps both in one folder, that folder is its code, and its catalog says so.
 	let scripts = false;
 	for (const path of new WorkspaceFiles(root).files()) if ((scripts = SCRIPT.test(path))) break;
-	if (!scripts) await start(project.code, "code");
+	if (!scripts) start(project.code, "code");
 	// Tests kept in the code's own folder: the folder is the code's, whichever of the two makes it.
-	await start(project.tests, resolve(root, project.tests) === resolve(root, project.code) ? "code" : "tests");
-	if (!dryRun) lastSetup.set(root, wrote);
+	start(project.tests, resolve(root, project.tests) === resolve(root, project.code) ? "code" : "tests");
+	// Two areas in one folder ask for the same catalog: the first asked for is the one written.
+	const targets = plan.filter(([path], i) => plan.findIndex(([other]) => other === path) === i);
+	// Every target and the folder it goes in, before the first write. A link that leads nowhere counts as outside.
+	for (const [path] of targets) {
+		assertPathInsideRoot(root, dirname(path), false);
+		assertPathInsideRoot(root, path, true);
+	}
+	const made = targets.map(([path]) => relative(root, path));
+	if (dryRun) return made;
+	const wrote = new Map<string, string>();
+	try {
+		for (const [path, content] of targets) {
+			// Never overwrites: something may have come to be there since the plan was made.
+			if (existsSync(path)) continue;
+			const dir = dirname(path);
+			assertPathInsideRoot(root, dir, false);
+			mkdirSync(dir, { recursive: true });
+			assertPathInsideRoot(root, path, true);
+			await Bun.write(path, content);
+			wrote.set(path, content);
+		}
+	} finally {
+		// Also when a write failed part of the way: what was written before it can still be taken back.
+		lastSetup.set(root, wrote);
+	}
 	return made;
 }
 
@@ -1867,15 +1876,24 @@ export async function undoSetup(root: string): Promise<{ removed: string[]; kept
 	const kept: string[] = [];
 	const name = (path: string) => relative(root, path);
 	for (const [path, content] of wrote ?? []) {
+		assertPathInsideRoot(root, path, true);
 		if (!existsSync(path)) continue;
+		if (lstatSync(path).isSymbolicLink()) {
+			kept.push(name(path));
+			continue;
+		}
 		if ((await Bun.file(path).text()) !== content) {
 			kept.push(name(path));
 			continue;
 		}
+		assertPathInsideRoot(root, path, true);
 		unlinkSync(path);
 		removed.push(name(path));
 		// The folder it was in, and the one above, when the file was all they held.
-		for (let dir = dirname(path); dir !== root && dir.startsWith(root) && !readdirSync(dir).length; dir = dirname(dir)) rmdirSync(dir);
+		for (let dir = dirname(path); isPathInsideRoot(root, dir, true); dir = dirname(dir)) {
+			if (lstatSync(dir).isSymbolicLink() || readdirSync(dir).length) break;
+			rmdirSync(dir);
+		}
 	}
 	return { removed, kept };
 }

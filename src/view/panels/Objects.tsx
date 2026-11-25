@@ -274,35 +274,40 @@ function Procedures(props: { filter: string }) {
 		<Show when={list().length} fallback={<p class="hint">{empty()}</p>}>
 			<p class="hint">Drag a procedure into the chart to call it. Enter opens it.</p>
 			<Rows label="Procedures in the workspace, by script">
-				<For each={scripts()}>
+				<For each={scripts()} keyed={(s) => s.file}>
 					{(script) => (
 						<RowGroup
-							title={script.file}
+							title={script().file}
 							headClass="group-head proc-script"
 							head={
 								<>
-									<span class="proc-script-name">{baseName(script.file)}</span>
+									<span class="proc-script-name">{baseName(script().file)}</span>
 									{/* A long folder keeps its end, the part that tells two scripts of one name apart. */}
 									<span class="meta">
-										<bdi>{dirName(script.file)}</bdi>
+										<bdi>{dirName(script().file)}</bdi>
 									</span>
 								</>
 							}
 						>
-							<For each={script.items}>
+							<For each={script().items} keyed={(s) => `${s.location.uri}#${s.name}:${s.location.range.start.line}`}>
 								{(s) => (
 									<Row
-										key={`${s.location.uri}#${s.name}`}
+										key={`${s().location.uri}#${s().name}`}
 										draggable={true}
-										title={`${s.name} in ${script.file}`}
+										title={`${s().name} in ${script().file}`}
 										onDragStart={(e) => {
-											e.dataTransfer?.setData(PROCEDURE_DRAG, s.name);
+											e.dataTransfer?.setData(PROCEDURE_DRAG, s().name);
 											if (e.dataTransfer) e.dataTransfer.effectAllowed = "copy";
 										}}
-										onActivate={() => void openFile(monaco.Uri.parse(s.location.uri).fsPath, { reveal: { line: s.location.range.start.line + 1, column: s.location.range.start.character + 1 } })}
+										onActivate={() => {
+											const sym = s();
+											void openFile(monaco.Uri.parse(sym.location.uri).fsPath, {
+												reveal: { line: sym.location.range.start.line + 1, column: sym.location.range.start.character + 1 },
+											});
+										}}
 									>
 										<Icon name="symbol-method" class="icon" />
-										<span class="label">{s.name}</span>
+										<span class="label">{s().name}</span>
 									</Row>
 								)}
 							</For>
@@ -1040,9 +1045,9 @@ function PlanOutline(props: { filter?: string; compact?: boolean; label?: string
 	return (
 		<Show when={visibleStages().length} fallback={<p class="hint">{empty()}</p>}>
 			<Rows role="tree" label={props.label ?? "Outline of this plan"}>
-				<For each={visibleStages()}>
+				<For each={visibleStages()} keyed={(s) => s.id}>
 					{(stage) => {
-						const key = () => planCollapseKey(activePath(), stage.id);
+						const key = () => planCollapseKey(activePath(), stage().id);
 						const open = () => Boolean(filter()) || !outlineClosed().has(key());
 						return (
 							<>
@@ -1050,56 +1055,56 @@ function PlanOutline(props: { filter?: string; compact?: boolean; label?: string
 									role="treeitem"
 									key={key()}
 									level={1}
-									expanded={stage.nodes.length ? open() : undefined}
+									expanded={stage().nodes.length ? open() : undefined}
 									style={{ "padding-left": "8px" }}
-									title={`${stage.name} (${count(stage.nodes.length, "step")})`}
-									onActivate={() => jumpToLine(stage.nodes[0]?.line ?? stage.line)}
+									title={`${stage().name} (${count(stage().nodes.length, "step")})`}
+									onActivate={() => jumpToLine(stage().nodes[0]?.line ?? stage().line)}
 									onToggle={() => toggle(key())}
 								>
 									<span
 										class="twisty"
 										aria-hidden="true"
 										onClick={(e) => {
-											if (!stage.nodes.length) return;
+											if (!stage().nodes.length) return;
 											e.stopPropagation();
 											toggle(key());
 										}}
 									>
-										<Show when={stage.nodes.length}>
+										<Show when={stage().nodes.length}>
 											<Icon name={open() ? "chevron-down" : "chevron-right"} />
 										</Show>
 									</span>
 									<Icon name="layers" class="icon" />
 									<span class="label" style={{ "font-weight": "600" }}>
-										{stage.name}
+										{stage().name}
 									</span>
-									<span class="meta">{stage.nodes.length}</span>
+									<span class="meta">{stage().nodes.length}</span>
 								</Row>
-								<Show when={stage.nodes.length && open()}>
+								<Show when={stage().nodes.length && open()}>
 									<div role="group">
-										<For each={stage.nodes}>
+										<For each={stage().nodes} keyed={(n) => n.id}>
 											{(node) => {
-												const here = () => activeNodeId() === node.id;
+												const here = () => activeNodeId() === node().id;
 												return (
 													<Row
 														role="treeitem"
-														key={`plan-node:${node.id}`}
+														key={`plan-node:${node().id}`}
 														classList={{ here: here() }}
 														level={2}
 														style={{ "padding-left": "22px" }}
-														title={`${node.kind}: ${node.text}${node.ref ? ` (${node.ref})` : ""} — line ${node.line}`}
-														onActivate={() => jumpToLine(node.line)}
+														title={`${node().kind}: ${node().text}${node().ref ? ` (${node().ref})` : ""} — line ${node().line}`}
+														onActivate={() => jumpToLine(node().line)}
 													>
 														<span class="twisty" aria-hidden="true" />
-														<Icon name={planNodeIcon(node.kind)} class="icon" />
-														<span class="label">{node.text}</span>
+														<Icon name={planNodeIcon(node().kind)} class="icon" />
+														<span class="label">{node().text}</span>
 														<Show when={here()}>
 															<span class="here-mark" title="Selected step">
 																<Icon name="arrow-left" />
 																<span class="visually-hidden">Selected step</span>
 															</span>
 														</Show>
-														<span class="meta">{node.kind}</span>
+														<span class="meta">{node().kind}</span>
 													</Row>
 												);
 											}}

@@ -522,7 +522,9 @@ export function Palette() {
 		{ defer: true },
 	);
 	const commitOnEnter = (e: KeyboardEvent) => {
-		if (e.key === "Enter" && !e.shiftKey) {
+		// Not the Enter that takes an input method's candidate (as Escape below leaves one alone): that one belongs
+		// to the composition, and committing on it cut the word short.
+		if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
 			e.preventDefault();
 			(e.currentTarget as HTMLElement).blur();
 		}

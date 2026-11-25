@@ -242,11 +242,17 @@ export function StyleProfile() {
 				max={props.field.max}
 				value={draft()}
 				placeholder={String(getPath(SERVER_DEFAULTS, props.field.path) ?? "server default")}
-				onInput={(e) => setDraft(e.currentTarget.value)}
+				onInput={(e) => {
+					// Unreadable so far ("12e", "-"): the field reports an empty value, and mirroring that into the
+					// draft made the binding wipe the typing. The draft waits for something the field can read.
+					if (!e.currentTarget.validity.badInput) setDraft(e.currentTarget.value);
+				}}
 				onChange={(e) => {
-					const next = commitNumber(e.currentTarget.value, props.field);
+					const el = e.currentTarget;
+					// Left unreadable: back to what is shown, not read as empty, which would clear the override.
+					const next = el.validity.badInput ? untrack(displayedText) : commitNumber(el.value, props.field);
 					setDraft(next);
-					e.currentTarget.value = next;
+					el.value = next;
 				}}
 			/>
 		);
@@ -279,6 +285,7 @@ export function StyleProfile() {
 							const el = e.currentTarget;
 							set(f.path, el.value || undefined);
 							onSettled(() => {
+								if (!el.isConnected) return;
 								const next = String(untrack(() => displayed(f.path) ?? ""));
 								if (el.value !== next) el.value = next;
 							});

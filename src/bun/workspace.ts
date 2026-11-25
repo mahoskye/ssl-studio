@@ -9,7 +9,6 @@ import {
 	readdirSync,
 	readlinkSync,
 	realpathSync,
-	renameSync,
 	rmSync,
 	statSync,
 	watch,
@@ -33,9 +32,108 @@ const TMP_SUFFIX = ".ssl-studio-tmp";
 const OWN_WRITE_TTL_MS = 5000;
 const MAX_SYMLINK_DEPTH = 40;
 
+const foldPath = (p: string) => (process.platform === "win32" || process.platform === "darwin" ? p.toLowerCase() : p);
+
+const foldsCaseKnown = new Map<string, boolean>();
+
+/**
+ * Whether names in `root` are compared without case. On Windows and macOS that is the usual answer but not the
+ * only one: an APFS volume can be case-sensitive, and so can a Windows folder, and there `proj` and `PROJ` are two
+ * folders, one of them outside the workspace. So the folder is asked rather than the platform: its own path with
+ * the case of its letters swapped is the same folder (names fold), no folder at all, or another one (they do not).
+ * Where it cannot say, the answer is the platform's usual one.
+ */
+export function foldsCase(root: string): boolean {
+	if (process.platform !== "win32" && process.platform !== "darwin") return false;
+	const known = foldsCaseKnown.get(root);
+	if (known !== undefined) return known;
+	const swapped = root.replace(/[a-zA-Z]/g, (ch) => (ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase()));
+	let here: ReturnType<typeof statSync>;
+	try {
+		here = statSync(root);
+	} catch {
+		return true;
+	}
+	let folds = true;
+	if (swapped !== root) {
+		try {
+			const there = statSync(swapped);
+			folds = here.dev === there.dev && here.ino === there.ino;
+		} catch (e: any) {
+			if (e?.code === "ENOENT" || e?.code === "ENOTDIR") folds = false;
+		}
+	}
+	foldsCaseKnown.set(root, folds);
+	return folds;
+}
+
 /** Ensures a trailing path separator without doubling root paths like `/` or `C:\`. */
 export function withSep(p: string): string {
 	return p.endsWith(sep) ? p : p + sep;
+}
+
+/**
+ * Resolves `target` through symlinks (including dangling symlinks and non-existent descendants),
+ * stopping at `MAX_SYMLINK_DEPTH` to defeat symlink loops.
+ */
+export function resolveRealPath(target: string, origPath = target, depth = 0): string {
+	if (depth > MAX_SYMLINK_DEPTH) throw new Error(`outside the workspace: ${origPath}`);
+	let realErr: any = null;
+	try {
+		return realpathSync.native(target);
+	} catch (e: any) {
+		realErr = e;
+		if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR" && e?.code !== "ELOOP" && e?.code !== "EACCES") throw e;
+	}
+	// Check whether `target` itself is a dangling/unreadable symlink (or symlink loop) before walking to its parent.
+	try {
+		const lst = lstatSync(target);
+		if (lst.isSymbolicLink()) {
+			const linkTarget = readlinkSync(target);
+			const parentReal = resolveRealPath(dirname(target), origPath, depth + 1);
+			return resolveRealPath(resolve(parentReal, linkTarget), origPath, depth + 1);
+		}
+	} catch (e: any) {
+		if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") throw e;
+	}
+	if (realErr?.code === "EACCES") throw realErr;
+	const parent = dirname(target);
+	if (parent === target) return target;
+	const parentReal = resolveRealPath(parent, origPath, depth + 1);
+	return resolve(parentReal, basename(target));
+}
+
+/**
+ * Verifies that `target` stays inside `root` both lexically and after resolving existing
+ * ancestors and symlinks (including dangling symlinks), without case where the folder's names fold (`foldsCase`).
+ * When `strict` is true, `target` equal to `root` is rejected.
+ */
+export function isPathInsideRoot(root: string, target: string, strict = false): boolean {
+	try {
+		const resolvedRoot = resolve(root);
+		const resolvedTarget = resolve(target);
+		const fold = foldsCase(resolvedRoot) ? (p: string) => p.toLowerCase() : (p: string) => p;
+		const rootF = fold(resolvedRoot);
+		const targetF = fold(resolvedTarget);
+		const lexInside = strict ? targetF.startsWith(withSep(rootF)) : targetF === rootF || targetF.startsWith(withSep(rootF));
+		if (!lexInside) return false;
+		const realRoot = realpathSync.native(resolvedRoot);
+		const realTarget = resolveRealPath(resolvedTarget, target);
+		const realRootF = fold(realRoot);
+		const realTargetF = fold(realTarget);
+		return strict ? realTargetF.startsWith(withSep(realRootF)) : realTargetF === realRootF || realTargetF.startsWith(withSep(realRootF));
+	} catch {
+		return false;
+	}
+}
+
+/** Throws if `target` escapes `root` lexically or via any symlink (including dangling symlinks). */
+export function assertPathInsideRoot(root: string, target: string, strict = false): string {
+	const full = resolve(target);
+	if (!isPathInsideRoot(root, full, strict)) {
+		throw new Error(`outside the workspace: ${target}`);
+	}
+	return full;
 }
 
 /**
@@ -61,7 +159,16 @@ export function fileKey(full: string): string {
 	try {
 		key = join(realpathSync.native(there), ...rest);
 	} catch {
-		// A link that leads nowhere has no other name to be reached by.
+		// What has no real name to be asked for keeps the name it was given.
+	}
+	// The first part that is not there may be a link to a file still to be made. A save through it makes that file
+	// (`landing`), so it is that file's name the save waits under, with a save of the file by its own name.
+	if (rest.length) {
+		try {
+			if (lstatSync(join(there, rest[0]!)).isSymbolicLink()) key = resolveRealPath(resolve(full));
+		} catch {
+			// Nothing of that name, or a link that leads round to itself: the name it was given.
+		}
 	}
 	return process.platform === "win32" || process.platform === "darwin" ? key.toLowerCase() : key;
 }
@@ -98,47 +205,20 @@ export class WorkspaceFiles {
 		this.realRoot = realpathSync.native(this.root);
 	}
 
-	private resolveReal(target: string, origPath: string, depth = 0): string {
-		if (depth > MAX_SYMLINK_DEPTH) throw new Error(`outside the workspace: ${origPath}`);
-		let realErr: any = null;
-		try {
-			return realpathSync.native(target);
-		} catch (e: any) {
-			realErr = e;
-			if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR" && e?.code !== "ELOOP" && e?.code !== "EACCES") throw e;
-		}
-		// Check whether `target` itself is a dangling/unreadable symlink (or symlink loop) before walking to its parent.
-		try {
-			const lst = lstatSync(target);
-			if (lst.isSymbolicLink()) {
-				const linkTarget = readlinkSync(target);
-				const parentReal = this.resolveReal(dirname(target), origPath, depth + 1);
-				return this.resolveReal(resolve(parentReal, linkTarget), origPath, depth + 1);
-			}
-		} catch (e: any) {
-			if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") throw e;
-		}
-		if (realErr?.code === "EACCES") throw realErr;
-		const parent = dirname(target);
-		if (parent === target) return target;
-		const parentReal = this.resolveReal(parent, origPath, depth + 1);
-		return resolve(parentReal, basename(target));
-	}
-
 	inside(path: string): string {
 		const full = resolve(path);
-		// Windows paths compare without case (drive letters come both ways).
-		const fold = (p: string) => (process.platform === "win32" ? p.toLowerCase() : p);
+		// Without case where this folder's names fold: the usual on Windows and macOS, but asked of the folder
+		// (`foldsCase`), since on a case-sensitive volume a sibling whose name differs only by case is another folder.
+		const fold = foldsCase(this.root) ? (p: string) => p.toLowerCase() : (p: string) => p;
 		const fullF = fold(full);
 		const rootF = fold(this.root);
 		if (fullF !== rootF && !fullF.startsWith(withSep(rootF))) {
 			throw new Error(`outside the workspace: ${path}`);
 		}
 		// Resolve real path through symlinks (including dangling symlinks and non-existent descendants).
-		const resolvedReal = this.resolveReal(full, path);
-		const cmp = (p: string) => (process.platform === "win32" || process.platform === "darwin" ? p.toLowerCase() : p);
-		const realF = cmp(resolvedReal);
-		const realRootF = cmp(this.realRoot);
+		const resolvedReal = resolveRealPath(full, path);
+		const realF = fold(resolvedReal);
+		const realRootF = fold(this.realRoot);
 		if (realF !== realRootF && !realF.startsWith(withSep(realRootF))) {
 			throw new Error(`outside the workspace: ${path}`);
 		}
@@ -284,8 +364,28 @@ export class WorkspaceFiles {
 		this.ownWrites.set(fileKey(full), now);
 	}
 
-	private async atomicWriteFile(full: string, bytes: Uint8Array, mode?: number) {
-		this.inside(full);
+	/**
+	 * Where a write of `full` lands: the file itself, or for a link the file it leads to, there yet or not. The
+	 * temporary file renamed over the link's own name left a plain file where the link was, and the file the link
+	 * named kept the old text. What the link leads to is looked up here and held to the folder here, so that the
+	 * place written is the place that was checked.
+	 */
+	private landing(full: string): string {
+		try {
+			if (!lstatSync(full).isSymbolicLink()) return full;
+		} catch (e: any) {
+			if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") throw e;
+			return full;
+		}
+		const real = resolveRealPath(full);
+		const fold = foldsCase(this.root) ? (p: string) => p.toLowerCase() : (p: string) => p;
+		if (!fold(real).startsWith(withSep(fold(this.realRoot)))) throw new Error(`outside the workspace: ${full}`);
+		return real;
+	}
+
+	private async atomicWriteFile(named: string, bytes: Uint8Array, mode?: number) {
+		this.inside(named);
+		const full = this.landing(named);
 		mkdirSync(dirname(full), { recursive: true });
 		const temp = join(dirname(full), `.${basename(full)}.${process.pid}.${randomBytes(6).toString("hex")}${TMP_SUFFIX}`);
 		const flags =
@@ -422,10 +522,22 @@ export class WorkspaceFiles {
 		if (dstKey.startsWith(withSep(srcKey))) {
 			throw new Error(`${relative(this.root, source)} cannot be moved into itself`);
 		}
-		await this.held([source, target], () => {
+		await this.held([source, target], async () => {
 			this.inside(source);
 			this.inside(target);
-			const caseOnly = srcKey === dstKey && source !== target;
+			// A change of case alone is a rename of the file onto itself only where the two names are one file. That
+			// is asked of the files, not of the platform: on a case-sensitive volume `Report.ssl` and `report.ssl` are
+			// two, and renaming one to the other's name without the check below replaced the other.
+			let caseOnly = false;
+			if (source !== target && source.toLowerCase() === target.toLowerCase()) {
+				try {
+					const from = lstatSync(source);
+					const to = lstatSync(target);
+					caseOnly = from.dev === to.dev && from.ino === to.ino;
+				} catch {
+					// No file of the new name: an ordinary rename.
+				}
+			}
 			if (!caseOnly) {
 				let targetExists = false;
 				try {
@@ -438,7 +550,7 @@ export class WorkspaceFiles {
 			}
 			// A name with a folder in it moves the file there, and the folder is made if it is not there yet.
 			mkdirSync(dirname(target), { recursive: true });
-			renameSync(source, target);
+			await renameReplacing(source, target);
 		});
 	}
 
@@ -534,24 +646,34 @@ export class WorkspaceFiles {
 		}
 	}
 
+	/** A scan's hits alone, for a caller that lists them and has no use for whether the scan ran out of time. */
 	async search(query: string, options: SearchOptions): Promise<SearchHit[]> {
-		if (!query) return [];
-		if (options.paths !== undefined && options.paths.length === 0) return [];
+		return (await this.searchScan(query, options)).hits;
+	}
+
+	/**
+	 * The search, and whether its time budget ran out before every file was read. The hits of a scan that timed out
+	 * are only those of the files it got to: given back as a bare list they read as all there is, and a replace made
+	 * from them left the rest of the workspace as it was without a word.
+	 */
+	async searchScan(query: string, options: SearchOptions): Promise<{ hits: SearchHit[]; timedOut: boolean }> {
+		if (!query) return { hits: [], timedOut: false };
+		if (options.paths !== undefined && options.paths.length === 0) return { hits: [], timedOut: false };
 		const pattern = searchPattern(query, options);
 		const filter = createFileFilter(options.include, options.exclude);
 		const normRel = (p: string) => p.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "").replace(/^\/+/, "");
 		const pathSet =
 			options.paths !== undefined
-				? new Set(options.paths.map((p) => (process.platform === "win32" ? normRel(p).toLowerCase() : normRel(p))))
+				? new Set(options.paths.map((p) => foldPath(normRel(p))))
 				: null;
 		const hits: SearchHit[] = [];
 		const deadline = performance.now() + WorkspaceFiles.searchTimeoutMs;
 		const isRegex = Boolean(options.regex);
 		for (const path of this.files()) {
-			if (performance.now() > deadline) return hits;
+			if (performance.now() > deadline) return { hits, timedOut: true };
 			if (imageType(path)) continue;
 			const relPath = normRel(relative(this.root, path));
-			if (pathSet !== null && !pathSet.has(process.platform === "win32" ? relPath.toLowerCase() : relPath)) continue;
+			if (pathSet !== null && !pathSet.has(foldPath(relPath))) continue;
 			if (!filter(relPath)) continue;
 			try {
 				const st = statSync(path);
@@ -570,7 +692,7 @@ export class WorkspaceFiles {
 			if (text.includes("\u0000")) continue;
 			const lines = text.split(/\r?\n/);
 			for (let i = 0; i < lines.length; i++) {
-				if ((isRegex || (i & 63) === 0) && performance.now() > deadline) return hits;
+				if ((isRegex || (i & 63) === 0) && performance.now() > deadline) return { hits, timedOut: true };
 				const line = lines[i]!;
 				if (isRegex && line.length > REGEX_MAX_LINE_LENGTH) continue;
 				// The same walk a replace makes over the line: what is listed is what would be replaced.
@@ -584,11 +706,11 @@ export class WorkspaceFiles {
 						text: excerpt,
 						...(textOffset > 0 ? { textOffset } : {}),
 					});
-					if (hits.length >= SEARCH_LIMIT) return hits;
+					if (hits.length >= SEARCH_LIMIT) return { hits, timedOut: false };
 				}
 			}
 		}
-		return hits;
+		return { hits, timedOut: false };
 	}
 
 	/**

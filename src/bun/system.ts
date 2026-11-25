@@ -83,15 +83,16 @@ export async function openInSystemApp(filePath: string): Promise<void> {
 	proc.unref();
 }
 
+/** Builds the OS command to reveal/highlight a file on macOS or Windows without shell interpolation. */
+export function revealFileCommand(platform: "darwin" | "win32", filePath: string): string[] {
+	if (platform === "darwin") return ["open", "-R", filePath];
+	return ["explorer.exe", "/select,", filePath];
+}
+
 /** Reveals/highlights a workspace-validated file path in the OS file manager without shell interpolation. */
 export async function revealPathInFileManager(filePath: string): Promise<void> {
-	if (process.platform === "darwin") {
-		const proc = Bun.spawn(["open", "-R", filePath], { stdout: "ignore", stderr: "ignore" });
-		proc.unref();
-		return;
-	}
-	if (process.platform === "win32") {
-		const proc = Bun.spawn(["explorer.exe", `/select,${filePath}`], { stdout: "ignore", stderr: "ignore" });
+	if (process.platform === "darwin" || process.platform === "win32") {
+		const proc = Bun.spawn(revealFileCommand(process.platform, filePath), { stdout: "ignore", stderr: "ignore" });
 		proc.unref();
 		return;
 	}

@@ -14,7 +14,7 @@ import "./graphExtra.css";
 import { Icon } from "../Icon";
 import { ICON } from "../icons";
 import { CenterTabStrip } from "../editor/CenterTabStrip";
-import { quickPick, type QuickPickOption } from "../dialogs";
+import { choose as chooseAnswer, quickPick, type QuickPickOption } from "../dialogs";
 import { findMatchingPlanNodeLine } from "../plan/assist";
 import { isPlanPath } from "../plan/model";
 import ELK from "elkjs/lib/elk.bundled.js";
@@ -31,7 +31,8 @@ import { Menu, type MenuItem } from "../Menu";
 import { savePicture } from "./picture";
 import { registerGraphBridge } from "./graphBridge";
 import { session } from "../lsp/session";
-import { aroundFocus, callList, choices, computeImpactAnalysis, formatImpactMarkdown, sameStep, dirId, keptFolds, withoutUnresolved, fold, gather, isFolderEnd, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, ticketSubgraphFilter, topLabel, UNRESOLVED, visible, type Direction, type DrawnEdge, type Filter, type FocusLink, type Graph, type ImpactDocSummary, type ImpactNode, type ImpactReport, type ListedProc, relationOf, type Relation } from "./model";
+import { aroundFocus, callList, choices, computeImpactAnalysis, formatImpactMarkdown, sameStep, dirId, keptFolds, withoutUnresolved, fold, gather, isFolderEnd, FOLD_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, ticketSubgraphFilter, topLabel, UNRESOLVED, visible, type Direction, type DrawnEdge, type Filter, type FocusLink, type Graph, type ImpactDocSummary, type ImpactNode, type ImpactReport, type ListedProc, relationOf, type Relation } from "./model";
+import { asksFirst, openedFoldedNote, openingFolds, pictureSize, unfoldQuestion } from "./unfold";
 import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
 import { submenuOrInline, type RowMenuEntry } from "../../shared/contextMenu";
 
@@ -207,6 +208,8 @@ export function GraphView() {
 	const foldersOf = (g: Graph) => new Set(g.scripts.map((s) => folderOf(s.path)).filter(Boolean));
 	/** The workspace whose opening picture has been chosen: a refresh keeps what the user folded since. */
 	let foldedFor = "";
+	/** The largest picture, in nodes, that was said yes to when asked: an unfolding within it is not asked about again. */
+	let agreedNodes = 0;
 	/** The node the pointer is on, the node the keys last moved to, and the line the pointer is on. */
 	const [pointed, setPointed] = createSignal<string | null>(null);
 	const [walked, setWalked] = createSignal<string | null>(null);
@@ -718,12 +721,14 @@ export function GraphView() {
 			if (run !== refreshSeq || controller.signal.aborted || (state.workspace?.root ?? "") !== startRoot) return;
 			// The first picture of a large workspace is of its scripts: every one folded.
 			if (foldedFor !== startRoot) {
-				const kept = keptFolds(recall(`${FOLDS_KEY}:${startRoot}`));
-				// What was folded here last time, if anything was kept; otherwise the opening picture.
-				setFolded(new Set(kept?.scripts ?? (read.nodes.length > FOLD_ABOVE ? read.scripts.map((s) => s.path) : [])));
-				// And of a workspace of many scripts, its folders: a picture that fits a screen, to unfold from.
-				const folders = foldersOf(read);
-				setFoldedDirs(new Set(kept?.folders ?? (read.scripts.length > FOLD_DIRS_ABOVE && folders.size > 1 ? folders : [])));
+				agreedNodes = 0;
+				// What was folded here last time, if anything was kept; otherwise the opening picture: of a large
+				// workspace its scripts, and of many scripts its folders, a picture that fits a screen, to unfold from.
+				// Folds kept that would draw too much to lay out unasked are not taken up, and that is said.
+				const opening = openingFolds(read, keptFolds(recall(`${FOLDS_KEY}:${startRoot}`)), folderOf, unresolved());
+				setFolded(new Set(opening.scripts));
+				setFoldedDirs(new Set(opening.folders));
+				if (opening.refused) notify(openedFoldedNote(opening.refused));
 			}
 			foldedFor = startRoot;
 			setGraph(read);
@@ -769,14 +774,6 @@ export function GraphView() {
 		}
 		return unresolved() ? keep : withoutUnresolved(g, keep);
 	});
-	// What is folded is kept with the workspace, so the graph opens next time as it was left.
-	createEffect(
-		() => [state.workspace?.root ?? "", [...folded()], [...foldedDirs()]] as const,
-		([root, scripts, folders]) => {
-			const kept = JSON.stringify({ scripts, folders });
-			if (root && foldedFor === root) remember(`${FOLDS_KEY}:${root}`, kept);
-		},
-	);
 	/** What is drawn of it: around a focus (or a small ticket slice) the neighbourhood is shown procedure by procedure. */
 	const drawn = createMemo(() => {
 		const keep = shown();
@@ -845,6 +842,8 @@ export function GraphView() {
 			}
 			// A layout takes a while, and a later one may finish first: only the last one asked for is drawn.
 			const run = ++layoutRun;
+			// The folds this picture is drawn with, to keep with the workspace once it has been laid out.
+			const drewFolds = untrack(() => JSON.stringify({ scripts: [...folded()], folders: [...foldedDirs()] }));
 			const relFrom = (path: string) => relativeTo(root, path);
 			const folderFrom = (path: string) => (path === UNRESOLVED ? "" : dirName(relFrom(path)));
 			const sized = (label: string, bold = false, extra = 56) => ({
@@ -1041,6 +1040,11 @@ export function GraphView() {
 					setPointedLine(null);
 					setLayout({ boxes, lines, width: result.width, height: result.height, key: layoutKey });
 					flush();
+					// What is folded is kept with the workspace, so the graph opens next time as it was left: kept
+					// only now that its picture has been laid out. Kept as soon as it was asked for, an unfolding
+					// too large to lay out was what the graph opened with from then on. Around a focus the folds
+					// are not what is drawn, so nothing is known of them here.
+					if (canFold && root && foldedFor === root) remember(`${FOLDS_KEY}:${root}`, drewFolds);
 					// A different set of calls is a different picture: show it whole. A refresh keeps the view,
 					// and folding one script keeps it too, moved only as far as brings that script into sight.
 					if (fittedFor !== layoutKey) {
@@ -1071,27 +1075,51 @@ export function GraphView() {
 		void openFile(at.path, { reveal: { line: (at.line ?? 0) + 1 } });
 	};
 	const procs = () => layout()?.boxes.filter((b) => b.kind === "proc" || b.kind === "top" || b.kind === "fold" || b.kind === "dir") ?? [];
-	/** Folds a script to one node, or unfolds it; the keyboard stays with it. */
-	const toggleFold = (path: string | undefined) => {
+	/**
+	 * The question to put before an unfolding, when the picture it makes is larger than is laid out without asking
+	 * (and larger than any already said yes to): the layout runs on the window's own thread, and "Unfold all" on a
+	 * workspace of some size stopped the window for as long as it took, with nothing said first. Null when there
+	 * is nothing to ask; otherwise whether the answer was yes.
+	 */
+	const unfoldAsk = (what: string, scripts: ReadonlySet<string>, dirs: ReadonlySet<string>): Promise<boolean> | null => {
+		const keep = shown();
+		if (!keep) return null;
+		const size = pictureSize(keep, scripts, { folded: dirs, of: folderOf });
+		if (!asksFirst(size.nodes, agreedNodes)) return null;
+		return chooseAnswer(unfoldQuestion(what, size), ["Unfold"]).then((answer) => {
+			if (answer !== "Unfold") return false;
+			agreedNodes = size.nodes;
+			return true;
+		});
+	};
+	/** Folds a script to one node, or unfolds it; the keyboard stays with it. `asked` when a large unfolding has been said yes to. */
+	const toggleFold = (path: string | undefined, asked = false) => {
 		const g = graph();
 		if (!g || path === undefined || !folding()) return;
 		const next = new Set(folded());
-		if (next.delete(path)) setCurrent(g.nodes.find((n) => n.path === path)?.id ?? `${path}#`);
-		else {
+		if (next.delete(path)) {
+			const ask = asked ? null : unfoldAsk(`Unfold ${baseName(path)}`, next, foldedDirs());
+			if (ask) return void ask.then((yes) => yes && folded().has(path) && toggleFold(path, true));
+			setCurrent(g.nodes.find((n) => n.path === path)?.id ?? `${path}#`);
+		} else {
 			next.add(path);
 			setCurrent(foldId(path));
 		}
 		showNext = path;
 		setFolded(next);
 	};
-	/** Folds a folder's scripts to one node, or unfolds it. */
-	const toggleDir = (folder: string | undefined) => {
+	/** Folds a folder's scripts to one node, or unfolds it. `asked` when a large unfolding has been said yes to. */
+	const toggleDir = (folder: string | undefined, asked = false) => {
 		if (!folder || !folding()) return;
 		const next = new Set(foldedDirs());
 		if (!next.delete(folder)) {
 			next.add(folder);
 			setCurrent(dirId(folder));
-		} else setCurrent(null);
+		} else {
+			const ask = asked ? null : unfoldAsk(`Unfold ${folder}`, folded(), next);
+			if (ask) return void ask.then((yes) => yes && foldedDirs().has(folder) && toggleDir(folder, true));
+			setCurrent(null);
+		}
 		showNext = folder;
 		setFoldedDirs(next);
 	};
@@ -1104,7 +1132,11 @@ export function GraphView() {
 		return folders.size > 1 ? folders : new Set<string>();
 	};
 	const allFolded = () => Boolean(graph()?.scripts.every((s) => folded().has(s.path))) && [...allFolders()].every((f) => foldedDirs().has(f));
-	const foldAll = (all: boolean) => {
+	const foldAll = (all: boolean, asked = false) => {
+		if (!all && !asked) {
+			const ask = unfoldAsk("Unfold all", new Set(), new Set());
+			if (ask) return void ask.then((yes) => yes && foldAll(false, true));
+		}
 		fittedFor = "";
 		setCurrent(null);
 		setFolded(new Set(all ? (graph()?.scripts.map((s) => s.path) ?? []) : []));

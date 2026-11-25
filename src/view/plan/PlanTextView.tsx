@@ -568,24 +568,24 @@ export function PlanTextView(props: {
 	);
 
 	const StepRow = (p: { row: PlanTextRow }) => {
-		const nid = p.row.node.id;
-		const isSelected = () => props.selectedId === nid;
-		const isPeeked = () => props.peekedId === nid && !isSelected();
-		const isFocused = () => focusActive("node", nid);
-		const isAnchor = () => builderOpen() && anchorNodeId() === nid;
-		const chosenBranch = () => choices()[nid];
+		const nid = () => p.row.node.id;
+		const isSelected = () => props.selectedId === nid();
+		const isPeeked = () => props.peekedId === nid() && !isSelected();
+		const isFocused = () => focusActive("node", nid());
+		const isAnchor = () => builderOpen() && anchorNodeId() === nid();
+		const chosenBranch = () => choices()[nid()];
 		const ruledOut = () =>
 			hasActiveFilter() &&
 			choiceMatch().matchingPathIndices.length > 0 &&
-			!choiceMatch().reachableNodeIds.has(nid) &&
+			!choiceMatch().reachableNodeIds.has(nid()) &&
 			!chosenBranch() &&
 			!isAnchor();
-		const onJourney = () => Boolean(props.onPathNodes?.has(nid));
-		const dimmed = () => Boolean(props.onPathNodes && !props.onPathNodes.has(nid)) || ruledOut();
-		const actionable = p.row.node.kind !== "start" && p.row.node.kind !== "end";
-		const isDecision = p.row.node.kind === "decision";
-		const codeState = () => props.codeStateOf(nid);
-		const trouble = () => props.troubleOf(nid);
+		const onJourney = () => Boolean(props.onPathNodes?.has(nid()));
+		const dimmed = () => Boolean(props.onPathNodes && !props.onPathNodes.has(nid())) || ruledOut();
+		const actionable = () => p.row.node.kind !== "start" && p.row.node.kind !== "end";
+		const isDecision = () => p.row.node.kind === "decision";
+		const codeState = () => props.codeStateOf(nid());
+		const trouble = () => props.troubleOf(nid());
 
 		return (
 			<li
@@ -597,20 +597,20 @@ export function PlanTextView(props: {
 						focused: isFocused(),
 						anchored: isAnchor(),
 						decided: builderOpen() && Boolean(chosenBranch()),
-						"on-path": onJourney() || (hasActiveFilter() && choiceMatch().reachableNodeIds.has(nid)),
+						"on-path": onJourney() || (hasActiveFilter() && choiceMatch().reachableNodeIds.has(nid())),
 						"off-path": dimmed(),
 						trouble: Boolean(trouble()?.length),
 					},
 				]}
-				data-plan-node={nid}
+				data-plan-node={nid()}
 				onClick={(e) => {
 					if ((e.target as HTMLElement).closest("button")) return;
-					props.onSelectNode(nid);
+					props.onSelectNode(nid());
 				}}
 			>
 				<div class="plan-text-row-gutter">
 					<span class="plan-text-num">{p.row.index + 1}</span>
-					<Show when={actionable}>
+					<Show when={actionable()}>
 						<span
 							class={`plan-status-dot ${codeState()}`}
 							title={`Code status: ${CODE_INDICATOR_WORDS[codeState()].label} — ${CODE_INDICATOR_WORDS[codeState()].detail}`}
@@ -626,7 +626,7 @@ export function PlanTextView(props: {
 							type="button"
 							class="plan-text-row-title"
 							aria-current={isSelected() ? "true" : undefined}
-							onClick={() => props.onSelectNode(nid)}
+							onClick={() => props.onSelectNode(nid())}
 						>
 							{p.row.node.text.trim() || "(no words yet)"}
 						</button>
@@ -639,14 +639,14 @@ export function PlanTextView(props: {
 							</span>
 						</Show>
 						<span class="spacer" />
-						<Show when={actionable && !builderOpen()}>
+						<Show when={actionable() && !builderOpen()}>
 							<button
 								type="button"
 								class="graph-list-focus plan-text-row-focus"
-								title={`Build a test case for "${p.row.node.text.trim() || nid}"`}
+								title={`Build a test case for "${p.row.node.text.trim() || nid()}"`}
 								onClick={(e) => {
 									e.stopPropagation();
-									openFreshBuilder({ nodeId: nid });
+									openFreshBuilder({ nodeId: nid() });
 								}}
 							>
 								Test
@@ -656,10 +656,10 @@ export function PlanTextView(props: {
 							type="button"
 							class="graph-list-focus plan-text-row-focus"
 							aria-pressed={isFocused() ? "true" : "false"}
-							title={isFocused() ? "Clear focus" : `Show what leads into and out of "${p.row.node.text.trim() || nid}"`}
+							title={isFocused() ? "Clear focus" : `Show what leads into and out of "${p.row.node.text.trim() || nid()}"`}
 							onClick={(e) => {
 								e.stopPropagation();
-								toggleNodeFocus(nid);
+								toggleNodeFocus(nid());
 							}}
 						>
 							{isFocused() ? "Focused" : "Focus"}
@@ -673,10 +673,10 @@ export function PlanTextView(props: {
 					<LinkedDocChips node={p.row.node} />
 
 					<Show when={p.row.links.length > 0}>
-						<ul class="plan-text-links" aria-label={`Next from ${p.row.node.text.trim() || nid}`}>
+						<ul class="plan-text-links" aria-label={`Next from ${p.row.node.text.trim() || nid()}`}>
 							<For each={p.row.links}>
 								{(link) => {
-									const canPick = () => builderOpen() && isDecision && Boolean(link.label);
+									const canPick = () => builderOpen() && isDecision() && Boolean(link.label);
 									const isPicked = () =>
 										Boolean(link.label && chosenBranch()?.toLowerCase() === link.label.toLowerCase());
 									const otherPicked = () => Boolean(chosenBranch() && !isPicked());
@@ -729,7 +729,7 @@ export function PlanTextView(props: {
 													}
 													onClick={(e) => {
 														e.stopPropagation();
-														toggleBranchChoice(nid, link.label!);
+														toggleBranchChoice(nid(), link.label!);
 													}}
 												>
 													<span class="plan-text-pick-mark" aria-hidden="true">
@@ -979,7 +979,7 @@ export function PlanTextView(props: {
 							<div class="plan-text-choice-strip" aria-label="Selected decision choices">
 								<span class="plan-text-choice-strip-label">Chosen branches</span>
 								<div class="plan-text-choice-chips">
-									<For each={chosenEntries()}>
+									<For each={chosenEntries()} keyed={(entry) => entry.nodeId}>
 										{(entry) => (
 											<span class="plan-text-choice-chip">
 												<button
@@ -987,19 +987,20 @@ export function PlanTextView(props: {
 													class="plan-text-choice-chip-go"
 													title="Scroll to this decision"
 													onClick={() => {
-														props.onPeekNode(entry.nodeId, { pan: true });
-														scrollToNode(entry.nodeId);
+														const id = entry().nodeId;
+														props.onPeekNode(id, { pan: true });
+														scrollToNode(id);
 													}}
 												>
-													<span>{shortPhrase(entry.label, 34)}</span>
-													<span class={`plan-test-tag ${toneOf(entry.answer)}`}>{entry.answer}</span>
+													<span>{shortPhrase(entry().label, 34)}</span>
+													<span class={`plan-test-tag ${toneOf(entry().answer)}`}>{entry().answer}</span>
 												</button>
 												<button
 													type="button"
 													class="plan-text-choice-chip-x"
-													title={`Remove "${entry.label}" choice`}
-													aria-label={`Remove ${entry.label}`}
-													onClick={() => toggleBranchChoice(entry.nodeId, entry.answer)}
+													title={`Remove "${entry().label}" choice`}
+													aria-label={`Remove ${entry().label}`}
+													onClick={() => toggleBranchChoice(entry().nodeId, entry().answer)}
 												>
 													<Icon name="close" />
 												</button>
@@ -1111,121 +1112,137 @@ export function PlanTextView(props: {
 					</form>
 				</Show>
 
-				<Show when={!builderOpen() && focusView()} keyed>
-					{(fv) => (
-						<section class="plan-text-around" aria-label="Focused flow neighborhood">
-							<Show
-								when={fv.kind === "node"}
-								fallback={
-									(() => {
-										const sf = fv as Extract<typeof fv, { kind: "stage" }>;
+				<Show when={!builderOpen() && focusView()}>
+					{(fv) => {
+						const nodeFocus = () => {
+							const v = fv();
+							return v.kind === "node" ? v : null;
+						};
+						const stageFocus = () => {
+							const v = fv();
+							return v.kind === "stage" ? v : null;
+						};
+						return (
+							<section class="plan-text-around" aria-label="Focused flow neighborhood">
+								<Show
+									when={nodeFocus()}
+									fallback={
+										<Show when={stageFocus()}>
+											{(sf) => (
+												<>
+													<div class="plan-text-around-head">
+														<span class="plan-stage-dot" style={{ background: regionColor(sf().stageName) }} aria-hidden="true" />
+														<h2>{sf().stageName}</h2>
+														<span class="plan-text-around-badge">
+															Stage · {sf().nodes.length} {sf().nodes.length === 1 ? "step" : "steps"}
+														</span>
+														<span class="spacer" />
+														<button type="button" class="plan-text-around-btn" onClick={() => setFocus(null)}>
+															Show all stages
+														</button>
+													</div>
+													<div class="plan-text-around-cols">
+														<section>
+															<h3>
+																Entered from <span class="count">{sf().enteredFrom.length}</span>
+															</h3>
+															<Show when={sf().enteredFrom.length} fallback={<p class="hint">Nothing outside this stage leads into it.</p>}>
+																<ul>
+																	<For each={sf().enteredFrom}>{(item) => <NeighborItem item={item} />}</For>
+																</ul>
+															</Show>
+														</section>
+														<section>
+															<h3>
+																Leaves to <span class="count">{sf().leavesTo.length}</span>
+															</h3>
+															<Show when={sf().leavesTo.length} fallback={<p class="hint">Nothing leaves this stage.</p>}>
+																<ul>
+																	<For each={sf().leavesTo}>{(item) => <NeighborItem item={item} />}</For>
+																</ul>
+															</Show>
+														</section>
+													</div>
+												</>
+											)}
+										</Show>
+									}
+								>
+									{(nf) => {
+										const nodeNotes = () => {
+											const n = nf().node.notes;
+											return typeof n === "string" && n.trim() ? n : null;
+										};
 										return (
 											<>
 												<div class="plan-text-around-head">
-													<span class="plan-stage-dot" style={{ background: regionColor(sf.stageName) }} aria-hidden="true" />
-													<h2>{sf.stageName}</h2>
-													<span class="plan-text-around-badge">Stage · {sf.nodes.length} {sf.nodes.length === 1 ? "step" : "steps"}</span>
+													<Icon name={KIND_ICONS[nf().node.kind]} class={`plan-text-kind-icon is-${nf().node.kind === "call" ? "step" : nf().node.kind}`} />
+													<h2>{nf().node.text.trim() || nf().node.id}</h2>
+													<span class="plan-text-around-badge">{KIND_LABELS[nf().node.kind]}</span>
+													<Show when={nf().stageName}>
+														{(stageName) => (
+															<span class="plan-text-around-stage">
+																<span class="plan-stage-dot" style={{ background: regionColor(stageName()) }} aria-hidden="true" />
+																<span>{stageName()}</span>
+															</span>
+														)}
+													</Show>
 													<span class="spacer" />
+													<Show when={nf().node.kind !== "start" && nf().node.kind !== "end"}>
+														<button
+															type="button"
+															class="plan-text-around-btn"
+															title="Build a test case for this step"
+															onClick={() => openFreshBuilder({ nodeId: nf().node.id })}
+														>
+															Build test
+														</button>
+													</Show>
+													<button
+														type="button"
+														class="plan-text-around-btn"
+														title="Switch to Chart view centered on this step"
+														onClick={() => props.onShowOnChart(nf().node.id)}
+													>
+														Show on chart
+													</button>
 													<button type="button" class="plan-text-around-btn" onClick={() => setFocus(null)}>
-														Show all stages
+														Clear focus
 													</button>
 												</div>
+												<Show when={nodeNotes()}>
+													{(notesText) => <p class="plan-text-around-notes">{notesText()}</p>}
+												</Show>
+												<LinkedDocChips node={nf().node} marginTop="6px" />
 												<div class="plan-text-around-cols">
 													<section>
 														<h3>
-															Entered from <span class="count">{sf.enteredFrom.length}</span>
+															Comes from <span class="count">{nf().incoming.length}</span>
 														</h3>
-														<Show when={sf.enteredFrom.length} fallback={<p class="hint">Nothing outside this stage leads into it.</p>}>
+														<Show when={nf().incoming.length} fallback={<p class="hint">Nothing leads into this step.</p>}>
 															<ul>
-																<For each={sf.enteredFrom}>{(item) => <NeighborItem item={item} />}</For>
+																<For each={nf().incoming}>{(item) => <NeighborItem item={item} />}</For>
 															</ul>
 														</Show>
 													</section>
 													<section>
 														<h3>
-															Leaves to <span class="count">{sf.leavesTo.length}</span>
+															Goes to <span class="count">{nf().outgoing.length}</span>
 														</h3>
-														<Show when={sf.leavesTo.length} fallback={<p class="hint">Nothing leaves this stage.</p>}>
+														<Show when={nf().outgoing.length} fallback={<p class="hint">The process ends here.</p>}>
 															<ul>
-																<For each={sf.leavesTo}>{(item) => <NeighborItem item={item} />}</For>
+																<For each={nf().outgoing}>{(item) => <NeighborItem item={item} />}</For>
 															</ul>
 														</Show>
 													</section>
 												</div>
 											</>
 										);
-									})()
-								}
-							>
-								{(() => {
-									const nf = fv as Extract<typeof fv, { kind: "node" }>;
-									return (
-										<>
-											<div class="plan-text-around-head">
-												<Icon name={KIND_ICONS[nf.node.kind]} class={`plan-text-kind-icon is-${nf.node.kind === "call" ? "step" : nf.node.kind}`} />
-												<h2>{nf.node.text.trim() || nf.node.id}</h2>
-												<span class="plan-text-around-badge">{KIND_LABELS[nf.node.kind]}</span>
-												<Show when={nf.stageName}>
-													<span class="plan-text-around-stage">
-														<span class="plan-stage-dot" style={{ background: regionColor(nf.stageName!) }} aria-hidden="true" />
-														<span>{nf.stageName}</span>
-													</span>
-												</Show>
-												<span class="spacer" />
-												<Show when={nf.node.kind !== "start" && nf.node.kind !== "end"}>
-													<button
-														type="button"
-														class="plan-text-around-btn"
-														title="Build a test case for this step"
-														onClick={() => openFreshBuilder({ nodeId: nf.node.id })}
-													>
-														Build test
-													</button>
-												</Show>
-												<button
-													type="button"
-													class="plan-text-around-btn"
-													title="Switch to Chart view centered on this step"
-													onClick={() => props.onShowOnChart(nf.node.id)}
-												>
-													Show on chart
-												</button>
-												<button type="button" class="plan-text-around-btn" onClick={() => setFocus(null)}>
-													Clear focus
-												</button>
-											</div>
-											<Show when={typeof nf.node.notes === "string" && nf.node.notes.trim()}>
-												<p class="plan-text-around-notes">{nf.node.notes}</p>
-											</Show>
-											<LinkedDocChips node={nf.node} marginTop="6px" />
-											<div class="plan-text-around-cols">
-												<section>
-													<h3>
-														Comes from <span class="count">{nf.incoming.length}</span>
-													</h3>
-													<Show when={nf.incoming.length} fallback={<p class="hint">Nothing leads into this step.</p>}>
-														<ul>
-															<For each={nf.incoming}>{(item) => <NeighborItem item={item} />}</For>
-														</ul>
-													</Show>
-												</section>
-												<section>
-													<h3>
-														Goes to <span class="count">{nf.outgoing.length}</span>
-													</h3>
-													<Show when={nf.outgoing.length} fallback={<p class="hint">The process ends here.</p>}>
-														<ul>
-															<For each={nf.outgoing}>{(item) => <NeighborItem item={item} />}</For>
-														</ul>
-													</Show>
-												</section>
-											</div>
-										</>
-									);
-								})()}
-							</Show>
-						</section>
-					)}
+									}}
+								</Show>
+							</section>
+						);
+					}}
 				</Show>
 
 				<div class="plan-text-outline">
@@ -1233,48 +1250,50 @@ export function PlanTextView(props: {
 						when={visibleSections().length > 0}
 						fallback={<p class="hint">This plan has no steps yet. Use Palette to add steps, decisions, or stages.</p>}
 					>
-						<For each={visibleSections()}>
+						<For each={visibleSections()} keyed={(s) => s.stageId ?? (s.unreachable ? "__unreachable__" : s.heading ?? "__default__")}>
 							{(section) => (
 								<section
 									class={[
 										"plan-text-section",
 										{
-											staged: Boolean(section.stageId),
-											unreachable: Boolean(section.unreachable),
+											staged: Boolean(section().stageId),
+											unreachable: Boolean(section().unreachable),
 										},
 									]}
 								>
-									<Show when={section.heading}>
+									<Show when={section().heading}>
 										<div class="plan-text-section-head">
-											<Show when={section.stageId}>
-												<span class="plan-stage-dot" style={{ background: regionColor(section.heading!) }} aria-hidden="true" />
+											<Show when={section().stageId}>
+												<span class="plan-stage-dot" style={{ background: regionColor(section().heading!) }} aria-hidden="true" />
 											</Show>
-											<Show when={section.unreachable}>
+											<Show when={section().unreachable}>
 												<Icon name="warning" class="plan-text-warn-icon" />
 											</Show>
-											<h3>{section.heading}</h3>
+											<h3>{section().heading}</h3>
 											<span class="plan-text-section-count">
-												{section.rows.length} {section.rows.length === 1 ? "step" : "steps"}
+												{section().rows.length} {section().rows.length === 1 ? "step" : "steps"}
 											</span>
-											<Show when={section.stageId && !builderOpen()}>
+											<Show when={section().stageId && !builderOpen()}>
 												<button
 													type="button"
 													class="graph-list-focus"
-													aria-pressed={focusActive("stage", section.stageId!) ? "true" : "false"}
+													aria-pressed={focusActive("stage", section().stageId!) ? "true" : "false"}
 													title={
-														focusActive("stage", section.stageId!)
+														focusActive("stage", section().stageId!)
 															? "Show all stages"
-															: `Focus on the "${section.heading}" stage`
+															: `Focus on the "${section().heading}" stage`
 													}
-													onClick={() => toggleStageFocus(section.stageId!)}
+													onClick={() => toggleStageFocus(section().stageId!)}
 												>
-													{focusActive("stage", section.stageId!) ? "Focused" : "Focus"}
+													{focusActive("stage", section().stageId!) ? "Focused" : "Focus"}
 												</button>
 											</Show>
 										</div>
 									</Show>
 									<ol class="plan-text-list">
-										<For each={section.rows}>{(row) => <StepRow row={row} />}</For>
+										<For each={section().rows} keyed={(r) => r.node.id}>
+											{(row) => <StepRow row={row()} />}
+										</For>
 									</ol>
 								</section>
 							)}
@@ -1304,22 +1323,27 @@ export function PlanTextView(props: {
 						}
 					>
 						<ul class="plan-text-test-cards">
-							<For each={planTestsOf(props.plan)}>
+							<For each={planTestsOf(props.plan)} keyed={(tc) => tc.id}>
 								{(tc) => {
-									const stepName = () => (tc.node ? props.plan.nodes.find((n) => n.id === tc.node)?.text.trim() : undefined);
-									const jIdx = () => (tc.journey && tc.journey >= 1 && tc.journey <= props.allPaths.paths.length ? tc.journey - 1 : null);
+									const stepName = () => (tc().node ? props.plan.nodes.find((n) => n.id === tc().node)?.text.trim() : undefined);
+									const jIdx = () => {
+										const j = tc().journey;
+										return j && j >= 1 && j <= props.allPaths.paths.length ? j - 1 : null;
+									};
 									return (
-										<li class={["plan-text-test-card", { editing: editingTestId() === tc.id }]}>
+										<li class={["plan-text-test-card", { editing: editingTestId() === tc().id }]}>
 											<div class="plan-text-test-head">
-												<strong>{tc.title}</strong>
+												<strong>{tc().title}</strong>
 												<div class="plan-text-test-badges">
-													<Show when={stepName() && tc.node}>
+													<Show when={stepName() && tc().node}>
 														<button
 															type="button"
 															class="plan-test-case-step"
 															onClick={() => {
-																props.onSelectNode(tc.node!);
-																scrollToNode(tc.node!);
+																const id = tc().node;
+																if (!id) return;
+																props.onSelectNode(id);
+																scrollToNode(id);
 															}}
 														>
 															<Icon name="play" />
@@ -1333,13 +1357,13 @@ export function PlanTextView(props: {
 															onClick={() => props.onHighlightPath(props.activePathIndex === jIdx() ? null : jIdx())}
 														>
 															<Icon name="eye" />
-															<span>Journey #{tc.journey}</span>
+															<span>Journey #{tc().journey}</span>
 														</button>
 													</Show>
 													<button
 														type="button"
 														class="plan-test-edit-btn"
-														onClick={() => openEditTest(tc)}
+														onClick={() => openEditTest(tc())}
 													>
 														<Icon name="note" />
 														<span>Edit</span>
@@ -1347,28 +1371,28 @@ export function PlanTextView(props: {
 													<button
 														type="button"
 														class="plan-test-delete-btn"
-														onClick={() => props.onRemoveTestCase(tc.id)}
+														onClick={() => props.onRemoveTestCase(tc().id)}
 													>
 														Delete
 													</button>
 												</div>
 											</div>
-											<Show when={tc.given}>
+											<Show when={tc().given}>
 												<div class="plan-text-test-line">
 													<span class="plan-test-kw given">Given</span>
-													<p>{tc.given}</p>
+													<p>{tc().given}</p>
 												</div>
 											</Show>
-											<Show when={tc.expect}>
+											<Show when={tc().expect}>
 												<div class="plan-text-test-line">
 													<span class="plan-test-kw expect">Expect</span>
-													<p>{tc.expect}</p>
+													<p>{tc().expect}</p>
 												</div>
 											</Show>
-											<Show when={tc.notes}>
+											<Show when={tc().notes}>
 												<div class="plan-text-test-line">
 													<span class="plan-test-kw notes">Notes</span>
-													<p>{tc.notes}</p>
+													<p>{tc().notes}</p>
 												</div>
 											</Show>
 										</li>

@@ -421,16 +421,18 @@ function parseSizeAndAlt(raw: string): { alt: string; width?: number; height?: n
 	return { alt: trimmed };
 }
 
-function isWithinRoot(rootDir: string, candidate: string): boolean {
+const ESCAPES_RELATIVE = /^\.\.(?:[\\/]|$)/;
+
+export function isWithinRoot(rootDir: string, candidate: string): boolean {
 	const resolvedRoot = resolve(rootDir);
 	const resolvedCand = resolve(candidate);
 	const rel = relative(resolvedRoot, resolvedCand);
-	if (rel.startsWith("..") || isAbsolute(rel)) return false;
+	if (ESCAPES_RELATIVE.test(rel) || isAbsolute(rel)) return false;
 	try {
 		const realRoot = realpathSync(resolvedRoot);
 		const realCand = realpathSync(resolvedCand);
 		const realRel = relative(realRoot, realCand);
-		if (realRel.startsWith("..") || isAbsolute(realRel)) return false;
+		if (ESCAPES_RELATIVE.test(realRel) || isAbsolute(realRel)) return false;
 	} catch {
 		// Fall back to lexical check when realpathSync isn't applicable.
 	}
@@ -2358,15 +2360,23 @@ function safeDocxLinkUrl(rawUrl: string): string | null {
 	return cleaned.replace(/[()\s<>]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
 }
 
-/** Parses a `.docx` binary archive into clean Markdown + extracted image payloads (+ optional import warnings). */
-export function parseDocxToMarkdown(bytes: Uint8Array): DocxParsedResult {
+/**
+ * Parses a `.docx` binary archive into clean Markdown + extracted image payloads (+ optional import warnings).
+ * Throws, naming the file as `fileName`, when the bytes hold no document that can be read. A document with nothing
+ * written in it is still a document, and reads as no text.
+ */
+export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): DocxParsedResult {
 	const entries = readZipEntries(bytes);
 	const byLower = new Map<string, { name: string; data: Uint8Array }>();
 	for (const [name, data] of entries) byLower.set(name.toLowerCase(), { name, data });
 
 	const dec = new TextDecoder();
 	const docEntry = byLower.get("word/document.xml");
-	if (!docEntry) return { markdown: "", images: [] };
+	// Bytes with no `word/document.xml` to open are not a document with nothing in it. Read as one, an import of
+	// them made an empty Markdown file, and with Overwrite put it in the place of the one that was there.
+	if (!docEntry) {
+		throw new Error(`${fileName} is not a Word document that can be read here. It may be an older .doc file with a .docx name, protected by a password, or incomplete (a download that was cut short).`);
+	}
 	const docXml = resolveAlternateContent(dec.decode(docEntry.data));
 
 	const relsEntry = byLower.get("word/_rels/document.xml.rels");

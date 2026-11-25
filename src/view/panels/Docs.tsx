@@ -942,16 +942,29 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const archiveExpanded = () => Boolean(props.filtered) || archiveOpen();
 	const activeTicketCount = createMemo(() => list().rows.filter((r) => r.kind === "ticket").length);
 	const fold = (row: ReturnType<typeof rows>[number]) => ({ parent: row.parent, shut: row.shut, locked: props.filtered ? LOCKED : undefined, toggle: () => setFold(ticketFold(row.file), !row.shut) });
-	const renderWorkRow = (row: ReturnType<typeof rows>[number], isArchived = false) =>
-		row.kind === "ticket" ? (
-			<ItemRow file={row.file} depth={row.depth + (isArchived ? 1 : 0)} lead={row.file.ticket} linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
-		) : row.kind === "plan" ? (
-			<ItemRow file={{ ...row.file, title: row.file.name.replace(/\.plan\.json$/i, "") }} depth={row.depth + (isArchived ? 1 : 0)} note="plan" linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
-		) : row.kind === "plan-doc" ? (
-			<ItemRow file={{ ...row.file, title: row.file.title || row.file.name.replace(/\.plan\.md$/i, "") }} depth={row.depth + (isArchived ? 1 : 0)} note="plan doc" linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
-		) : (
-			<ItemRow file={row.file} depth={row.depth + (isArchived ? 1 : 0)} note="spec" linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
+	const workRowFile = (row: ReturnType<typeof rows>[number]): DocFile =>
+		row.kind === "plan"
+			? { ...row.file, title: row.file.name.replace(/\.plan\.json$/i, "") }
+			: row.kind === "plan-doc"
+				? { ...row.file, title: row.file.title || row.file.name.replace(/\.plan\.md$/i, "") }
+				: row.file;
+	const workRowNote = (row: ReturnType<typeof rows>[number]): string | undefined =>
+		row.kind === "ticket" ? undefined : row.kind === "plan" ? "plan" : row.kind === "plan-doc" ? "plan doc" : "spec";
+	const renderWorkRow = (row: () => ReturnType<typeof rows>[number], isArchived = false) => {
+		const file = createMemo(() => workRowFile(row()));
+		const rowFold = createMemo(() => fold(row()));
+		return (
+			<ItemRow
+				file={file()}
+				depth={row().depth + (isArchived ? 1 : 0)}
+				lead={row().kind === "ticket" ? row().file.ticket : undefined}
+				note={workRowNote(row())}
+				linkDetail={row().link?.detail}
+				archived={isArchived}
+				fold={rowFold()}
+			/>
 		);
+	};
 	return (
 		<RowGroup fold="docs:work" label="Work" onMenu={(at) => void headMenu("work", "Work", at)} open={props.filtered} count={props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && !isCatalog(d)).length} head={<Head title="Work" folder={folderOf("work")} />} rows={props.files.some((d) => d.group === "tickets" || d.group === "specs")} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
 			<Show when={activeTicketCount() > 1}>
@@ -968,7 +981,9 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 					</button>
 				</div>
 			</Show>
-			<For each={rows()}>{(row) => renderWorkRow(row, false)}</For>
+			<For each={rows()} keyed={(row) => `${row.kind}:${row.file.path}`}>
+				{(row) => renderWorkRow(row, false)}
+			</For>
 			{/* What is done or set aside is not what the list is opened for: beyond a few, it waits behind its count. */}
 			<Show when={everything()}>
 				<Row class="tree-row doc-row doc-more" key="finished-tickets" title={all() ? "Leave out the tickets that are done or set aside" : "Show the tickets that are done or set aside"} onActivate={() => setAll(!all())}>
@@ -976,7 +991,9 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 				</Row>
 			</Show>
 			{/* The same room for a twisty as the rows above, so that the marks line up down the list. */}
-			<For each={list().loose}>{(spec) => <ItemRow file={spec} note={spec.tickets?.length ? `for ${spec.tickets.join(", ")}` : "spec, no ticket"} fold={NO_FOLD} />}</For>
+			<For each={list().loose} keyed={(spec) => spec.path}>
+				{(spec) => <ItemRow file={spec()} note={spec().tickets?.length ? `for ${spec().tickets!.join(", ")}` : "spec, no ticket"} fold={NO_FOLD} />}
+			</For>
 			<Show when={archivedTicketCount() > 0}>
 				<Row
 					class="group-head doc-kind foldable docs-archive-head"
@@ -991,14 +1008,16 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 					<span class="head-words">Archive ({archivedTicketCount()})</span>
 				</Row>
 				<Show when={archiveExpanded()}>
-					<For each={archivedRows()}>{(row) => renderWorkRow(row, true)}</For>
+					<For each={archivedRows()} keyed={(row) => `${row.kind}:${row.file.path}`}>
+						{(row) => renderWorkRow(row, true)}
+					</For>
 				</Show>
 			</Show>
-			<For each={catalogs()}>
+			<For each={catalogs()} keyed={(catalog) => catalog.path}>
 				{(catalog) => (
 					<ItemRow
-						file={catalog}
-						label={catalog.group === "tickets" ? "Ticket Catalog" : catalog.group === "specs" ? "Spec Catalog" : undefined}
+						file={catalog()}
+						label={catalog().group === "tickets" ? "Ticket Catalog" : catalog().group === "specs" ? "Spec Catalog" : undefined}
 						fold={NO_FOLD}
 					/>
 				)}
@@ -1014,16 +1033,20 @@ function Knowledge(props: { files: DocFile[]; empty?: string; filtered?: boolean
 	return (
 		<RowGroup fold="docs:knowledge" label="Knowledge base" onMenu={(at) => void headMenu("knowledge", "Knowledge base", at)} open={props.filtered} count={files().filter((d) => !isCatalog(d)).length} role="group" head={<Head title="Knowledge base" folder={folderOf("knowledge")} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
 			{/* Each kind is a group of its own inside: it folds by itself. */}
-			<For each={kinds()}>
+			<For each={kinds()} keyed={(kind) => kind.id || "other"}>
 				{(kind) => (
-					<RowGroup fold={`docs:knowledge:${kind.id || "other"}`} label={kind.name} onMenu={kind.id ? (at) => void headMenu(`knowledge:${kind.id}` as DocSection, kind.name, at) : undefined} open={props.filtered} count={kind.files.length} headClass="doc-kind" head={kind.name}>
-						<For each={kind.files}>{(file) => <ItemRow file={file} depth={1} />}</For>
+					<RowGroup fold={`docs:knowledge:${kind().id || "other"}`} label={kind().name} onMenu={kind().id ? (at) => void headMenu(`knowledge:${kind().id}` as DocSection, kind().name, at) : undefined} open={props.filtered} count={kind().files.length} headClass="doc-kind" head={kind().name}>
+						<For each={kind().files} keyed={(file) => file.path}>
+							{(file) => <ItemRow file={file()} depth={1} />}
+						</For>
 					</RowGroup>
 				)}
 			</For>
 			<Show when={files().some(isCatalog)}>
 				<div role="listbox" aria-label="The knowledge base's catalog">
-					<For each={files().filter(isCatalog)}>{(catalog) => <ItemRow file={catalog} />}</For>
+					<For each={files().filter(isCatalog)} keyed={(catalog) => catalog.path}>
+						{(catalog) => <ItemRow file={catalog()} />}
+					</For>
 				</div>
 			</Show>
 		</RowGroup>
@@ -1038,22 +1061,29 @@ function Knowledge(props: { files: DocFile[]; empty?: string; filtered?: boolean
  */
 function Schema(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const list = createMemo(() => schemaList(props.files, { configured: state.project?.configured, filtered: props.filtered }));
-	const renderSchemaRows = (items: DocFile[], baseDepth: number, titleDepth: number) => {
-		const mdStems = new Set(
-			items
-				.filter((f) => /\.(md|markdown)$/i.test(f.name))
-				.map((f) => f.name.replace(/\.(md|markdown)$/i, "").toLowerCase()),
+	const SchemaRows = (p: { items: DocFile[]; baseDepth: number; titleDepth: number }) => {
+		const mdStems = createMemo(
+			() =>
+				new Set(
+					p.items
+						.filter((f) => /\.(md|markdown)$/i.test(f.name))
+						.map((f) => f.name.replace(/\.(md|markdown)$/i, "").toLowerCase()),
+				),
 		);
 		return (
-			<For each={items}>
+			<For each={p.items} keyed={(file) => file.path}>
 				{(file) => {
-					const pairedSql =
-						/\.(sql|ddl)$/i.test(file.name) && mdStems.has(file.name.replace(/\.(sql|ddl)$/i, "").toLowerCase());
+					const pairedSql = createMemo(
+						() =>
+							/\.(sql|ddl)$/i.test(file().name) &&
+							mdStems().has(file().name.replace(/\.(sql|ddl)$/i, "").toLowerCase()),
+					);
+					const displayFile = createMemo(() => ({ ...file(), title: schemaRowTitle(file(), p.titleDepth) }));
 					return (
 						<ItemRow
-							file={{ ...file, title: schemaRowTitle(file, titleDepth) }}
-							depth={baseDepth + (pairedSql ? 1 : 0)}
-							note={pairedSql ? "DDL" : undefined}
+							file={displayFile()}
+							depth={p.baseDepth + (pairedSql() ? 1 : 0)}
+							note={pairedSql() ? "DDL" : undefined}
 						/>
 					);
 				}}
@@ -1062,20 +1092,20 @@ function Schema(props: { files: DocFile[]; empty?: string; filtered?: boolean })
 	};
 	return (
 		<RowGroup fold="docs:schema" label="Schema" onMenu={(at) => void headMenu("schema", "Schema", at)} open={props.filtered} count={list().count} role="group" head={<Head title="Schema" folder={folderOf("schema")} />} rows={list().kinds.length + list().top.length > 0 || Boolean(list().catalog)} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
-			<For each={list().kinds}>
+			<For each={list().kinds} keyed={(kind) => kind.id}>
 				{(kind) => (
-					<RowGroup fold={`docs:schema:${kind.id}`} label={kind.name} onMenu={(at) => void headMenu(`schema:${kind.folder}`, kind.name, at)} open={props.filtered} count={kind.count} role={kind.parts.length ? "group" : undefined} headClass="doc-kind" head={kind.name}>
-						<Show when={kind.parts.length} fallback={renderSchemaRows(kind.files, 1, 1)}>
+					<RowGroup fold={`docs:schema:${kind().id}`} label={kind().name} onMenu={(at) => void headMenu(`schema:${kind().folder}`, kind().name, at)} open={props.filtered} count={kind().count} role={kind().parts.length ? "group" : undefined} headClass="doc-kind" head={kind().name}>
+						<Show when={kind().parts.length} fallback={<SchemaRows items={kind().files} baseDepth={1} titleDepth={1} />}>
 							{/* With folders inside it, a kind holds groups: what lies in the kind's own folder is a list beside them. */}
-							<Show when={kind.files.length}>
-								<div role="listbox" aria-label={`${kind.name}, not in a folder of its own`}>
-									{renderSchemaRows(kind.files, 1, 1)}
+							<Show when={kind().files.length}>
+								<div role="listbox" aria-label={`${kind().name}, not in a folder of its own`}>
+									<SchemaRows items={kind().files} baseDepth={1} titleDepth={1} />
 								</div>
 							</Show>
-							<For each={kind.parts}>
+							<For each={kind().parts} keyed={(part) => part.folder}>
 								{(part) => (
-									<RowGroup fold={`docs:schema:${kind.id}/${part.name}`} label={part.name} onMenu={(at) => void headMenu(`schema:${part.folder}`, part.name, at)} open={props.filtered} count={part.files.length} headClass="doc-kind doc-part" head={part.name}>
-										{renderSchemaRows(part.files, 2, 2)}
+									<RowGroup fold={`docs:schema:${kind().id}/${part().name}`} label={part().name} onMenu={(at) => void headMenu(`schema:${part().folder}`, part().name, at)} open={props.filtered} count={part().files.length} headClass="doc-kind doc-part" head={part().name}>
+										<SchemaRows items={part().files} baseDepth={2} titleDepth={2} />
 									</RowGroup>
 								)}
 							</For>
@@ -1085,7 +1115,7 @@ function Schema(props: { files: DocFile[]; empty?: string; filtered?: boolean })
 			</For>
 			<Show when={list().top.length}>
 				<RowGroup fold={SCHEMA_TOP} label="At the top" open={props.filtered} count={list().top.length} headClass="doc-kind" head="At the top">
-					{renderSchemaRows(list().top, 1, 0)}
+					<SchemaRows items={list().top} baseDepth={1} titleDepth={0} />
 				</RowGroup>
 			</Show>
 			<Show when={list().catalog}>
@@ -1102,8 +1132,12 @@ function Registries(props: { files: DocFile[]; empty?: string; filtered?: boolea
 	const files = () => props.files.filter((d) => d.group === "registries");
 	return (
 		<RowGroup fold="docs:registries" label="Registries" onMenu={(at) => void headMenu("registries", "Registries", at)} open={props.filtered} count={files().filter((d) => !isCatalog(d)).length} head={<Head title="Registries" folder={folderOf("registries")} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
-			<For each={files().filter((d) => !isCatalog(d))}>{(file) => <ItemRow file={{ ...file, title: registryTitle(file.name) }} note={progress(file)} short={progressShort(file)} />}</For>
-			<For each={files().filter(isCatalog)}>{(catalog) => <ItemRow file={catalog} />}</For>
+			<For each={files().filter((d) => !isCatalog(d))} keyed={(file) => file.path}>
+				{(file) => <ItemRow file={{ ...file(), title: registryTitle(file().name) }} note={progress(file())} short={progressShort(file())} />}
+			</For>
+			<For each={files().filter(isCatalog)} keyed={(catalog) => catalog.path}>
+				{(catalog) => <ItemRow file={catalog()} />}
+			</For>
 		</RowGroup>
 	);
 }
@@ -1138,9 +1172,13 @@ function Group(props: { title: string; folder?: string; group: DocFile["group"];
 				</Show>
 			}
 		>
-			<For each={nonCatalog()}>{(file) => <DocRow file={file} depth={rowDepth(file)} />}</For>
+			<For each={nonCatalog()} keyed={(file) => file.path}>
+				{(file) => <DocRow file={file()} depth={rowDepth(file())} />}
+			</For>
 			{/* The folder's own catalog last and apart, as the other lists have theirs. */}
-			<For each={files().filter(own)}>{(catalog) => <ItemRow file={catalog} />}</For>
+			<For each={files().filter(own)} keyed={(catalog) => catalog.path}>
+				{(catalog) => <ItemRow file={catalog()} />}
+			</For>
 		</RowGroup>
 	);
 }
@@ -2152,34 +2190,38 @@ export function Docs() {
 				</Show>
 				<Show when={tags().length > 0}>
 					<RowGroup fold="docs:tags" label="Tags" count={tags().length} head={<Head title="Tags" />} rows={true}>
-						<For each={tags()}>
+						<For each={tags()} keyed={(bucket) => bucket.tag}>
 							{(bucket) => (
 								<Row
 									class="tree-row doc-row"
-									classList={{ active: activeTag()?.toLowerCase() === bucket.tag.toLowerCase() }}
-									key={`tag:${bucket.tag}`}
-									title={`#${bucket.tag} (${bucket.count} ${bucket.count === 1 ? "document" : "documents"}). Click to filter; right-click to search or rename.`}
-									onActivate={() => setActiveTag((cur) => (cur?.toLowerCase() === bucket.tag.toLowerCase() ? null : bucket.tag))}
+									classList={{ active: activeTag()?.toLowerCase() === bucket().tag.toLowerCase() }}
+									key={`tag:${bucket().tag}`}
+									title={`#${bucket().tag} (${bucket().count} ${bucket().count === 1 ? "document" : "documents"}). Click to filter; right-click to search or rename.`}
+									onActivate={() => {
+										const tag = bucket().tag;
+										setActiveTag((cur) => (cur?.toLowerCase() === tag.toLowerCase() ? null : tag));
+									}}
 									onMenu={(at) => {
+										const tag = bucket().tag;
 										void (async () => {
-											const FILTER = activeTag()?.toLowerCase() === bucket.tag.toLowerCase() ? "Clear tag filter" : `Filter Docs by #${bucket.tag}`;
-											const SEARCH = `Search workspace for #${bucket.tag} (YAML + prose)`;
-											const RENAME_TAG = `Rename #${bucket.tag} across workspace…`;
-											const picked = await chooseFromMenu(`Tag #${bucket.tag}`, [FILTER, SEARCH, "separator", RENAME_TAG], at);
+											const FILTER = activeTag()?.toLowerCase() === tag.toLowerCase() ? "Clear tag filter" : `Filter Docs by #${tag}`;
+											const SEARCH = `Search workspace for #${tag} (YAML + prose)`;
+											const RENAME_TAG = `Rename #${tag} across workspace…`;
+											const picked = await chooseFromMenu(`Tag #${tag}`, [FILTER, SEARCH, "separator", RENAME_TAG], at);
 											if (!picked) return;
-											if (picked === FILTER) setActiveTag((cur) => (cur?.toLowerCase() === bucket.tag.toLowerCase() ? null : bucket.tag));
+											if (picked === FILTER) setActiveTag((cur) => (cur?.toLowerCase() === tag.toLowerCase() ? null : tag));
 											else if (picked === SEARCH) {
-												searchFor(tagSearchPattern(bucket.tag), { regex: true, include: "", exclude: "" });
+												searchFor(tagSearchPattern(tag), { regex: true, include: "", exclude: "" });
 											} else if (picked === RENAME_TAG) {
 												const { renameTagAcrossWorkspace } = await import("../projectDocs");
-												await renameTagAcrossWorkspace(bucket.tag);
+												await renameTagAcrossWorkspace(tag);
 											}
 										})();
 									}}
 								>
 									<Icon name="tag" class="icon" />
-									<span class="label">#{bucket.tag}</span>
-									<span class="meta">{bucket.count}</span>
+									<span class="label">#{bucket().tag}</span>
+									<span class="meta">{bucket().count}</span>
 								</Row>
 							)}
 						</For>

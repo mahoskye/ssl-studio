@@ -422,6 +422,9 @@ export function ReviewView() {
 		const original = monaco.editor.createModel(r.original, r.language);
 		const proposed = (proposedModel = monaco.editor.createModel(r.proposed, r.language));
 		if (r.original.includes("\n")) proposed.setEOL(original.getEndOfLineSequence());
+		// The Code font is given here as well as in the effect below: that effect's first run comes before this
+		// editor exists, so until a setting changed both sides showed Monaco's own font.
+		const codeFont = state.settings.codeFont?.trim() ? resolveFontStack(state.settings.codeFont, DEFAULT_CODE_FONT) : undefined;
 		const diff = (editor = monaco.editor.createDiffEditor(host, {
 			automaticLayout: true,
 			renderSideBySide: diffLayout() !== "inline",
@@ -429,6 +432,7 @@ export function ReviewView() {
 			originalEditable: false,
 			readOnly: isReadOnly,
 			fontSize: state.settings.fontSize,
+			...(codeFont ? { fontFamily: codeFont } : {}),
 			fixedOverflowWidgets: true,
 			selectionClipboard: false,
 		}));

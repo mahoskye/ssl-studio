@@ -347,6 +347,32 @@ function checkXmlTagBalance(text: string): string | null {
 	return null;
 }
 
+/**
+ * An element that holds no other element and whose text the XML printer does not take for text: spaces or tabs
+ * alone (`<Text> </Text>`), or character references alone (`<Operator>&lt;</Operator>`), with or without space
+ * about them. Told to keep text as it is, the printer still empties the first and sets the second on a line of its
+ * own between two indents, and either is a change to what the element says. The open tag is matched whole, quoted
+ * values and all, and the text must run up to the close tag of the same name: space between two elements is layout.
+ */
+const XML_QUIET_LEAF = /(<([^\s<>\/!?=]+)(?:\s+[^\s=<>\/]+\s*=\s*(?:"[^"<]*"|'[^'<]*'))*\s*>)((?:[ \t\r\n]|&[^;<&\s]+;)+)(?=<\/\2\s*>)/g;
+
+/** Characters no file is likely to hold: the first one this text does not hold marks the text of `XML_QUIET_LEAF`. */
+const XML_MARKS = Array.from({ length: 16 }, (_, i) => String.fromCharCode(0xe000 + i));
+
+/**
+ * The text with a mark put before the text of each such element, for the printer to see text there and leave it
+ * as it is; the mark is taken out of what it prints. An element with nothing in it but the break between its two
+ * tags is left to the printer: that is layout, and it closes the element in one tag.
+ */
+function markXmlQuietLeaves(text: string): { text: string; mark: string | null } {
+	const mark = XML_MARKS.find((ch) => !text.includes(ch));
+	if (!mark) return { text, mark: null };
+	const marked = text.replace(XML_QUIET_LEAF, (whole: string, open: string, _name: string, content: string) =>
+		content.includes("&") || !/[\r\n]/.test(content) ? `${open}${mark}${content}` : whole,
+	);
+	return marked === text ? { text, mark: null } : { text: marked, mark };
+}
+
 export async function formatDocument(
 	req: FormatDocumentRequest,
 	workspaceRoot?: string | null,
@@ -428,7 +454,12 @@ export async function formatDocument(
 		...(parser === "markdown" ? { proseWrap: "preserve", embeddedLanguageFormatting: "off" } : {}),
 		...(parser === "xml"
 			? {
-					xmlWhitespaceSensitivity: "ignore",
+					// Formatting changes the layout, not what the file says. "ignore" was the setting here, and it
+					// rewrote the text of elements: runs of spaces became one, the space at either end went, in a
+					// form's captions and inside the string literals of its scripts. "preserve" prints text as it
+					// is written and still indents elements that hold only elements. A project that wants the
+					// printer's own way with text asks for it in its Prettier config, which is laid over this.
+					xmlWhitespaceSensitivity: "preserve",
 					xmlSelfClosingSpace: true,
 					xmlQuoteAttributes: "preserve",
 				}
@@ -451,6 +482,12 @@ export async function formatDocument(
 				const formatted = `${cleanHeader}${formattedRest}`;
 				return { ok: true, text: formatted, changed: formatted !== text, formatter: "prettier" };
 			}
+		}
+		if (parser === "xml" && options.xmlWhitespaceSensitivity === "preserve") {
+			const marked = markXmlQuietLeaves(text);
+			const printed = await prettier.format(marked.text, options);
+			const formatted = marked.mark ? printed.split(marked.mark).join("") : printed;
+			return { ok: true, text: formatted, changed: formatted !== text, formatter: "prettier" };
 		}
 		const formatted = await prettier.format(text, options);
 		return { ok: true, text: formatted, changed: formatted !== text, formatter: "prettier" };

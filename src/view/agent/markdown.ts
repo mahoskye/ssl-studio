@@ -26,14 +26,46 @@ const FORBIDDEN = [
 const FORBIDDEN_ATTRS = [
 	"style", "background", "poster", "src", "srcset", "ping",
 	"action", "formaction", "popover", "popovertarget", "command", "commandfor",
+	// How the window's own styles and scripts find things (see replyKeepsAttribute).
+	"id", "name",
 ];
 
 export const REPLY_PURIFY_CONFIG = {
 	FORBID_TAGS: FORBIDDEN,
 	FORBID_ATTR: FORBIDDEN_ATTRS,
 	ALLOW_DATA_ATTR: false,
-	ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|ticket|wiki|file-ref):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
+	// The hyphens are escaped: unescaped, `.-:` was a range (it took in `/` and the digits and left `-` out), so a
+	// link to `docs/spec.md` or `spec2.md` lost its address while `ms-msdt:` and `search-ms:` kept theirs.
+	ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|ticket|wiki|file-ref):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
 };
+
+/**
+ * Whether an element of a reply keeps an attribute the lists above let through. A class is how the window's own
+ * styles are given, and a reply is not the window: `<div class="overlay"><div class="dialog">…` drew itself over
+ * the whole window as one of the app's dialogs, with a live link in it, and came back with the saved conversation.
+ * The one class kept is a code block's language, which the Markdown renderer writes and the highlighter reads.
+ */
+export function replyKeepsAttribute(tag: string, name: string, value: string): boolean {
+	const attr = name.toLowerCase();
+	if (attr === "id" || attr === "name") return false;
+	if (attr === "class") return tag.toLowerCase() === "code" && /^language-[\w+#.-]+$/.test(value);
+	return true;
+}
+
+let replySanitizer: typeof DOMPurify | undefined;
+
+/** A sanitiser of the replies' own: the rule above is a hook, and a hook on the shared one would strip the classes of every rendered document. */
+function sanitizer(): typeof DOMPurify {
+	if (!replySanitizer) {
+		replySanitizer = typeof window === "undefined" ? DOMPurify : DOMPurify(window);
+		if (replySanitizer !== DOMPurify) {
+			replySanitizer.addHook("uponSanitizeAttribute", (node, data) => {
+				if (!replyKeepsAttribute(node.nodeName, data.attrName, data.attrValue)) data.keepAttr = false;
+			});
+		}
+	}
+	return replySanitizer;
+}
 
 const WORKSPACE_FILE_EXT = "(?:ssl|srvscr|ds|sql|ddl|pks|pkb|xfd|hl7|astm|ini|config|svg|md|markdown|csv|tsv|json|toml|ya?ml|xml|xsd|txt|ts|tsx|js|css)";
 const SINGLE_FILE_COLON_LINK_RE = new RegExp(`\\[([^\\]]+)\\]\\(([^\\s()/:]+\\.${WORKSPACE_FILE_EXT}:\\d+(?:-\\d+)?)\\)`, "gi");
@@ -122,7 +154,7 @@ export function renderReply(text: string): string {
 	};
 	const prepared = rewriteFileLinksBeforeParse(text);
 	const html = marked.parse(prepared, { async: false, gfm: true }) as string;
-	const clean = DOMPurify.sanitize(html, REPLY_PURIFY_CONFIG);
+	const clean = sanitizer().sanitize(html, REPLY_PURIFY_CONFIG);
 	return finishMarkdown(clean, { tickets: tickets.length ? tickets : undefined, named });
 }
 

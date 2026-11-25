@@ -364,7 +364,8 @@ describe("Solid 2.0.3 Audit — StyleProfile.tsx & Settings.tsx", () => {
 		expect(src).toContain("const NumberInput =");
 		expect(src).toContain("const displayedText = createMemo(() => String(displayed(props.field.path) ?? \"\"));");
 		expect(src).toContain("const [draft, setDraft] = createSignal(untrack(displayedText));");
-		expect(src).toContain("onInput={(e) => setDraft(e.currentTarget.value)}");
+		// The draft takes what the field can read: an unreadable number so far ("12e") reports "" and is not mirrored.
+		expect(src).toContain("if (!e.currentTarget.validity.badInput) setDraft(e.currentTarget.value);");
 		expect(src).toContain('innerHTML={preview()?.html ?? ""}');
 		expect(src).not.toContain("preview.latest");
 

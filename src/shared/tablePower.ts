@@ -3,6 +3,7 @@
 // progression, Markdown table serialization, Regex/Whole-Word/In-Selection cell
 // matching, measured virtual-window math, auto-fit row sampling, and unified
 // URL / ticket / schema / inline-issue classification. No DOM, Solid, or Monaco.
+import { compareCellText } from "./csv";
 import { isInside, relativeTo } from "./paths";
 import { keyOf } from "./registryTickets";
 
@@ -59,7 +60,7 @@ export function compareRowsBySorts<T>(
 	for (const spec of sorts) {
 		const va = getCellText(a, spec.column);
 		const vb = getCellText(b, spec.column);
-		const cmp = va.localeCompare(vb, undefined, { numeric: true, sensitivity: "base" });
+		const cmp = compareCellText(va, vb);
 		if (cmp !== 0) return spec.down ? -cmp : cmp;
 	}
 	return 0;
@@ -909,4 +910,50 @@ export function nextTableIssueIndex(
 		if (item.r < ar || (item.r === ar && item.c < ac)) return item.origIdx;
 	}
 	return ranked[ranked.length - 1]!.origIdx;
+}
+
+// --- Paste Start & Open Cell Editor Guard ------------------------------------
+
+/**
+ * Where a paste starts, among the rows and columns as they are shown: the top-left cell of a selection of more
+ * than one cell, as in Excel and Sheets, whichever corner the selection was dragged or extended to. A cell that is
+ * selected alone is where its paste starts (`visRow` and `visCol` are then the active cell's, as given).
+ */
+export function pasteStart(
+	activeVisRow: number,
+	activeVisCol: number,
+	range: { r1: number; c1: number; isMulti: boolean } | null,
+): { visRow: number; visCol: number } {
+	return range && range.isMulti ? { visRow: range.r1, visCol: range.c1 } : { visRow: activeVisRow, visCol: activeVisCol };
+}
+
+/**
+ * Tells an open cell editor whether the text is still the one it was opened on. An editor writes to the row and
+ * column it was opened on, which are places in the text as it was then; after a reload from disk with rows added
+ * above, or an edit from another view, the same numbers are another cell. The editor keeps `stamp()` from when it
+ * opens and writes only while `fresh(stamp)`; the view calls `changed()` for every change of the text, and runs an
+ * editor's own write inside `commit`, so that it is not counted against the editor that Tab or Enter opens next.
+ */
+export function cellEditGuard() {
+	let foreign = 0;
+	let committing = 0;
+	return {
+		/** Runs an editor's own write to the text. */
+		commit<T>(write: () => T): T {
+			committing++;
+			try {
+				return write();
+			} finally {
+				committing--;
+			}
+		},
+		/** For every change of the text: says whether it came from somewhere other than an editor's own write. */
+		changed(): boolean {
+			if (committing > 0) return false;
+			foreign++;
+			return true;
+		},
+		stamp: (): number => foreign,
+		fresh: (stamp: number): boolean => stamp === foreign,
+	};
 }

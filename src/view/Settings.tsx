@@ -125,6 +125,10 @@ function DraftInput(props: {
 			onKeyDown={props.onKeyDown}
 			onInput={(e) => {
 				seq++;
+				// A number field that cannot read what is typed so far ("14e", "-") reports an empty value. Mirrored
+				// into the draft, the binding wrote that empty value back and wiped the typing: the draft waits for
+				// something the field can read.
+				if (e.currentTarget.validity.badInput) return;
 				setDraft(e.currentTarget.value);
 			}}
 			onChange={(e) => {
@@ -138,6 +142,11 @@ function DraftInput(props: {
 						if (el.value !== next) el.value = next;
 					}
 				};
+				// Left unreadable: back to what is saved, not read as empty (and so saved as the default).
+				if (el.validity.badInput) {
+					apply(false);
+					return;
+				}
 				const res = props.onCommit(el.value, el);
 				if (res !== null && typeof res === "object") {
 					void res.then(apply, () => apply(false));
@@ -344,15 +353,19 @@ export function SettingsDialog() {
 
 	const parsedOklch = () => parseOklchThemeId(state.settings.theme);
 	const isWarmMode = () => state.settings.theme === "system" || parsedOklch() !== null;
+	const themeSelectValue = () => (isWarmMode() ? "__warm__" : state.settings.theme);
 	const activeMaterial = (): ThemeMaterial => {
 		const p = parsedOklch();
 		if (p) return p.material;
 		return isThemeMaterial(state.settings.themeMaterial) ? state.settings.themeMaterial : DEFAULT_MATERIAL;
 	};
-	const pickTone = (tone: "system" | ThemeTone) => {
+	const pickTone = async (tone: "system" | ThemeTone): Promise<boolean> => {
 		const mat = activeMaterial();
-		if (tone === "system") void saveSetting({ theme: "system", themeMaterial: mat }, scopeOf("theme")).then(loadLayers);
-		else void saveSetting({ theme: oklchThemeId(tone, mat), themeMaterial: mat }, scopeOf("theme")).then(loadLayers);
+		const patch: SettingsPatch =
+			tone === "system" ? { theme: "system", themeMaterial: mat } : { theme: oklchThemeId(tone, mat), themeMaterial: mat };
+		const saved = Boolean(await saveSetting(patch, scopeOf("theme")));
+		await loadLayers();
+		return saved;
 	};
 	const pickMaterial = (mat: ThemeMaterial) => {
 		const p = parsedOklch();
@@ -372,12 +385,18 @@ export function SettingsDialog() {
 					id={p.id}
 					aria-describedby={p.hintId}
 					value={selectValue()}
-					onChange={(e) => {
-						const val = e.currentTarget.value;
-						if (val === "__custom__") setCustomizing(true);
-						else {
-							setCustomizing(false);
-							void save(p.setting, val);
+					onChange={async (e) => {
+						const el = e.currentTarget;
+						const val = el.value;
+						if (val === "__custom__") {
+							setCustomizing(true);
+							return;
+						}
+						const wasCustomizing = untrack(customizing);
+						setCustomizing(false);
+						if (!(await save(p.setting, val))) {
+							if (wasCustomizing) setCustomizing(true);
+							el.value = untrack(selectValue);
 						}
 					}}
 				>
@@ -431,72 +450,85 @@ export function SettingsDialog() {
 				<div class="settings-body" onMouseDown={() => setCapturing(null)}>
 					<Section title="Appearance" when={groups.appearance()}>
 						<Row group="Appearance" label={ROWS.theme[0]} hint={ROWS.theme[1]} setting="theme" wide>
-							{(ids) => (
-								<div class="settings-theme">
-									<div class="settings-theme-bar" role="group" aria-label="Surface tone" aria-describedby={ids.hint}>
-										<button
-											type="button"
-											aria-pressed={state.settings.theme === "system" ? "true" : "false"}
-											class={{ active: state.settings.theme === "system" }}
-											onClick={() => pickTone("system")}
-										>
-											System
-										</button>
-										<For each={TONES}>
-											{(tone) => (
-												<button
-													type="button"
-													aria-pressed={parsedOklch()?.tone === tone ? "true" : "false"}
-													class={{ active: parsedOklch()?.tone === tone }}
-													onClick={() => pickTone(tone)}
-												>
-													{TONE_INFO[tone].label}
-												</button>
-											)}
-										</For>
-									</div>
-									<div class="settings-theme-materials" role="group" aria-label="Material finish">
-										<For each={MATERIALS}>
-											{(mat) => {
-												const info = MATERIAL_INFO[mat];
-												const active = () => isWarmMode() && activeMaterial() === mat;
-												return (
+							{(ids) => {
+								let themeSelectEl: HTMLSelectElement | undefined;
+								createEffect(
+									() => [state.themes, themeSelectValue()] as const,
+									([, val]) => {
+										if (themeSelectEl && themeSelectEl.value !== val) themeSelectEl.value = val;
+									},
+								);
+								return (
+									<div class="settings-theme">
+										<div class="settings-theme-bar" role="group" aria-label="Surface tone" aria-describedby={ids.hint}>
+											<button
+												type="button"
+												aria-pressed={state.settings.theme === "system" ? "true" : "false"}
+												class={{ active: state.settings.theme === "system" }}
+												onClick={() => void pickTone("system")}
+											>
+												System
+											</button>
+											<For each={TONES}>
+												{(tone) => (
 													<button
 														type="button"
-														class={["settings-swatch", { active: active() }]}
-														aria-pressed={active() ? "true" : "false"}
-														onClick={() => pickMaterial(mat)}
+														aria-pressed={parsedOklch()?.tone === tone ? "true" : "false"}
+														class={{ active: parsedOklch()?.tone === tone }}
+														onClick={() => void pickTone(tone)}
 													>
-														<span class="settings-swatch-dot" style={{ background: info.swatch }} aria-hidden="true" />
-														<span>{info.label}</span>
+														{TONE_INFO[tone].label}
 													</button>
-												);
-											}}
-										</For>
+												)}
+											</For>
+										</div>
+										<div class="settings-theme-materials" role="group" aria-label="Material finish">
+											<For each={MATERIALS}>
+												{(mat) => {
+													const info = MATERIAL_INFO[mat];
+													const active = () => isWarmMode() && activeMaterial() === mat;
+													return (
+														<button
+															type="button"
+															class={["settings-swatch", { active: active() }]}
+															aria-pressed={active() ? "true" : "false"}
+															onClick={() => pickMaterial(mat)}
+														>
+															<span class="settings-swatch-dot" style={{ background: info.swatch }} aria-hidden="true" />
+															<span>{info.label}</span>
+														</button>
+													);
+												}}
+											</For>
+										</div>
+										<div class="settings-theme-extra">
+											<select
+												ref={themeSelectEl}
+												id={ids.control}
+												aria-label="Classic or imported theme"
+												aria-describedby={ids.hint}
+												value={themeSelectValue()}
+												onChange={async (e) => {
+													const el = e.currentTarget;
+													const val = el.value;
+													const saved = val === "__warm__" ? await pickTone("system") : await save("theme", val);
+													if (!saved) el.value = untrack(themeSelectValue);
+												}}
+											>
+												<option value="__warm__">Warm Material (chosen above)</option>
+												<option value="dark">Studio Dark (Classic)</option>
+												<option value="light">Studio Light (Classic)</option>
+												<For each={state.themes} keyed={(t) => t.id}>
+													{(t) => <option value={t().id}>{t().name}</option>}
+												</For>
+											</select>
+											<button type="button" onClick={() => void importTheme()}>
+												Import…
+											</button>
+										</div>
 									</div>
-									<div class="settings-theme-extra">
-										<select
-											id={ids.control}
-											aria-label="Classic or imported theme"
-											aria-describedby={ids.hint}
-											value={isWarmMode() ? "__warm__" : state.settings.theme}
-											onChange={(e) => {
-												const val = e.currentTarget.value;
-												if (val === "__warm__") pickTone("system");
-												else void save("theme", val);
-											}}
-										>
-											<option value="__warm__">Warm Material (chosen above)</option>
-											<option value="dark">Studio Dark (Classic)</option>
-											<option value="light">Studio Light (Classic)</option>
-											<For each={state.themes}>{(t) => <option value={t.id}>{t.name}</option>}</For>
-										</select>
-										<button type="button" onClick={() => void importTheme()}>
-											Import…
-										</button>
-									</div>
-								</div>
-							)}
+								);
+							}}
 						</Row>
 						<Row group="Appearance" label={ROWS.uiScale[0]} hint={ROWS.uiScale[1]} setting="uiScale">
 							{(ids) => (
@@ -545,12 +577,34 @@ export function SettingsDialog() {
 							{(ids) => <FontControl id={ids.control} hintId={ids.hint} setting="readFont" presets={READ_FONT_PRESETS} placeholder="e.g. Source Serif 4" />}
 						</Row>
 						<Row group="Appearance" label={ROWS.menuBar[0]} hint={ROWS.menuBar[1]} setting="menuBar">
-							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.menuBar !== false} onChange={(e) => void save("menuBar", e.currentTarget.checked)} />}
+							{(ids) => (
+								<input
+									id={ids.control}
+									aria-describedby={ids.hint}
+									type="checkbox"
+									checked={state.settings.menuBar !== false}
+									onChange={async (e) => {
+										const el = e.currentTarget;
+										if (!(await save("menuBar", el.checked))) el.checked = untrack(() => state.settings.menuBar !== false);
+									}}
+								/>
+							)}
 						</Row>
 					</Section>
 					<Section title="Editor" when={groups.editor()}>
 						<Row group="Editor" label={ROWS.formatOnSave[0]} hint={ROWS.formatOnSave[1]} setting="formatOnSave">
-							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.formatOnSave} onChange={(e) => void save("formatOnSave", e.currentTarget.checked)} />}
+							{(ids) => (
+								<input
+									id={ids.control}
+									aria-describedby={ids.hint}
+									type="checkbox"
+									checked={state.settings.formatOnSave}
+									onChange={async (e) => {
+										const el = e.currentTarget;
+										if (!(await save("formatOnSave", el.checked))) el.checked = untrack(() => state.settings.formatOnSave);
+									}}
+								/>
+							)}
 						</Row>
 						<Row group="Editor" label={ROWS.sqlDialect[0]} hint={ROWS.sqlDialect[1]} setting="sqlDialect">
 							{(ids) => (
@@ -558,17 +612,42 @@ export function SettingsDialog() {
 									id={ids.control}
 									aria-describedby={ids.hint}
 									value={state.settings.sqlDialect ?? DEFAULT_SQL_DIALECT}
-									onChange={(e) => void save("sqlDialect", e.currentTarget.value as SqlDialect)}
+									onChange={async (e) => {
+										const el = e.currentTarget;
+										if (!(await save("sqlDialect", el.value as SqlDialect))) el.value = untrack(() => state.settings.sqlDialect ?? DEFAULT_SQL_DIALECT);
+									}}
 								>
 									<For each={SQL_DIALECTS}>{(d) => <option value={d.id}>{d.label}</option>}</For>
 								</select>
 							)}
 						</Row>
 						<Row group="Editor" label={ROWS.minimap[0]} hint={ROWS.minimap[1]} setting="minimap">
-							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.minimap} onChange={(e) => void save("minimap", e.currentTarget.checked)} />}
+							{(ids) => (
+								<input
+									id={ids.control}
+									aria-describedby={ids.hint}
+									type="checkbox"
+									checked={state.settings.minimap}
+									onChange={async (e) => {
+										const el = e.currentTarget;
+										if (!(await save("minimap", el.checked))) el.checked = untrack(() => state.settings.minimap);
+									}}
+								/>
+							)}
 						</Row>
 						<Row group="Editor" label={ROWS.wordWrap[0]} hint={ROWS.wordWrap[1]} setting="wordWrap">
-							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={Boolean(state.settings.wordWrap)} onChange={(e) => void save("wordWrap", e.currentTarget.checked)} />}
+							{(ids) => (
+								<input
+									id={ids.control}
+									aria-describedby={ids.hint}
+									type="checkbox"
+									checked={Boolean(state.settings.wordWrap)}
+									onChange={async (e) => {
+										const el = e.currentTarget;
+										if (!(await save("wordWrap", el.checked))) el.checked = untrack(() => Boolean(state.settings.wordWrap));
+									}}
+								/>
+							)}
 						</Row>
 						<Row group="Editor" label={ROWS.livePreview[0]} hint={ROWS.livePreview[1]} setting="livePreview">
 							{(ids) => (
@@ -577,10 +656,11 @@ export function SettingsDialog() {
 									aria-describedby={ids.hint}
 									type="checkbox"
 									checked={state.settings.livePreview !== false}
-									onChange={(e) => {
-										const checked = e.currentTarget.checked;
-										syncLivePreviewMode(checked);
-										void save("livePreview", checked);
+									onChange={async (e) => {
+										const el = e.currentTarget;
+										const checked = el.checked;
+										if (await save("livePreview", checked)) syncLivePreviewMode(checked);
+										else el.checked = untrack(() => state.settings.livePreview !== false);
 									}}
 								/>
 							)}
@@ -592,15 +672,42 @@ export function SettingsDialog() {
 									aria-describedby={ids.hint}
 									type="checkbox"
 									checked={state.settings.markdownReadingHighlight !== false}
-									onChange={(e) => void save("markdownReadingHighlight", e.currentTarget.checked)}
+									onChange={async (e) => {
+										const el = e.currentTarget;
+										if (!(await save("markdownReadingHighlight", el.checked))) {
+											el.checked = untrack(() => state.settings.markdownReadingHighlight !== false);
+										}
+									}}
 								/>
 							)}
 						</Row>
 						<Row group="Editor" label={ROWS.inlayHints[0]} hint={ROWS.inlayHints[1]} setting="inlayHints">
-							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.inlayHints !== false} onChange={(e) => void save("inlayHints", e.currentTarget.checked)} />}
+							{(ids) => (
+								<input
+									id={ids.control}
+									aria-describedby={ids.hint}
+									type="checkbox"
+									checked={state.settings.inlayHints !== false}
+									onChange={async (e) => {
+										const el = e.currentTarget;
+										if (!(await save("inlayHints", el.checked))) el.checked = untrack(() => state.settings.inlayHints !== false);
+									}}
+								/>
+							)}
 						</Row>
 						<Row group="Editor" label={ROWS.rulers[0]} hint={ROWS.rulers[1]} setting="rulers">
-							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.rulers !== false} onChange={(e) => void save("rulers", e.currentTarget.checked)} />}
+							{(ids) => (
+								<input
+									id={ids.control}
+									aria-describedby={ids.hint}
+									type="checkbox"
+									checked={state.settings.rulers !== false}
+									onChange={async (e) => {
+										const el = e.currentTarget;
+										if (!(await save("rulers", el.checked))) el.checked = untrack(() => state.settings.rulers !== false);
+									}}
+								/>
+							)}
 						</Row>
 						<Row group="Editor" label={ROWS.rulerMargin[0]} hint={ROWS.rulerMargin[1]} setting="rulerMargin">
 							{(ids) => (
@@ -632,7 +739,12 @@ export function SettingsDialog() {
 											aria-describedby={ids.hint}
 											type="checkbox"
 											checked={cfg().badgeFormatting}
-											onChange={(e) => void save("csvTable", { ...cfg(), badgeFormatting: e.currentTarget.checked })}
+											onChange={async (e) => {
+												const el = e.currentTarget;
+												if (!(await save("csvTable", { ...cfg(), badgeFormatting: el.checked }))) {
+													el.checked = untrack(() => cfg().badgeFormatting);
+												}
+											}}
 										/>
 										<Show when={Boolean(state.settings.csvTable)}>
 											<button

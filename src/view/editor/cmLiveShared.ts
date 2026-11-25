@@ -178,6 +178,101 @@ export function applyMarkdownFormatToTextarea(el: HTMLTextAreaElement, actionId:
 	return false;
 }
 
+/**
+ * Tags a document's own HTML may not bring into the window when its Markdown is rendered in a callout, a table
+ * cell, a `<details>` block, an embedded note or a hover card. DOMPurify's defaults stop script and let these
+ * through: a `<style>` in a callout restyled the whole app (a document outlined the status bar in red), and a
+ * `<form>` with its button stood in a table cell. Kept out: what styles or re-points the window, what takes
+ * input or sends it, what loads another document, what opens over the page or links from an image, and drawings
+ * (`<svg>`, `<math>`), which bring links and styles of their own. A picture is an `<img>`, which stays. An
+ * `<input>` is not listed because a task list's checkbox is one: renderedKeepsElement decides it.
+ */
+const RENDERED_FORBID_TAGS = [
+	"style", "link", "meta", "base",
+	"form", "button", "select", "option", "optgroup", "datalist", "textarea",
+	"script", "iframe", "frame", "frameset", "object", "embed",
+	"dialog", "area", "map",
+	"svg", "math",
+];
+
+/** Attributes that send, or open something over the page, on the elements that are left. */
+const RENDERED_FORBID_ATTR = ["action", "formaction", "ping", "usemap", "popover", "popovertarget", "command", "commandfor"];
+
+export const RENDERED_PURIFY_CONFIG = { FORBID_TAGS: RENDERED_FORBID_TAGS, FORBID_ATTR: RENDERED_FORBID_ATTR };
+
+/**
+ * Whether an element the lists above let through stays. The one `<input>` rendered Markdown needs is the
+ * checkbox of a task list (`- [ ] item`), which a callout finds and ties to its line of the document. Any other
+ * is a field to type in, and the document has no use for what is typed.
+ */
+export function renderedKeepsElement(tag: string, type: string | null | undefined): boolean {
+	return tag.toLowerCase() !== "input" || (type ?? "").trim().toLowerCase() === "checkbox";
+}
+
+let renderedSanitizer: typeof DOMPurify | undefined;
+
+/** A sanitiser of the rendered documents' own: the rule above is a hook, and a hook on the shared one would run for every other caller of it. */
+function sanitizer(): typeof DOMPurify {
+	if (!renderedSanitizer) {
+		renderedSanitizer = typeof window === "undefined" ? DOMPurify : DOMPurify(window);
+		if (renderedSanitizer !== DOMPurify && renderedSanitizer.isSupported) {
+			renderedSanitizer.addHook("uponSanitizeElement", (node, data) => {
+				const type = (node as Partial<Element>).getAttribute?.("type");
+				if (!renderedKeepsElement(data.tagName, type)) node.parentNode?.removeChild(node);
+			});
+		}
+	}
+	return renderedSanitizer;
+}
+
+/** The HTML of a document's rendered Markdown, with what may not stand in the window taken out. */
+export function sanitizeRendered(html: string): string {
+	return sanitizer().sanitize(html, RENDERED_PURIFY_CONFIG);
+}
+
+/**
+ * The address of the link a click on `target` would follow: that of the nearest anchor it stands in, HTML or SVG
+ * (a Mermaid flowchart's `click A href "…"` draws an `<a xlink:href>`), or of the area of an image map. As
+ * written, and "" for a link that names none; null when the target stands in no link below `within`.
+ */
+export function clickedLink(target: unknown, within?: unknown): string | null {
+	const from = target as Node | null;
+	let el: Element | null = !from ? null : from.nodeType === 1 ? (from as Element) : (from.parentElement ?? null);
+	for (; el && el !== within; el = el.parentElement) {
+		if (el.localName === "a" || el.localName === "area") return el.getAttribute("href") ?? el.getAttribute("xlink:href") ?? "";
+	}
+	return null;
+}
+
+/**
+ * Keeps a click in rendered Markdown from taking the window somewhere else. The handlers of the callout, table,
+ * `<details>` and embed cards each stop an `a[href]`; an SVG anchor, an image map's area, a link in a diagram and
+ * a form's submit went past them, and the window left the app for the address. So, before any of them (in the
+ * capture phase), the click on a link, the middle click that would open it in a new window, and every submit
+ * lose what the browser would do. A link no card took for itself then reaches `follow` as the click bubbles up,
+ * to be opened the way the editor opens its links; with Alt held it is left alone, as the cards leave theirs.
+ * Returns what takes the guard off again.
+ */
+export function guardRenderedLinks(root: HTMLElement, follow?: (href: string) => void): () => void {
+	const cancel = (e: Event) => {
+		if (e.type === "submit" || clickedLink(e.target, root) !== null) e.preventDefault();
+	};
+	const open = (e: MouseEvent) => {
+		const href = clickedLink(e.target, root);
+		if (href && !e.altKey) follow?.(href);
+	};
+	root.addEventListener("click", cancel, true);
+	root.addEventListener("auxclick", cancel, true);
+	root.addEventListener("submit", cancel, true);
+	root.addEventListener("click", open);
+	return () => {
+		root.removeEventListener("click", cancel, true);
+		root.removeEventListener("auxclick", cancel, true);
+		root.removeEventListener("submit", cancel, true);
+		root.removeEventListener("click", open);
+	};
+}
+
 /** Builds `finishMarkdown` options and sanitizes nested HTML for Table cells and Callout bodies. */
 export function renderInlineHtml(markdown: string, filePath: string, inlineOnly = false, breaks = false): string {
 	const root = appState.workspace?.root;
@@ -202,6 +297,6 @@ export function renderInlineHtml(markdown: string, filePath: string, inlineOnly 
 	const parsed = inlineOnly
 		? (marked.parseInline(markdown, { async: false, gfm: true, breaks }) as string)
 		: (marked.parse(markdown, { async: false, gfm: true, breaks }) as string);
-	const raw = DOMPurify.sanitize(parsed);
+	const raw = sanitizeRendered(parsed);
 	return finishMarkdown(raw, { tickets, named });
 }

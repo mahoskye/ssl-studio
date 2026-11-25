@@ -2,9 +2,23 @@
 // Node SSR stub (`dist/server.js`) so unit tests exercise real Solid 2 reactivity with
 // dev diagnostics enabled, and provide JSX runtime shims when Bun directly imports `.tsx`
 // modules to test pure exports.
-import { mock } from "bun:test";
-import { resolve } from "node:path";
+import { afterAll, mock } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+
+// The app's own files (settings, recent folders, local history) go to a folder made for this run and removed
+// after it. They are found from these variables when src/bun/paths.ts is first imported, so they are set here,
+// before any test is. Without this, every test that opened a folder or started a host without redirecting them
+// itself wrote the developer's real ones: a run of the suite left the app's Recent list holding ten deleted
+// test folders and nothing else, and filled the real local history with theirs.
+const appState = mkdtempSync(join(tmpdir(), "ssl-studio-test-state-"));
+process.env.XDG_CONFIG_HOME = join(appState, "config");
+process.env.XDG_DATA_HOME = join(appState, "data");
+process.env.XDG_STATE_HOME = join(appState, "state");
+// Once, after the last test file (a hook in a preload is the run's; the process's own "exit" is not raised here).
+afterAll(() => rmSync(appState, { recursive: true, force: true }));
 
 const signalsDevPath = resolve(import.meta.dir, "../node_modules/@solidjs/signals/dist/dev.js");
 const signalsDev = await import(pathToFileURL(signalsDevPath).href);

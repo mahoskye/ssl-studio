@@ -16,7 +16,7 @@ import { hrefWritten, linkFile, linkLeads } from "../../shared/docLinks";
 import { headingAnchor } from "../../shared/docTables";
 import { frontMatter } from "../../shared/frontMatter";
 import { closedHtmlCommentSpans, commentBlockHideLines, isStandaloneHtmlComment } from "../../shared/htmlComments";
-import { parseCalloutHeader, parseImageExpression, type ParsedImageSpec } from "../../shared/markdownEdit";
+import { lineSegments, parseCalloutHeader, parseImageExpression, type ParsedImageSpec } from "../../shared/markdownEdit";
 import { parseMarkdownTable, parseTableRaw } from "../../shared/markdownTables";
 import { docByName, namedLink, nameFor } from "../../shared/namedLinks";
 import { baseName, dirName, isInside, relativeTo, resolvePath } from "../../shared/paths";
@@ -129,11 +129,17 @@ function calloutShouldStayRaw(state: EditorState, from: number, to: number, star
 	return false;
 }
 
-/** Tracks non-overlapping `Decoration.replace` spans so CM6 never throws on overlap. */
+/**
+ * Tracks non-overlapping `Decoration.replace` spans so CM6 never throws on overlap. Given the document (the
+ * inline plugin gives it), it also refuses a span that runs over a line break: a plugin may not replace one, and
+ * the throw comes from CodeMirror's own update, where nothing here can catch it.
+ */
 class ReplaceGuard {
 	private spans: [number, number][] = [];
+	constructor(private readonly oneLineIn?: EditorState["doc"]) {}
 	canAdd(from: number, to: number): boolean {
 		if (from > to) return false;
+		if (this.oneLineIn && to > this.oneLineIn.lineAt(from).to) return false;
 		for (const [a, b] of this.spans) {
 			if (from < b && to > a) return false;
 			if (from === to && from >= a && from <= b) return false;
@@ -1749,7 +1755,7 @@ export const liveBlockField = StateField.define<DecorationSet>({
 function buildInlineDecorations(view: EditorView): DecorationSet {
 	const state = view.state;
 	const decos: Range<Decoration>[] = [];
-	const guard = new ReplaceGuard();
+	const guard = new ReplaceGuard(state.doc);
 	const cb = state.facet(liveCallbacksFacet);
 	const filePath = cb?.filePath() ?? "";
 	const here = canonical(filePath);
@@ -1794,8 +1800,12 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 		if (from >= to) return;
 		if (revealed) {
 			decos.push(syntaxMark.range(from, to));
-		} else if (guard.canAdd(from, to)) {
-			decos.push(Decoration.replace({}).range(from, to));
+			return;
+		}
+		// A plugin may not replace a line break (CodeMirror throws, and the throw takes the editor with it), so
+		// syntax that runs over one is hidden a line at a time. A link whose `(url "title")` wraps is the case.
+		for (const [segFrom, segTo] of lineSegments(from, to, (pos) => state.doc.lineAt(pos).to)) {
+			if (guard.canAdd(segFrom, segTo)) decos.push(Decoration.replace({}).range(segFrom, segTo));
 		}
 	};
 

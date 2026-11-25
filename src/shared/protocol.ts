@@ -412,6 +412,11 @@ export interface BackendApi {
 	trash(path: string): Promise<void>;
 	search(query: string, options: SearchOptions): Promise<SearchHit[]>;
 	/**
+	 * The same search, saying also whether it ran out of time before every file was read: `hits` is then only what
+	 * was found in the files it got to, and is not to be replaced from as if it were all of them.
+	 */
+	searchScan(query: string, options: SearchOptions): Promise<{ hits: SearchHit[]; timedOut: boolean }>;
+	/**
 	 * Replaces every match in the files named, on disk, each as it is written now. Says how many in each; a file
 	 * that could not be written is left as it was and says why. Each file as it was is kept in local history.
 	 */

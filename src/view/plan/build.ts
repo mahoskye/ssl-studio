@@ -6,6 +6,7 @@
 import { bannerTemplate } from "../../shared/houseStyle";
 import { decisionsOf, hashText, planTargetsOf, readBlocks, type NodeMap, type SpecUnit } from "./assist";
 import { nodeDocsOf, type Plan } from "./model";
+import { isLocalModelRef } from "../../shared/agentModels";
 
 /** `kept`: already built, and the chart has not touched it. It is never sent to the agent or reprinted. */
 export type UnitStatus = "pending" | "running" | "passed" | "stuck" | "skipped" | "kept";
@@ -100,7 +101,58 @@ export function nextUnit(run: BuildRun): BuildUnit | null {
 	return null;
 }
 
+/**
+ * Puts back in the queue what an earlier attempt left marked as being built. A unit is marked before its first
+ * turn, and an attempt that ended there (an error, or the folder changed under it) never unmarked it: `nextUnit`
+ * takes only what is waiting, so the unit was not built again and the run ended "built" around it.
+ * Says whether anything was put back.
+ */
+export function requeueRunning(run: BuildRun): boolean {
+	let found = false;
+	for (const unit of run.units) {
+		if (unit.status !== "running") continue;
+		unit.status = "pending";
+		found = true;
+	}
+	return found;
+}
+
 export const overBudget = (run: BuildRun) => run.tokens >= run.budget.tokens || (run.budget.cost !== undefined && run.cost >= run.budget.cost);
+
+/**
+ * Whether a model is known to cost nothing: opencode lists it as local, or its name is a local provider's (or one
+ * of the user's own models), which is the rule the backend goes by (src/shared/agentModels.ts). Any other model
+ * the list does not hold is not known to be free, and counts as one that may cost money. The list is empty until
+ * opencode has started, and a model missing from it once counted as local, so a build on a paid model could
+ * start with no cost budget. Names are compared as opencode compares them, without regard to case.
+ */
+export function modelIsLocal(models: readonly { providerID: string; id: string; local: boolean }[], ref: string, ownModels?: readonly string[]): boolean {
+	const wanted = ref.trim().toLowerCase();
+	if (!wanted) return false;
+	return models.some((m) => m.local && `${m.providerID}/${m.id}`.toLowerCase() === wanted) || isLocalModelRef(ref, ownModels);
+}
+
+/**
+ * What the assistant says beside the model's name about its cost, and why; null when there is nothing to warn of.
+ * With no model chosen opencode takes a local one or refuses the turn. A model the list does not hold is said to
+ * be one that may cost money, in the words of the build's budget question: until opencode has started the list
+ * is empty, and the note used to be left out then, as if the model were known to be local.
+ */
+export function modelCostNote(
+	models: readonly { providerID: string; id: string; local: boolean }[],
+	ref: string,
+	ownModels?: readonly string[],
+): { words: string; why: string } | null {
+	const wanted = ref.trim().toLowerCase();
+	if (!wanted || modelIsLocal(models, ref, ownModels)) return null;
+	if (models.some((m) => `${m.providerID}/${m.id}`.toLowerCase() === wanted)) return { words: "paid model", why: "opencode lists this model as one that is not local." };
+	return {
+		words: "may cost money",
+		why: models.length
+			? "opencode does not list this model, so it is not known to be a local one."
+			: "opencode has not started, so it has not said whether this model is a local one. A build asks before it spends anything.",
+	};
+}
 
 /** Words that mean a step was described and not done, in any language's comments. */
 const PLACEHOLDER = /\b(todo|fixme|placeholder|stub|not implemented|to be implemented|implement (the )?(actual|real)|replace with (the )?(actual|real)|your (code|logic) here|logic (goes )?here)\b/i;

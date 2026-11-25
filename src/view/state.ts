@@ -19,6 +19,7 @@ import { clearEditorViewStates } from "./editor/EditorGroup";
 import { invalidateImageCache } from "./editor/imageResolve";
 import { baseName, isInside, joinPath, plainFileError } from "../shared/paths";
 import { lineEnds } from "../shared/fileKind";
+import { tableTextToWrite } from "../shared/csv";
 import { isPlanPath } from "./plan/model";
 import { recheckPlans, trackPlan } from "./plan/check";
 import { trackDoc, trackJson, trackToml, trackXml } from "./docCheck";
@@ -191,11 +192,38 @@ export const snapshotUnsavedPaths = () => {
 	return Object.keys(dirty).filter((path) => dirty[path]);
 };
 
+const pendingEdits = new Set<() => void>();
+
+/**
+ * A view that keeps what is being typed outside the document until it is committed (a table's open cell) says
+ * here how to put it in. Returns how to take that back, for when the view goes.
+ */
+export function holdsPendingEdit(commit: () => void): () => void {
+	pendingEdits.add(commit);
+	return () => void pendingEdits.delete(commit);
+}
+
+/**
+ * Puts what is still being typed in such a view into its document. Before a save, a close of a tab, and the
+ * question about unsaved changes: the document does not have the text until then, so a save wrote the file
+ * without it, and a close found nothing unsaved, asked nothing, and dropped it.
+ */
+export function commitPendingEdits() {
+	for (const commit of [...pendingEdits]) {
+		try {
+			commit();
+		} catch (e) {
+			log(`what was being typed could not be put in the document: ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+}
+
 /**
  * Before anything that would drop every open document. Says whether to go on:
  * nothing unsaved, everything saved, or the user chose to discard.
  */
 export async function settleUnsaved(what: string): Promise<boolean> {
+	commitPendingEdits();
 	const unsaved = snapshotUnsavedPaths();
 	if (!unsaved.length) return true;
 	const names = unsaved.slice(0, 3).map(baseName).join(", ") + (unsaved.length > 3 ? ` and ${unsaved.length - 3} more` : "");
@@ -208,6 +236,9 @@ let openSeq = 0;
 
 export async function openFolder(path?: string) {
 	if (!(await settleUnsaved("Opening another folder closes them."))) return;
+	// What is still unsaved here was asked about and is to be dropped, as it stands now (see below).
+	const versionOf = (path: string) => docs.get(path)?.model.getAlternativeVersionId();
+	const droppedByChoice = new Map(snapshotUnsavedPaths().map((path) => [path, versionOf(path)]));
 	const seq = ++openSeq;
 	const curBeforeOpen = snapshot(state);
 	const prevRoot = curBeforeOpen.workspace?.root ?? null;
@@ -228,6 +259,24 @@ export async function openFolder(path?: string) {
 			}
 		}
 		return;
+	}
+	// Typed in while the folder was being chosen or opened: the question above was answered before these edits
+	// were made, and from here every open document is dropped. The backend is already in the new folder, where the
+	// edited files cannot be saved, so it is sent back to the folder they belong to and the open is called off.
+	// (With no folder open before there is nowhere to go back to: an untitled buffer edited in that gap is not covered.)
+	// Not what the answer above already covered: a file the user chose to discard is dropped, unless it was typed in again.
+	commitPendingEdits();
+	const editedMeanwhile = snapshotUnsavedPaths().filter((path) => !droppedByChoice.has(path) || droppedByChoice.get(path) !== versionOf(path));
+	if (editedMeanwhile.length && prevRoot && canonical(workspace.root) !== canonical(prevRoot)) {
+		const back = await guarded(() => backend.openFolder(prevRoot));
+		if (seq !== openSeq) return;
+		if (back) {
+			session.setRoot(prevRoot);
+			void restartLsp();
+			const names = editedMeanwhile.length === 1 ? displayName(editedMeanwhile[0]!) : `${editedMeanwhile.length} files`;
+			notify(`${baseName(workspace.root)} was not opened: ${names} changed while it was being opened. Save or discard the changes, then open the folder again.`, "error");
+			return;
+		}
 	}
 	closeReview();
 	resetTidy();
@@ -326,11 +375,48 @@ export function rememberViews() {
  * Opens again what was open in this folder last time. A file that has gone
  * since, or is no longer inside the folder, is passed over without a word.
  */
+const SKIP_TABS_ONCE = "ssl-studio.skipTabsOnce";
+
+/**
+ * Reloads the window with no tabs reopened. The way out when a restored tab is what keeps failing: the error card
+ * (main.tsx) offers it, since a plain reload would open the same tab and fail the same way.
+ */
+export function reloadWithoutTabs() {
+	try {
+		sessionStorage.setItem(SKIP_TABS_ONCE, "1");
+	} catch {
+		// No session storage: the reload still happens, with the tabs.
+	}
+	window.location.reload();
+	// Still here a moment later: the reload was called off (the question about unsaved changes was answered "stay").
+	// The request goes with it, so that a later, ordinary reload reopens the tabs as usual.
+	setTimeout(() => {
+		try {
+			sessionStorage.removeItem(SKIP_TABS_ONCE);
+		} catch {
+			// Nothing was stored.
+		}
+	}, 2000);
+}
+
+function takeSkipTabsOnce(): boolean {
+	try {
+		const asked = sessionStorage.getItem(SKIP_TABS_ONCE) === "1";
+		sessionStorage.removeItem(SKIP_TABS_ONCE);
+		return asked;
+	} catch {
+		return false;
+	}
+}
+
 export async function restoreTabs() {
 	const curStart = snapshot(state);
 	const root = curStart.workspace?.root;
 	// A self-test starts from nothing open, and leaves nothing behind for the next run.
 	if (curStart.info?.selftest || curStart.info?.selftestClose) return;
+	// Asked for once, by the error card: the panels come back, the files do not, and what is remembered below is
+	// then the empty set, so the tab that failed is not reopened next time either.
+	const skipTabs = takeSkipTabsOnce();
 	setTabsReadyFlag(false);
 	try {
 		// The panels first: they are there at once, and the files take a moment to read.
@@ -343,7 +429,7 @@ export async function restoreTabs() {
 				if (views.right) s.rightView = views.right as PanelId;
 			});
 		}
-		const saved = root ? unpackTabs(recall(tabsKey(root))) : null;
+		const saved = root && !skipTabs ? unpackTabs(recall(tabsKey(root))) : null;
 		if (!root || !saved) return;
 		for (const [index, group] of saved.groups.entries()) {
 			const tabs: string[] = [];
@@ -496,14 +582,15 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 	// or lack one from an answer passed over above: it is put back to what is on disk, once every save asked for
 	// has answered (sooner, and a save still on its way would land after the reading and be passed over). Not if
 	// another save is asked for while the disk is read: its own answer is the newer.
-	if (!settingsOut && settingFailed && sameWorkspace) {
+	if (!settingsOut && settingFailed) {
 		settingFailed = false;
 		const asked = settingsAsked;
+		const curRoot = snapshot(state).workspace?.root;
 		const disk = await backend.settings().then(
 			(read) => read.effective,
 			() => undefined,
 		);
-		if (disk && asked === settingsAsked && snapshot(state).workspace?.root === startRoot) {
+		if (disk && asked === settingsAsked && snapshot(state).workspace?.root === curRoot) {
 			const { layout: _onDisk, ...rest } = disk;
 			setState((s) => {
 				reconcile({ ...rest, layout: snapshot(s.settings.layout) }, null)(s.settings);
@@ -849,7 +936,12 @@ export async function openFile(path: string, options: { group?: number; reveal?:
 		if (s.bottomMaximized) s.bottomMaximized = false;
 	});
 	// What was only looked at and has no tab left is let go. It has no unsaved changes: a tab that shows some never gives way.
-	if (replaced && !snapshot(state).groups.some((g) => g.tabs.includes(replaced!))) letGoIfOnlyRead(replaced);
+	if (replaced && !snapshot(state).groups.some((g) => g.tabs.includes(replaced!))) {
+		// The editors hear of the change of tab first, as they do when a tab is closed: the one showing this file
+		// keeps its place in it (cursor, scroll) while it still has the model, so the file comes back where it was left.
+		flush();
+		letGoIfOnlyRead(replaced);
+	}
 	onFlush(() => {
 		const wasLook = openedForALook(path);
 		if (lookedAt === path) lookedAt = null;
@@ -885,6 +977,8 @@ const closedTabs: string[] = [];
 
 /** Says whether the tab closed: a refused or failed save keeps it open. */
 export async function closeTab(path: string, group = snapshot(state).activeGroup, options: { discard?: boolean; pinned?: boolean } = {}): Promise<boolean> {
+	// A cell still being typed in is an unsaved change like any other: in the document before it is asked about.
+	commitPendingEdits();
 	const curBefore = snapshot(state);
 	if (!curBefore.groups[group]?.tabs.includes(path)) return true;
 	// A pinned tab stays until it is let go: a close by key or by pointer says so and leaves it.
@@ -1341,6 +1435,8 @@ export async function save(
 		onPromoted?: (target: string) => void;
 	} = {},
 ): Promise<Saved> {
+	// What is being typed in an open cell is part of what is saved.
+	commitPendingEdits();
 	const curStart = snapshot(state);
 	const resolvedPath = path === undefined ? (curStart.groups[curStart.activeGroup]?.active ?? null) : path;
 	if (!resolvedPath) return false;
@@ -1448,7 +1544,8 @@ export async function save(
 		if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
 	}
 	const version = doc.model.getAlternativeVersionId();
-	const text = doc.model.getValue();
+	// A table Excel wrote keeps its bare LF inside cells: the model made every line end of it CRLF when it was opened.
+	const text = tableTextToWrite(path, doc.model.getValue(), doc.savedText);
 	// "It was read as text": a file that holds a zero byte the user typed is still theirs to save.
 	const result = await guarded(() => backend.write(path, text, true));
 	if (!result) return false;
@@ -1560,6 +1657,8 @@ export function applyText(path: string, text: string): boolean {
 
 /** Says whether every file was saved: it stops at the first that could not be. */
 export async function saveAll(): Promise<Saved> {
+	// First, so that a file whose only change is a cell still being typed in is among the unsaved ones.
+	commitPendingEdits();
 	for (const path of snapshotUnsavedPaths()) if (!(await save(path))) return false;
 	return true;
 }

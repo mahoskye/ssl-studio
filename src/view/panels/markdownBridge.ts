@@ -128,7 +128,17 @@ export function chooseDefaultLinksTab(counts: {
 	return "backlinks";
 }
 
-/** Computes a minimal single-slice text diff for undo-preserving Monaco model updates (ADR 0002). */
+/** The first of the two UTF-16 units of a character outside the basic plane (an emoji, say). */
+const opensPair = (unit: number) => unit >= 0xd800 && unit <= 0xdbff;
+
+/**
+ * Computes a minimal single-slice text diff for undo-preserving Monaco model updates (ADR 0002).
+ *
+ * The slice never starts or ends between the two units of one character. `status: 🔴 blocked` set to `🟢 done`
+ * differs first at the second unit of the emoji (the two share their first), and Monaco, which will not cut a
+ * pair, widened the range to take the first unit in while the inserted text held only the second: the document
+ * was left with half a character. So the unchanged text stops short of a first unit, at either end, in either text.
+ */
 export function computeMinimalTextChange(
 	prev: string,
 	next: string,
@@ -137,11 +147,16 @@ export function computeMinimalTextChange(
 	let start = 0;
 	const minLen = Math.min(prev.length, next.length);
 	while (start < minLen && prev.charCodeAt(start) === next.charCodeAt(start)) start++;
+	while (start > 0 && opensPair(prev.charCodeAt(start - 1))) start--;
 	let endPrev = prev.length;
 	let endNext = next.length;
 	while (endPrev > start && endNext > start && prev.charCodeAt(endPrev - 1) === next.charCodeAt(endNext - 1)) {
 		endPrev--;
 		endNext--;
+	}
+	while (endPrev < prev.length && (opensPair(prev.charCodeAt(endPrev - 1)) || opensPair(next.charCodeAt(endNext - 1)))) {
+		endPrev++;
+		endNext++;
 	}
 	return { start, endPrev, insert: next.slice(start, endNext) };
 }

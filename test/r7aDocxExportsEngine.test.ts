@@ -128,9 +128,8 @@ describe("R7A.1 — DOCX security, crash resistance, XML 1.0 validity & fidelity
 		const bombRaw = new Uint8Array(36 * 1024 * 1024);
 		const bombZip = packZip([{ name: "word/document.xml", data: bombRaw }]);
 		expect(bombZip.length).toBeLessThan(100 * 1024);
-		const parsedBomb = parseDocxToMarkdown(bombZip);
-		expect(parsedBomb.markdown).toBe("");
-		expect(parsedBomb.images).toEqual([]);
+		// The document's text is not read, so there is no document: said, not read as an empty one.
+		expect(() => parseDocxToMarkdown(bombZip)).toThrow(/not a Word document that can be read/);
 
 		// 2. Duplicate/overlapping localOffset central directory entries: only the first entry at offset 0 is extracted
 		const enc = new TextEncoder();
@@ -179,14 +178,14 @@ describe("R7A.1 — DOCX security, crash resistance, XML 1.0 validity & fidelity
 		overlapZip.set(eocd, local.length + cd1.length + cd2.length);
 
 		// word/document.xml reused localOffset 0 -> rejected!
-		expect(parseDocxToMarkdown(overlapZip).markdown).toBe("");
+		expect(() => parseDocxToMarkdown(overlapZip)).toThrow(/not a Word document that can be read/);
 
 		// 3. Truncated fallback scan (no EOCD, nameLen exceeds buffer) doesn't crash
 		const trunc = new Uint8Array(34);
 		const tv = new DataView(trunc.buffer);
 		tv.setUint32(0, 0x04034b50, true);
 		tv.setUint16(26, 500, true); // nameLen > remaining bytes
-		expect(parseDocxToMarkdown(trunc).markdown).toBe("");
+		expect(() => parseDocxToMarkdown(trunc, "Cut.docx")).toThrow(/^Cut\.docx is not a Word document that can be read/);
 
 		// 4. Cumulative >64 MB across 3 x 25 MB entries caps extraction safely without OOM
 		const chunk25 = new Uint8Array(25 * 1024 * 1024);

@@ -143,6 +143,39 @@ export function neighbour(parent: Node, node: Node, direction: -1 | 1): Node | u
 	return movable[index + direction];
 }
 
+/** A run of whole lines, 1-based and inclusive. */
+export type Span = { start: number; end: number };
+
+/**
+ * The lines a node is drawn in as one card: for a procedure, its doc block and the annotation between them
+ * (`procedureGroups`), from the doc block's first line to the procedure's last. Any other node is its own lines.
+ * A card is moved and wrapped whole, whichever of its parts is asked: taken apart, a doc block is left above
+ * another procedure, or under its own.
+ */
+export function cardOf(parent: Node, node: Node): Span {
+	const group = procedureGroups(parent.children).find((g) => g.includes(node));
+	return group ? { start: group[0]!.start, end: group.at(-1)!.end } : { start: node.start, end: node.end };
+}
+
+/**
+ * A move of a node's card past the card next to it: the two runs of lines to swap (`a` above `b`), and the line
+ * the node's own first line is on once they are swapped. The neighbour is the next card, not the next node: a
+ * procedure's doc block is not something to swap it with. Blank lines and container closing lines are stepped
+ * over and stay where they are, as `neighbour` has it. Undefined when there is nothing that way to move past.
+ */
+export function cardMove(parent: Node, node: Node, direction: -1 | 1): { a: Span; b: Span; line: number } | undefined {
+	const movable = procedureGroups(parent.children).filter((g) => g.length > 1 || (g[0]!.kind !== "blank" && !g[0]!.closer));
+	const index = movable.findIndex((g) => g.includes(node));
+	const other = index < 0 ? undefined : movable[index + direction];
+	if (!other) return undefined;
+	const span = (g: Node[]): Span => ({ start: g[0]!.start, end: g.at(-1)!.end });
+	const [own, there] = [span(movable[index]!), span(other)];
+	// Moved up, the card starts where the other did; moved down, it ends where the other did.
+	const start = direction < 0 ? there.start : there.end - (own.end - own.start);
+	const line = start + (node.start - own.start);
+	return direction < 0 ? { a: there, b: own, line } : { a: own, b: there, line };
+}
+
 /**
  * The text after swapping two sibling ranges, as one replacement of the span
  * from the first's start to the second's end (1-based lines, a before b).
@@ -278,6 +311,35 @@ export function procedureGroups(children: Node[]): Node[][] {
 		groups.push([child]);
 	}
 	return groups;
+}
+
+/**
+ * Why the blocks cannot be changed just now. The tree says which lines a block is, and it is only trusted for the
+ * text it was read from: with the language server starting or stopped there is no such tree, and just after an
+ * edit it is still being read.
+ */
+export type Stale = "starting" | "stopped" | "reading";
+
+/** The reason, from the language server's state: with the server running, the tree is merely behind the text. */
+export function staleReason(lspState: string): Stale {
+	if (lspState === "running") return "reading";
+	return lspState === "starting" || lspState === "restarting" ? "starting" : "stopped";
+}
+
+/**
+ * What is said when a change is not made because of it: for a move, a delete, a wrap or a drop, that nothing was
+ * changed; for an inline edit, that it is kept open with what was typed. Said, because a click or a key that did
+ * nothing read as a broken view, and an edit closed without being made was text lost without a word.
+ */
+export function staleNotice(reason: Stale, what: "change" | "edit"): string {
+	if (what === "edit") {
+		if (reason === "starting") return "The language server is still starting, so the edit is not made yet. It is kept open: confirm it again in a moment, or press Escape to drop it.";
+		if (reason === "stopped") return "The language server is not running, so the edit is not made yet. It is kept open: restart the server from the status bar and confirm it again, or press Escape to drop it.";
+		return "The blocks are still being read from the text, so the edit is not made yet. It is kept open: confirm it again in a moment, or press Escape to drop it.";
+	}
+	if (reason === "starting") return "The language server is still starting, and blocks cannot be changed until it is running. Nothing was changed.";
+	if (reason === "stopped") return "The language server is not running, and blocks cannot be changed without it. Nothing was changed: restart it from the status bar, or switch to Text.";
+	return "The blocks are still being read from the text. Nothing was changed: try again in a moment.";
 }
 
 /**

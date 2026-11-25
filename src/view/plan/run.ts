@@ -12,7 +12,7 @@ import { describeElement } from "../panels/Reference";
 import { applyText, canonical, documents, keepTab, notify, setState, state } from "../state";
 import { workPrompt } from "../projectDocs";
 import { joinPath, relativeTo } from "../../shared/paths";
-import { addQuestions, answerQuestion, applySuggestion, formatSurvey, isAllowedContextPath, looksCut, nounsOf, openQuestions, overLimit, parseContext, parseQuestions, parseSpec, parseSuggestions, planHash, planTargetsOf, printSpec, readBlocks, refinePrompt, specHash, specPrompt, unaccounted, type ContextRequest, type Suggestion, type Survey } from "./assist";
+import { addQuestions, answerQuestion, applySuggestion, formatSurvey, isAllowedContextPath, looksCut, nounsOf, openQuestions, overLimit, parseContext, parseQuestions, parseSpec, parseSuggestions, planHash, planHashMatches, planTargetsOf, printSpec, readBlocks, refinePrompt, specHash, specPrompt, unaccounted, type ContextRequest, type Suggestion, type Survey } from "./assist";
 import type { BuildRun } from "./build";
 import { revisionText, settledNodes } from "./built";
 import { parsePlan, printPlan, type Plan } from "./model";
@@ -388,7 +388,7 @@ export async function specState(path: string): Promise<"none" | "current" | "sta
 	);
 	if (text === null) return "none";
 	const plan = planOf(path);
-	return plan && specHash(text) === planHash(plan) ? "current" : "stale";
+	return plan && planHashMatches(specHash(text), plan) ? "current" : "stale";
 }
 
 export function acceptSuggestion(path: string, key: string) {

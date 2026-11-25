@@ -179,7 +179,7 @@ const { clampPaletteHeight, formatSnippetForEditor, insertMermaidInMd, insertSni
 const { createPointerTracker, navigableMenuEntries, stepKeptMenuKey } = await import("../src/view/panels/RowMenu");
 const { problemDedupKey, problemPath, problemRowKey } = await import("../src/view/panels/Problems");
 const { applyOutlineCollapseAll, buildSymbolKeyMap, planCollapseKey, symbolCollapseKey } = await import("../src/view/panels/Objects");
-const { clampExplorerHeight, decodeDroppedText, gitKindMapFor, MAX_DROP_FILE_BYTES, OPEN_EDITORS_MAX_H, OPEN_EDITORS_MIN_H, resizeOpenEditorsHeight, sanitizeDropName } = await import("../src/view/panels/Explorer");
+const { clampExplorerHeight, decodeDroppedText, dropFailure, gitKindMapFor, MAX_DROP_FILE_BYTES, OPEN_EDITORS_MAX_H, OPEN_EDITORS_MIN_H, resizeOpenEditorsHeight, sanitizeDropName } = await import("../src/view/panels/Explorer");
 const { focusRowsBelow } = await import("../src/view/panels/Rows");
 const { narrowHosted, panelOn, setNarrowHosted, setNarrowPanels, toggleSide } = await import("../src/view/panels/registry");
 
@@ -585,7 +585,8 @@ describe("R8B-4 — Problems panel untitled URI preservation, same-line dedup, a
 		const src = readSrc("../src/view/panels/Problems.tsx");
 		expect(src).toMatch(/!hasDocIssues\(\) && problemsScope\(\) !== "all"[\s\S]*?if \(shouldReset\) setProblemsScope\("all"\)/);
 		expect(src).toContain("if (root !== lastProblemsRoot)");
-		expect(src).toContain("openFile(problemPath(uri)");
+		// The row's uri is an accessor since the keyed <For> rewrite.
+		expect(src).toContain("openFile(problemPath(uri())");
 	});
 });
 
@@ -668,6 +669,17 @@ describe("R8B-6 — Explorer hardening, explorerMoves, and Rows focus", () => {
 		expect(sanitizeDropName(".env")).toBe("env");
 		expect(sanitizeDropName("... . .")).toBe("imported");
 		expect(sanitizeDropName("a/b\\c:d*e?f\"g<h>i|j.ssl")).toBe("a-b-c-d-e-f-g-h-i-j.ssl");
+	});
+
+	test("dropFailure names a dropped file once, by the name it was dropped under", () => {
+		const said = (name: string) => `${name} is not a Word document that can be read here. It may be an older .doc file.`;
+		// The backend's own sentence names the file: it is not named a second time in front of it.
+		expect(dropFailure("Report.docx", "Report.docx", said("Report.docx"))).toBe(said("Report.docx"));
+		// Sent under another name because Report.md was taken: the notice names the file that was dropped.
+		expect(dropFailure("Report.docx", "Report 2.docx", said("Report 2.docx"))).toBe(said("Report.docx"));
+		// Anything else that went wrong is said after the file's name, as before.
+		expect(dropFailure("Report.docx", "Report.docx", "Import exceeds the size limit")).toBe("Report.docx: Import exceeds the size limit");
+		expect(dropFailure("notes.txt", null, "the folder is read-only")).toBe("notes.txt: the folder is read-only");
 	});
 
 	test("decodeDroppedText preserves UTF-8 and falls back to windows-1252 without U+FFFD corruption", () => {

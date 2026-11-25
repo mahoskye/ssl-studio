@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { planHash, unaccounted, specPrompt, type SpecUnit } from "../src/view/plan/assist";
+import { planHash, testsHash, unaccounted, specPrompt, type SpecUnit } from "../src/view/plan/assist";
 import { assembleScript, newRun, nextUnit, nodeStatuses, procedureBodySpan, procedureSpans, procedureText, reviewPrompt, scriptEntrySpan, unbuiltNodes, unitPrompt, type BuildRun, type BuildUnit } from "../src/view/plan/build";
 import { anyChanges, builtOf, changesSince, changeText, chartChanges, classifyUnits, driftFindings, driftOf, journeyBreakdown, journeyDraft, journeyOptionLabel, nodeCodeDetails, nodePrint, nodeTestContext, pathLine, pathsForNode, pathsMissing, planPaths, recordBuilt, recordTests, revisionText, settleBuilt, settledNodes, testsPrompt, unitsOfNode, type Reading } from "../src/view/plan/built";
 import { checkPlan, parsePlan, printPlan, setText, type Plan } from "../src/view/plan/model";
@@ -339,7 +339,7 @@ describe("paths through the chart", () => {
 	});
 	test("the tests' file is remembered against the chart it was written from", () => {
 		const p = recordTests(built(), "Sample/ReleaseTests.ssl");
-		expect(builtOf(p)!.tests).toEqual({ script: "Sample/ReleaseTests.ssl", hash: planHash(plan()) });
+		expect(builtOf(p)!.tests).toEqual({ script: "Sample/ReleaseTests.ssl", hash: testsHash(plan()) });
 	});
 	test("pathsForNode finds paths covering a decision with outgoing branch labels, milestone summaries, and sibling steps", () => {
 		const p = plan();

@@ -220,6 +220,10 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 /* Beside small words it is their size, not a button's. */
 .statusbar .codicon-glyph, .meta .codicon-glyph, .here-mark .codicon-glyph, .doc-status .codicon-glyph, .md-status .codicon-glyph, .table-view th .codicon-glyph, .plan-stage-mark .codicon-glyph, .checks li > .codicon-glyph, .check-mark .codicon-glyph, .sev .codicon-glyph, .twisty .codicon-glyph, .codicon-glyph.twisty { font-size: calc(13px * var(--ui-scale)); }
 .hint { color: var(--muted); font-size: var(--text-md); margin: var(--space-3) var(--space-5); }
+/* A region that could not be drawn (RegionBoundary.tsx): said where the region was, the rest of the window as it was. */
+.region-error { flex: 1 1 0; min-width: 0; min-height: 0; overflow: auto; display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-4); padding: var(--space-6); font-size: var(--text-md); }
+.region-error strong { color: var(--strong-fg); font-size: var(--text-base); font-weight: 600; }
+.region-error p { margin: 0; max-width: 70ch; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 .warn { color: var(--warning); }
 .spacer { flex: 1; }
 
@@ -963,7 +967,8 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .entry.agent.streaming { border-left-color: var(--warning); }
 .entry.note pre { color: var(--muted); font-size: var(--text-sm); }
 /* A reply is Markdown, with the reading view's styles brought down to the panel's size. */
-.entry .md { max-width: none; margin: 0; padding: 0; font-size: var(--text-md); line-height: 1.5; }
+/* `contain: layout` keeps anything positioned in a reply inside the reply: its text is a model's, not the window's. */
+.entry .md { max-width: none; margin: 0; padding: 0; font-size: var(--text-md); line-height: 1.5; contain: layout; }
 .entry .md > :last-child { margin-bottom: 0; }
 .entry .md h1, .entry .md h2, .entry .md h3, .entry .md h4 { font-size: var(--text-lg); margin: var(--space-4) 0 var(--space-2); padding: 0; border: 0; }
 .entry .md pre { padding: var(--space-3) var(--space-4); }

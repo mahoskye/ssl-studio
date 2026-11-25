@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { resolve } from "node:path";
-import { createEffect, createRoot, createSignal, createStore, flush } from "solid-js";
+import { createEffect, createRoot, createSignal, createStore, flush, snapshot } from "solid-js";
 import { DEFAULT_SETTINGS } from "../src/shared/protocol";
 import { createAsyncQuery } from "../src/view/asyncQuery";
 import { planHash } from "../src/view/plan/assist";
@@ -315,15 +315,19 @@ const { closeReview, review } = await import("../src/view/editor/Review");
 const { diagnostics, publishFindings, session } = await import("../src/view/lsp/session");
 const {
 	closeOtherTabs,
+	closeTab,
+	commitPendingEdits,
 	documents,
 	fileRemoved,
 	fileRenamed,
 	focusRequest,
+	holdsPendingEdit,
 	loadSettings,
 	moveTab,
 	newUntitled,
 	nextTab,
 	openFile,
+	openFolder,
 	openedForALook,
 	revealSignal,
 	save,
@@ -337,7 +341,8 @@ const { assistOf, begin, dismissWarning, latestAssistOf, planOf, stopAssist, upd
 const { discardRun, loadRun, reviewBuild, runFile } = await import("../src/view/plan/buildRun");
 const { discard, useGit } = await import("../src/view/git");
 const { resetTidy, runStep, startTidy } = await import("../src/view/agent/tidy");
-const { attachFileToAgent, currentAgentContext } = await import("../src/view/agent/Agent");
+const { askAbout, attachFileToAgent, currentAgentContext } = await import("../src/view/agent/Agent");
+const { agent, chatSessionEpoch, setAgent, stop: stopAgent } = await import("../src/view/agent/store");
 
 // --- In-process MockSocket RPC driver ---
 type RpcHandler = (method: string, args: unknown[]) => unknown | Promise<unknown>;
@@ -739,6 +744,341 @@ describe("SolidJS 2.0.3 audit — plan/buildRun.ts", () => {
 			updateAssist(planPath, { run: null });
 			flush();
 		}
+	});
+
+	// Pass 3: a run saved before layout was left out of the plan's hash holds the older kind of hash.
+	test("loadRun() takes up a run saved with the older kind of hash, and a node dragged afterwards does not put it out of reach", async () => {
+		const { legacyPlanHash, planHashMatches } = await import("../src/view/plan/assist");
+		const { setNodeOffset } = await import("../src/view/plan/model");
+		const planPath = "/ws/design/Older.plan.json";
+		// A node had already been dragged when the run was saved: its place is part of the older hash.
+		const plan: Plan = setNodeOffset(
+			{
+				version: 1,
+				title: "Older",
+				groups: [],
+				nodes: [
+					{ id: "n1", kind: "start", text: "Start" },
+					{ id: "n2", kind: "step", text: "Run" },
+					{ id: "n3", kind: "end", text: "End" },
+				],
+				edges: [
+					{ from: "n1", to: "n2" },
+					{ from: "n2", to: "n3" },
+				],
+				targets: ["src/Run.ssl"],
+			},
+			"n2",
+			{ x: 24, y: 12 },
+		);
+		const saved: BuildRun = {
+			version: 1,
+			planHash: legacyPlanHash(plan),
+			model: "local/qwen",
+			status: "stopped",
+			tokens: 50,
+			cost: 0,
+			budget: { tokens: 400_000 },
+			units: [{ name: "DoRun", script: "src/Run.ssl", nodes: ["n2"], status: "passed", attempts: 1, code: ":PROCEDURE DoRun;\n:ENDPROC;\n" }],
+			map: [],
+			accepted: [],
+		};
+		const rFile = runFile(planPath, "/ws");
+		rpcHandler = (method, args) => {
+			if (method === "read" && String(args[0]) === planPath) return { text: printPlan(plan), mtime: 1, encoding: "utf-8" };
+			if (method === "read" && String(args[0]) === rFile) return { text: JSON.stringify(saved), mtime: 2, encoding: "utf-8" };
+			if (method === "read") throw new Error("ENOENT");
+			return null;
+		};
+		try {
+			await openFile(planPath);
+			flush();
+			await loadRun(planPath);
+			const loaded = latestAssistOf(planPath).run;
+			expect(loaded?.units.map((u) => u.name)).toEqual(["DoRun"]);
+			// It is of this plan, and from here on holds the kind of hash that moving a node does not change.
+			expect(loaded?.planHash).toBe(planHash(planOf(planPath)!));
+			const draggedAgain = setNodeOffset(plan, "n2", { x: 96, y: 48 });
+			expect(planHashMatches(loaded?.planHash, draggedAgain)).toBe(true);
+			expect(planHashMatches(saved.planHash, draggedAgain)).toBe(false);
+		} finally {
+			updateAssist(planPath, { run: null });
+			flush();
+		}
+	});
+
+	// Pass 3: the build's own loop, from "New build" to its end, with opencode and the language server faked.
+	// No model is asked anything: every reply is written here.
+	describe("a build, with opencode faked", () => {
+		const planPath = "/ws/design/Release.plan.json";
+		const paid = { providerID: "openrouter", id: "paid-model", name: "Paid", local: false, tools: true, variants: [] };
+		const local = { providerID: "ollama", id: "qwen3", name: "qwen3", local: true, tools: true, variants: [] };
+		const releasePlan = (): Plan => ({
+			version: 1,
+			title: "Release",
+			groups: [],
+			targets: ["src/Release.ssl"],
+			nodes: [
+				{ id: "n1", kind: "start", text: "Start" },
+				{ id: "n2", kind: "step", text: "Mark the sample" },
+				{ id: "n3", kind: "step", text: "Tell the lab" },
+				{ id: "n4", kind: "end", text: "Done" },
+			],
+			edges: [
+				{ from: "n1", to: "n2" },
+				{ from: "n2", to: "n3" },
+				{ from: "n3", to: "n4" },
+			],
+		});
+		const waitingRun = (plan: Plan): BuildRun => ({
+			version: 1,
+			planHash: planHash(plan),
+			model: "ollama/qwen3",
+			status: "stopped",
+			tokens: 0,
+			cost: 0,
+			budget: { tokens: 400_000 },
+			units: [
+				{ name: "Mark", script: "src/Release.ssl", nodes: ["n2"], calls: [], status: "pending", attempts: 0 },
+				{ name: "Notify", script: "src/Release.ssl", nodes: ["n3"], calls: [], status: "pending", attempts: 0 },
+			],
+			map: [
+				{ node: "n1", becomes: "entry" },
+				{ node: "n4", becomes: "exit" },
+			],
+			accepted: [],
+		});
+		const said = (text: string) => ({ sessionID: "s", text, outcome: "succeeded", tokens: { input: 5000, output: 10 }, cost: 0 });
+		const codeFor = (name: string) => said("```ssl\n:PROCEDURE " + name + ";\n:ENDPROC;\n```");
+		/** What a turn is asked to build, from its prompt; null for the second opinion. */
+		const unitAsked = (prompt: string) => /^PLAN STAGE: build (\w+)/.exec(prompt)?.[1] ?? null;
+		const proceduresIn = (text: string) => [...text.matchAll(/:PROCEDURE (\w+)/g)].map((m) => ({ name: m[1], kind: 11, children: [] }));
+
+		const realSession = { analyze: session.analyze, scratchTree: session.scratchTree, scratchCalls: session.scratchCalls, formatText: session.formatText, workspaceSymbols: session.workspaceSymbols };
+		let agentCalls: string[] = [];
+		let prompts: string[] = [];
+		let questions: string[] = [];
+
+		/** The plan with its approved doc on disk, a language server that answers, and an opencode that says what `reply` says. */
+		async function setUp(opts: { models: unknown[]; model?: string; reply?: (prompt: string) => unknown; analyze?: (text: string) => unknown; budget?: string | null }) {
+			tidyUp();
+			const { printSpec } = await import("../src/view/plan/assist");
+			const plan = releasePlan();
+			const run = waitingRun(plan);
+			const disk = new Map<string, string>([
+				[planPath, printPlan(plan)],
+				["/ws/design/Release.plan.md", printSpec("The spec.", run.units.map(({ name, script, nodes, calls }) => ({ name, script, nodes, calls })), run.map, planHash(plan))],
+			]);
+			agentCalls = [];
+			prompts = [];
+			questions = [];
+			rpcHandler = async (method, args) => {
+				if (method === "read") {
+					const p = String(args[0]);
+					if (!disk.has(p)) throw new Error("ENOENT");
+					return { text: disk.get(p)!, mtime: 1, encoding: "utf-8" };
+				}
+				if (method === "write") {
+					disk.set(String(args[0]), String(args[1]));
+					return { mtime: 2 };
+				}
+				if (method === "search") return [];
+				if (method !== "agent") return null;
+				agentCalls.push(String(args[0]));
+				if (args[0] === "start") return { state: "ready" };
+				if (args[0] === "models") return opts.models;
+				if (args[0] === "skills") return [{ id: "ssl-new-procedure" }];
+				if (args[0] === "ask") {
+					const prompt = String((args[1] as { text: string }[])[0]!.text);
+					prompts.push(prompt);
+					return opts.reply ? opts.reply(prompt) : unitAsked(prompt) ? codeFor(unitAsked(prompt)!) : said("It does what the chart says.");
+				}
+				return null;
+			};
+			askHandler = (prompt) => {
+				questions.push(prompt);
+				return opts.budget ?? null;
+			};
+			(session as any).analyze = async (text: string) => (opts.analyze ? opts.analyze(text) : { diagnostics: [], symbols: proceduresIn(text), timedOut: false });
+			(session as any).scratchTree = async () => [];
+			(session as any).scratchCalls = async () => [];
+			(session as any).formatText = async (text: string) => text;
+			(session as any).workspaceSymbols = async () => [];
+			// A fresh launch: opencode is off, and no list of models has been asked for.
+			setAgent((s) => {
+				s.status = { state: "off" } as any;
+				s.models = [];
+				s.busy = false;
+			});
+			setState((s) => {
+				if (opts.model) s.settings.agentModel = opts.model;
+			});
+			await openFile(planPath);
+			flush();
+			return { plan, run, ...(await import("../src/view/plan/buildRun")) };
+		}
+		const unitsNow = () => (latestAssistOf(planPath).run?.units ?? []).map((u) => [u.name, u.status]);
+
+		/** Leaves nothing of one build for the next test: the run, the language server's stand-ins, opencode's state. */
+		function tidyUp() {
+			Object.assign(session, realSession);
+			discardRun(planPath);
+			setAgent((s) => {
+				s.status = { state: "off" } as any;
+				s.models = [];
+				s.busy = false;
+			});
+			flush();
+		}
+		afterAll(tidyUp);
+
+		test("a paid model is asked about on a fresh launch, before the list of models has ever been read", async () => {
+			const { startBuild } = await setUp({ models: [local, paid], model: "openrouter/paid-model" });
+			await startBuild(planPath);
+			expect(questions).toEqual(["openrouter/paid-model may cost money. Stop the build at what cost?"]);
+			// opencode was started and its models read first; backing out of the question spends nothing and begins no run.
+			expect(agentCalls).toEqual(["start", "models"]);
+			expect(latestAssistOf(planPath).run).toBeNull();
+		});
+
+		test("a model opencode does not list is asked about too", async () => {
+			const { startBuild } = await setUp({ models: [local], model: "openrouter/not-listed" });
+			await startBuild(planPath);
+			expect(questions).toEqual(["openrouter/not-listed may cost money. Stop the build at what cost?"]);
+			expect(agentCalls).not.toContain("ask");
+		});
+
+		test("a local model is not asked about, and the build runs to its end", async () => {
+			const { startBuild } = await setUp({ models: [local, paid], model: "ollama/qwen3" });
+			await startBuild(planPath);
+			expect(questions).toEqual([]);
+			expect(latestAssistOf(planPath).run?.status).toBe("built");
+			expect(latestAssistOf(planPath).run?.budget.cost).toBeUndefined();
+			expect(unitsNow()).toEqual([
+				["Mark", "passed"],
+				["Notify", "passed"],
+			]);
+		});
+
+		test("a run begun with no cost budget is asked about when it is carried on with a paid model", async () => {
+			const { run, startBuild } = await setUp({ models: [local, paid], model: "openrouter/paid-model", budget: "2" });
+			updateAssist(planPath, { run });
+			await startBuild(planPath);
+			expect(questions).toEqual(["openrouter/paid-model may cost money. Stop the build at what cost?"]);
+			expect(latestAssistOf(planPath).run?.budget.cost).toBe(2);
+			expect(latestAssistOf(planPath).run?.status).toBe("built");
+		});
+
+		test("a unit that throws is stuck with the reason, the build stops, and trying again builds it", async () => {
+			let serverUp = false;
+			const { retryUnit, startBuild } = await setUp({
+				models: [local],
+				analyze: (text) => {
+					if (!serverUp) throw new Error("The language server is not running.");
+					return { diagnostics: [], symbols: proceduresIn(text), timedOut: false };
+				},
+			});
+			await startBuild(planPath);
+			const stopped = latestAssistOf(planPath).run!;
+			expect(stopped.status).toBe("stopped");
+			expect(unitsNow()).toEqual([
+				["Mark", "stuck"],
+				["Notify", "pending"],
+			]);
+			expect(stopped.units[0]!.problems).toEqual(["It could not be built: The language server is not running."]);
+			// It threw before a turn was asked for: nothing was spent.
+			expect(agentCalls).not.toContain("ask");
+			expect(latestAssistOf(planPath).running).toBe("");
+
+			serverUp = true;
+			retryUnit(planPath, "Mark");
+			await startBuild(planPath);
+			expect(latestAssistOf(planPath).run?.status).toBe("built");
+			expect(unitsNow()).toEqual([
+				["Mark", "passed"],
+				["Notify", "passed"],
+			]);
+		});
+
+		test("a unit an earlier attempt left marked as being built is built when the build is carried on", async () => {
+			const { run, startBuild } = await setUp({ models: [local] });
+			run.status = "running";
+			run.units[0]!.status = "running";
+			updateAssist(planPath, { run });
+			await startBuild(planPath);
+			expect(prompts.map(unitAsked)).toEqual(["Mark", "Notify", null]);
+			expect(latestAssistOf(planPath).run?.status).toBe("built");
+			expect(unitsNow()).toEqual([
+				["Mark", "passed"],
+				["Notify", "passed"],
+			]);
+		});
+
+		test("a build the folder was changed under does not go on saying that a unit is being built", async () => {
+			let asked!: () => void;
+			const asking = new Promise<void>((resolve) => (asked = resolve));
+			let letGo!: () => void;
+			const held = new Promise<void>((resolve) => (letGo = resolve));
+			const { startBuild } = await setUp({
+				models: [local],
+				reply: async (prompt) => {
+					asked();
+					await held;
+					return codeFor(unitAsked(prompt) ?? "Mark");
+				},
+			});
+			const build = startBuild(planPath);
+			await asking;
+			expect(unitsNow()[0]).toEqual(["Mark", "running"]);
+			setState((s) => {
+				s.workspace = { root: "/other", name: "other" };
+			});
+			letGo();
+			await build;
+			// Nothing is building it now: it waits, and the run can be carried on when the folder is opened again.
+			expect(latestAssistOf(planPath).run?.status).toBe("stopped");
+			expect(unitsNow()).toEqual([
+				["Mark", "pending"],
+				["Notify", "pending"],
+			]);
+			setState((s) => {
+				s.workspace = { root: "/ws", name: "ws" };
+			});
+		});
+
+		test("an answer given to a stuck unit while the build is still running is kept, and the unit is built with it", async () => {
+			let building!: () => void;
+			const notifyBuilding = new Promise<void>((resolve) => (building = resolve));
+			let letGo!: () => void;
+			const held = new Promise<void>((resolve) => (letGo = resolve));
+			const { answerUnit, startBuild } = await setUp({
+				models: [local],
+				reply: async (prompt) => {
+					const unit = unitAsked(prompt);
+					if (unit === "Mark" && !prompt.includes("THE USER SAID")) return said('<<<QUESTIONS\n[{"question":"Which table holds the samples?"}]\n>>>QUESTIONS');
+					if (unit === "Notify") {
+						building();
+						await held;
+					}
+					return unit ? codeFor(unit) : said("It does what the chart says.");
+				},
+			});
+			const build = startBuild(planPath);
+			await notifyBuilding;
+			// Mark asked its question and is stuck; Notify's turn is in flight.
+			expect(unitsNow()).toEqual([
+				["Mark", "stuck"],
+				["Notify", "running"],
+			]);
+			answerUnit(planPath, "Mark", "SAMPLES");
+			expect(latestAssistOf(planPath).run!.units[0]).toMatchObject({ status: "pending", answer: "SAMPLES" });
+			letGo();
+			await build;
+			const done = latestAssistOf(planPath).run!;
+			expect(done.units[0]).toMatchObject({ name: "Mark", status: "passed", answer: "SAMPLES" });
+			expect(done.status).toBe("built");
+			expect(prompts.filter((p) => unitAsked(p) === "Mark").at(-1)).toContain("THE USER SAID: SAMPLES");
+		});
 	});
 });
 
@@ -1225,6 +1565,181 @@ describe("SolidJS 2.0.3 audit — state.ts & recentTabs.ts", () => {
 		expect(settingsReads).toBe(0);
 		expect(state.settings.wordWrap).toBe(false);
 	});
+
+	// Pass 3: the question about unsaved changes is asked before the folder is chosen and opened, which takes a while.
+	test("a folder is not opened over what was typed while it was being opened", async () => {
+		const file = "/ws/a.ssl";
+		const opened: unknown[] = [];
+		let letGo!: () => void;
+		const held = new Promise<void>((resolve) => (letGo = resolve));
+		let asked!: () => void;
+		const asking = new Promise<void>((resolve) => (asked = resolve));
+		rpcHandler = async (method, args) => {
+			if (method === "read") return { text: ":RETURN 1;\n", mtime: 1, encoding: "utf-8" };
+			if (method === "openFolder") {
+				opened.push(args[0]);
+				if (args[0] === "/other") {
+					asked();
+					await held;
+					return { root: "/other", name: "other" };
+				}
+				return { root: String(args[0]), name: "ws" };
+			}
+			return null;
+		};
+		await openFile(file, { keep: true });
+		flush();
+		const model = documents.get(file)!.model as any;
+
+		const switching = openFolder("/other");
+		await asking;
+		// Nothing was unsaved when the question would have been asked. This is typed while the backend opens the folder.
+		model.pushEditOperations([], [{ range: new FakeRange(1, 1, 1, 1), text: "x" }], () => null);
+		letGo();
+		await switching;
+		flush();
+
+		// The backend, already in the new folder, was sent back; the view never left, and the edit is still there.
+		expect(opened).toEqual(["/other", "/ws"]);
+		expect(snapshot(state).workspace?.root).toBe("/ws");
+		expect(documents.get(file)?.model).toBe(model);
+		expect(model.isDisposed()).toBe(false);
+		expect(model.getValue()).toBe("x:RETURN 1;\n");
+		expect(snapshot(state).dirty[file]).toBe(true);
+		expect(snapshot(state).messages.some((m) => /other was not opened: .*a\.ssl changed while it was being opened/.test(m.text))).toBe(true);
+	});
+
+	test("changes the user chose to discard do not call the folder off; typing in such a file afterwards does", async () => {
+		const file = "/ws/a.ssl";
+		const opened: unknown[] = [];
+		const gates: (() => void)[] = [];
+		rpcHandler = async (method, args) => {
+			if (method === "read") return { text: ":RETURN 1;\n", mtime: 1, encoding: "utf-8" };
+			if (method === "settings") return { effective: DEFAULT_SETTINGS };
+			if (method === "themes") return [];
+			if (method === "info") return { app: "0.1.0", selftest: true };
+			if (method === "lspState") return { state: "stopped" };
+			if (method === "openFolder") {
+				opened.push(args[0]);
+				if (args[0] === "/other") await new Promise<void>((resolve) => gates.push(resolve));
+				return { root: String(args[0]), name: String(args[0]).slice(1) };
+			}
+			return null;
+		};
+		chooseHandler = () => "Discard changes";
+		const edit = (text: string) => (documents.get(file)!.model as any).pushEditOperations([], [{ range: new FakeRange(1, 1, 1, 1), text }], () => null);
+		const until = async (ok: () => boolean) => {
+			for (let i = 0; i < 500 && !ok(); i++) await new Promise((resolve) => setTimeout(resolve, 1));
+			expect(ok()).toBe(true);
+		};
+
+		// Typed in again after "Discard changes" was answered: that is not what was agreed to drop.
+		await openFile(file, { keep: true });
+		flush();
+		edit("x");
+		flush();
+		const first = openFolder("/other");
+		await until(() => gates.length === 1);
+		edit("y");
+		gates.shift()!();
+		await first;
+		flush();
+		expect(opened).toEqual(["/other", "/ws"]);
+		expect(snapshot(state).workspace?.root).toBe("/ws");
+		expect((documents.get(file)!.model as any).getValue()).toBe("yx:RETURN 1;\n");
+
+		// Left as it was after the answer: the folder opens and the file goes, as chosen.
+		opened.length = 0;
+		const second = openFolder("/other");
+		await until(() => gates.length === 1);
+		gates.shift()!();
+		await second;
+		flush();
+		expect(opened).toEqual(["/other"]);
+		expect(snapshot(state).workspace?.root).toBe("/other");
+		expect(documents.has(file)).toBe(false);
+	});
+
+	// Pass 3: what is typed in a view's own editor (a table's open cell) is not in the document until it is committed.
+	describe("a cell still being typed in", () => {
+		const path = "/ws/docs/registries/objects.csv";
+		/** A table with one open cell: what is typed goes into the model only when the view is asked to commit. */
+		const openCell = async () => {
+			const disk = new Map([[path, "id,name\n1,Alpha\n"]]);
+			rpcHandler = (method, args) => {
+				if (method === "read") return { text: disk.get(String(args[0])) ?? "", mtime: 1, encoding: "utf-8" };
+				if (method === "write") {
+					disk.set(String(args[0]), String(args[1]));
+					return { mtime: 2 };
+				}
+				return null;
+			};
+			await openFile(path, { keep: true });
+			flush();
+			const cell = { typed: null as string | null };
+			const release = holdsPendingEdit(() => {
+				if (cell.typed === null) return;
+				const model = documents.get(path)!.model as any;
+				model.pushEditOperations([], [{ range: new FakeRange(2, 3, 2, 8), text: cell.typed }], () => null);
+				cell.typed = null;
+			});
+			return { disk, cell, release };
+		};
+
+		test("is part of what a save writes", async () => {
+			const { disk, cell, release } = await openCell();
+			try {
+				cell.typed = "CHANGED";
+				expect(await save(path)).toBe(true);
+				expect(disk.get(path)).toBe("id,name\n1,CHANGED\n");
+			} finally {
+				release();
+			}
+		});
+
+		test("is an unsaved change a close of the tab asks about", async () => {
+			const { cell, release } = await openCell();
+			try {
+				cell.typed = "CHANGED";
+				const asked: string[] = [];
+				chooseHandler = (prompt) => {
+					asked.push(prompt);
+					return null; // Cancel: the tab stays.
+				};
+				expect(await closeTab(path)).toBe(false);
+				expect(asked).toHaveLength(1);
+				expect(asked[0]).toContain("unsaved changes");
+				expect(snapshot(state).groups[0]!.tabs).toContain(path);
+				expect((documents.get(path)!.model as any).getValue()).toBe("id,name\n1,CHANGED\n");
+			} finally {
+				release();
+			}
+		});
+
+		test("a view that has gone is not asked, and one that fails does not stop the others", async () => {
+			const { cell, release } = await openCell();
+			let asked = 0;
+			const releaseOther = holdsPendingEdit(() => {
+				asked++;
+				throw new Error("this view's editor is broken");
+			});
+			try {
+				cell.typed = "X";
+				commitPendingEdits();
+				expect(asked).toBe(1);
+				expect(cell.typed).toBeNull();
+				release();
+				releaseOther();
+				cell.typed = "Y";
+				commitPendingEdits();
+				expect(asked).toBe(1);
+				expect(cell.typed as string | null).toBe("Y");
+			} finally {
+				release();
+				releaseOther();
+			}
+		});
+	});
 });
 
 // =============================================================================
@@ -1604,5 +2119,62 @@ describe("SolidJS 2.0.3 audit — agent/Agent.tsx", () => {
 		expect(currentAgentContext().workOptions.ticketFiles).toEqual([]);
 		flush();
 		expect(currentAgentContext().workOptions.ticketFiles).toEqual([]);
+	});
+
+	// Pass 3: a turn's session is the conversation's only while nothing ended the conversation's session during it.
+	describe("a session ended while a reply is running", () => {
+		const reply = { sessionID: "session-of-the-old-model", text: "an answer", outcome: "succeeded", tokens: { input: 1, output: 1 } };
+		/** A backend whose reply waits to be let go, so something can happen while the turn is running. */
+		const heldReply = () => {
+			let letGo!: () => void;
+			const held = new Promise<void>((resolve) => (letGo = resolve));
+			let asked: () => void;
+			const asking = new Promise<void>((resolve) => (asked = resolve));
+			rpcHandler = async (method, args) => {
+				if (method !== "agent") return null;
+				if (args[0] === "ask") {
+					asked();
+					await held;
+					return reply;
+				}
+				if (args[0] === "stop") return { state: "off" };
+				return null;
+			};
+			return { letGo, asking };
+		};
+		const ready = () => {
+			setAgent((s) => {
+				s.status = { state: "ready" } as any;
+				s.chatSession = null;
+				s.busy = false;
+			});
+			flush();
+		};
+
+		test("left alone, the conversation carries on in the session the reply came from", async () => {
+			ready();
+			const { letGo, asking } = heldReply();
+			const turn = askAbout("What does this do?", false);
+			await asking;
+			letGo();
+			await turn;
+			flush();
+			expect(snapshot(agent).chatSession).toBe(reply.sessionID);
+		});
+
+		test("ended meanwhile (opencode stopped, as when another model is picked), the reply's session is not taken up again", async () => {
+			ready();
+			const { letGo, asking } = heldReply();
+			const before = chatSessionEpoch();
+			const turn = askAbout("What does this do?", false);
+			await asking;
+			// What picking another model does too: the conversation's session ends, the turn itself goes on.
+			await stopAgent();
+			expect(chatSessionEpoch()).toBeGreaterThan(before);
+			letGo();
+			await turn;
+			flush();
+			expect(snapshot(agent).chatSession).toBeNull();
+		});
 	});
 });

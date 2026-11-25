@@ -7,7 +7,7 @@ import { createEffect, createMemo, createSignal, For, Show, untrack } from "soli
 import { baseName } from "../../shared/paths";
 import { Icon } from "../Icon";
 import { IconButton } from "../panels/Rows";
-import { planHash } from "./assist";
+import { testsHashMatches } from "./assist";
 import { builtOf, journeyBreakdown, journeyDraft, journeyOptionLabel, nodeTestContext, pathsForNode, pathStory, pathSummary, planPaths, shortPhrase, type JourneyBreakdownItem, type PlanPath } from "./built";
 import { planTestsOf, type Plan, type PlanNode, type PlanTestCase, type PlanTestInput, type PlanTestPatch } from "./model";
 import type { ScheduledBuildScope } from "./planBridge";
@@ -612,7 +612,7 @@ function JourneyDetailBox(props: {
 	};
 
 	return (
-		<Show when={breakdown()} keyed>
+		<Show when={breakdown()}>
 			{(bd) => (
 				<div class="plan-test-journey-detail">
 					<div class="plan-test-journey-head">
@@ -633,49 +633,49 @@ function JourneyDetailBox(props: {
 
 					<Show when={sections().length > 0}>
 						<div class="plan-journey-timeline" role="list" aria-label={`Steps in Journey ${props.pathIndex + 1}`}>
-							<For each={sections()}>
+							<For each={sections()} keyed={(sec) => sec.stage ?? ""}>
 								{(sec) => (
 									<div class="plan-journey-stage">
-										<Show when={sec.stage}>
-											<div class="plan-journey-stage-label">{sec.stage}</div>
+										<Show when={sec().stage}>
+											<div class="plan-journey-stage-label">{sec().stage}</div>
 										</Show>
 										<div class="plan-journey-rail">
-											<For each={sec.items}>
+											<For each={sec().items} keyed={(item) => `${item.nodeId}:${item.answer}:${item.targetId ?? ""}`}>
 												{(item) => {
 													const isCurrent = () =>
-														Boolean(props.defaultNodeId && (item.nodeId === props.defaultNodeId || item.targetId === props.defaultNodeId));
+														Boolean(props.defaultNodeId && (item().nodeId === props.defaultNodeId || item().targetId === props.defaultNodeId));
 													return (
-														<div class={["plan-journey-item", { current: isCurrent(), gate: Boolean(item.isLoopGate) }]} role="listitem">
-															<Show when={item.context}>
-																<span class="plan-journey-context">{item.context}</span>
+														<div class={["plan-journey-item", { current: isCurrent(), gate: Boolean(item().isLoopGate) }]} role="listitem">
+															<Show when={item().context}>
+																<span class="plan-journey-context">{item().context}</span>
 															</Show>
 															<div class="plan-journey-qrow">
 																<button
 																	type="button"
 																	class="plan-journey-q"
 																	title="Spotlight this decision on the chart (keeps current step selected)"
-																	onMouseEnter={() => props.onPeekNode?.(item.nodeId, { pan: false })}
+																	onMouseEnter={() => props.onPeekNode?.(item().nodeId, { pan: false })}
 																	onMouseLeave={() => props.onPeekNode?.(null)}
-																	onClick={() => props.onPeekNode?.(item.nodeId, { pan: true })}
+																	onClick={() => props.onPeekNode?.(item().nodeId, { pan: true })}
 																>
-																	{item.question}
+																	{item().question}
 																</button>
-																<span class={`plan-test-tag ${toneOf(item.answer)}`}>{item.answer}</span>
+																<span class={`plan-test-tag ${toneOf(item().answer)}`}>{item().answer}</span>
 															</div>
-															<Show when={item.result}>
+															<Show when={item().result}>
 																<button
 																	type="button"
 																	class="plan-journey-then"
 																	title="Spotlight this step on the chart (keeps current step selected)"
-																	onMouseEnter={() => props.onPeekNode?.(item.targetId, { pan: false })}
+																	onMouseEnter={() => props.onPeekNode?.(item().targetId, { pan: false })}
 																	onMouseLeave={() => props.onPeekNode?.(null)}
-																	onClick={() => props.onPeekNode?.(item.targetId, { pan: true })}
+																	onClick={() => props.onPeekNode?.(item().targetId, { pan: true })}
 																>
 																	<Icon name="arrow-right" class="plan-journey-arrow" />
-																	<span>{item.result}</span>
+																	<span>{item().result}</span>
 																</button>
 															</Show>
-															<Show when={item.loopsBack}>
+															<Show when={item().loopsBack}>
 																<span class="plan-journey-loop">
 																	<Icon name="sync" class="plan-journey-arrow" />
 																	<span>Continues loop</span>
@@ -692,17 +692,23 @@ function JourneyDetailBox(props: {
 						</div>
 					</Show>
 
-					<Show when={bd.outcome}>
+					<Show when={bd().outcome}>
 						<button
 							type="button"
 							class="plan-journey-outcome"
-							title={bd.outcomeId ? "Spotlight this end result on the chart (keeps current step selected)" : undefined}
-							onMouseEnter={() => bd.outcomeId && props.onPeekNode?.(bd.outcomeId, { pan: false })}
-							onMouseLeave={() => bd.outcomeId && props.onPeekNode?.(null)}
-							onClick={() => bd.outcomeId && props.onPeekNode?.(bd.outcomeId, { pan: true })}
+							title={bd().outcomeId ? "Spotlight this end result on the chart (keeps current step selected)" : undefined}
+							onMouseEnter={() => {
+								const id = bd().outcomeId;
+								if (id) props.onPeekNode?.(id, { pan: false });
+							}}
+							onMouseLeave={() => bd().outcomeId && props.onPeekNode?.(null)}
+							onClick={() => {
+								const id = bd().outcomeId;
+								if (id) props.onPeekNode?.(id, { pan: true });
+							}}
 						>
 							<span class="plan-test-kw expect">Result</span>
-							<span class="plan-journey-outcome-text">{bd.outcome}</span>
+							<span class="plan-journey-outcome-text">{bd().outcome}</span>
 						</button>
 					</Show>
 				</div>
@@ -765,7 +771,7 @@ export function NodeTests(props: {
 	const testScript = createMemo(() => validTestScript(props.plan));
 	const testStale = createMemo(() => {
 		const t = testScript();
-		return Boolean(t && t.hash !== planHash(props.plan));
+		return Boolean(t && !testsHashMatches(t.hash, props.plan));
 	});
 
 	const visibleMatches = createMemo(() => {
@@ -1011,23 +1017,23 @@ export function NodeTests(props: {
 								</Show>
 							</div>
 							<div class="plan-test-list">
-								<For each={visibleMatches()}>
+								<For each={visibleMatches()} keyed={(m) => m.pathIndex}>
 									{(m) => {
-										const active = () => props.activePathIndex === m.pathIndex;
-										const branchTone = () => toneOf(m.branchOut ?? "");
+										const active = () => props.activePathIndex === m().pathIndex;
+										const branchTone = () => toneOf(m().branchOut ?? "");
 										return (
 											<button
 												type="button"
 												class={["plan-test-row", { active: active() }]}
 												aria-pressed={active() ? "true" : "false"}
-												title={`${active() ? "Click to clear chart highlight" : "Click to inspect and highlight this journey on the chart"}\n\n${m.story}`}
-												onClick={() => props.onHighlightPath(active() ? null : m.pathIndex)}
+												title={`${active() ? "Click to clear chart highlight" : "Click to inspect and highlight this journey on the chart"}\n\n${m().story}`}
+												onClick={() => props.onHighlightPath(active() ? null : m().pathIndex)}
 											>
-												<span class="plan-test-num">#{m.index}</span>
-												<Show when={m.branchOut}>
-													<span class={`plan-test-tag ${branchTone()}`}>{m.branchOut}</span>
+												<span class="plan-test-num">#{m().index}</span>
+												<Show when={m().branchOut}>
+													<span class={`plan-test-tag ${branchTone()}`}>{m().branchOut}</span>
 												</Show>
-												<span class="plan-test-summary">{m.summary}</span>
+												<span class="plan-test-summary">{m().summary}</span>
 												<Icon name="eye" class="plan-test-eye" />
 											</button>
 										);
@@ -1036,12 +1042,12 @@ export function NodeTests(props: {
 							</div>
 						</div>
 
-						<Show when={activeMatch()} keyed>
+						<Show when={activeMatch()}>
 							{(m) => (
 								<JourneyDetailBox
 									plan={props.plan}
 									paths={props.allPaths.paths}
-									pathIndex={m.pathIndex}
+									pathIndex={m().pathIndex}
 									defaultNodeId={props.node.id}
 									onPeekNode={props.onPeekNode}
 									onCustomize={(draft) => setDraftReq({ draft, seq: ++draftSeq })}
@@ -1050,19 +1056,19 @@ export function NodeTests(props: {
 						</Show>
 					</Show>
 
-					<Show when={testScript()} keyed>
+					<Show when={testScript()}>
 						{(tests) => (
-							<Show when={typeof tests?.script === "string" && tests.script.length > 0}>
+							<Show when={typeof tests()?.script === "string" && tests().script.length > 0}>
 								<div class="plan-impl-group">
 									<span class="plan-impl-subhead">STARLIMS test script</span>
 									<button
 										type="button"
 										class="plan-impl-script-row"
-										title={`Open ${tests.script}`}
-										onClick={() => props.onOpenScript(tests.script)}
+										title={`Open ${tests().script}`}
+										onClick={() => props.onOpenScript(tests().script)}
 									>
 										<Icon name="beaker" />
-										<span class="plan-impl-script-file">{baseName(tests.script)}</span>
+										<span class="plan-impl-script-file">{baseName(tests().script)}</span>
 										<Show when={testStale()}>
 											<span class="spacer" />
 											<span class="plan-test-stale">Out of date</span>
@@ -1127,7 +1133,7 @@ export function PlanTests(props: {
 	const testScript = createMemo(() => validTestScript(props.plan));
 	const testStale = createMemo(() => {
 		const t = testScript();
-		return Boolean(t && t.hash !== planHash(props.plan));
+		return Boolean(t && !testsHashMatches(t.hash, props.plan));
 	});
 
 	const summary = createMemo(() => {
@@ -1216,7 +1222,7 @@ export function PlanTests(props: {
 							</div>
 
 							<div class="plan-test-list">
-								<For each={pathsResult().paths}>
+								<For each={pathsResult().paths} keyed={(p) => p.steps.map((s) => `${s.id}:${s.label ?? ""}`).join("->")}>
 									{(path, idx) => {
 										const active = () => props.activePathIndex === idx();
 										return (
@@ -1224,11 +1230,11 @@ export function PlanTests(props: {
 												type="button"
 												class={["plan-test-row", { active: active() }]}
 												aria-pressed={active() ? "true" : "false"}
-												title={`${active() ? "Click to clear chart highlight" : "Click to inspect and highlight this journey on the chart"}\n\n${pathStory(path)}`}
+												title={`${active() ? "Click to clear chart highlight" : "Click to inspect and highlight this journey on the chart"}\n\n${pathStory(path())}`}
 												onClick={() => props.onHighlightPath(active() ? null : idx())}
 											>
 												<span class="plan-test-num">#{idx() + 1}</span>
-												<span class="plan-test-summary">{pathSummary(path, pathsResult().paths, props.plan)}</span>
+												<span class="plan-test-summary">{pathSummary(path(), pathsResult().paths, props.plan)}</span>
 												<Icon name="eye" class="plan-test-eye" />
 											</button>
 										);
@@ -1248,19 +1254,19 @@ export function PlanTests(props: {
 						</Show>
 					</Show>
 
-					<Show when={testScript()} keyed>
+					<Show when={testScript()}>
 						{(tests) => (
-							<Show when={typeof tests?.script === "string" && tests.script.length > 0}>
+							<Show when={typeof tests()?.script === "string" && tests().script.length > 0}>
 								<div class="plan-impl-group">
 									<span class="plan-impl-subhead">STARLIMS test script</span>
 									<button
 										type="button"
 										class="plan-impl-script-row"
-										title={`Open ${tests.script}`}
-										onClick={() => props.onOpenScript(tests.script)}
+										title={`Open ${tests().script}`}
+										onClick={() => props.onOpenScript(tests().script)}
 									>
 										<Icon name="beaker" />
-										<span class="plan-impl-script-file">{baseName(tests.script)}</span>
+										<span class="plan-impl-script-file">{baseName(tests().script)}</span>
 										<Show when={testStale()}>
 											<span class="spacer" />
 											<span class="plan-test-stale">Out of date</span>

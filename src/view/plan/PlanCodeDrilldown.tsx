@@ -4,6 +4,7 @@
 // expand once to inspect implementing scripts, functions, called procedures,
 // and live read-only SSL previews (all ranges from starlims-lsp, ADR 0003).
 import { createEffect, createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";
+import { createDraft } from "../draft";
 import { baseName, dirName } from "../../shared/paths";
 import { Icon } from "../Icon";
 import { IconButton } from "../panels/Rows";
@@ -280,14 +281,7 @@ export function PlanImplementation(props: {
 }) {
 	const targets = createMemo(() => planTargetsOf(props.plan));
 	const allScripts = createMemo(() => [...new Set([...targets(), ...props.builtUnits.map((u) => u.script).filter(Boolean)])]);
-	const scriptsText = () => targets().join(", ");
-	const [scriptsDraft, setScriptsDraft] = createSignal(untrack(scriptsText));
-	createEffect(
-		() => scriptsText(),
-		(v) => {
-			setScriptsDraft(v);
-		},
-	);
+	const [scriptsDraft, setScriptsDraft, scriptsText] = createDraft(() => targets().join(", "));
 	const resyncScripts = (el: HTMLTextAreaElement) => {
 		onSettled(() => {
 			if (!el.isConnected) return;

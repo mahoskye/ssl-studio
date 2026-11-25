@@ -1150,6 +1150,13 @@ export function MarkdownInspector() {
 		return (await ask(`Value for ${key}:`))?.trim() || null;
 	};
 
+	/**
+	 * Says a property was left as it is. Its value goes on under its key's line (a block scalar, a nested map, a
+	 * list broken over lines), and a change to the one line would break the YAML: only the raw block edits it.
+	 */
+	const sayNotEditedHere = (key: string) =>
+		notify(`"${key}" is written over several lines and was not changed - click YAML to edit its raw block.`, "error");
+
 	const commitInlinePropertyEdit = (key: string, origVal: string, nextRaw: string, isDate: boolean) => {
 		const trimmed = nextRaw.trim();
 		setEditingProp(null);
@@ -1157,7 +1164,8 @@ export function MarkdownInspector() {
 		if (isDate && !isValidIsoDate(trimmed)) return;
 		const cur = activeMdDoc()?.model.getValue() ?? text();
 		const next = withFrontMatter(cur, key, trimmed);
-		if (next && next !== cur) applyDocTextUpdate(next);
+		if (next === null) sayNotEditedHere(key);
+		else if (next !== cur) applyDocTextUpdate(next);
 	};
 
 	const startInlinePropertyEdit = (key: string, currentVal: string) => {
@@ -1182,7 +1190,8 @@ export function MarkdownInspector() {
 		if (!d) return;
 		const cur = d.model.getValue();
 		const next = withFrontMatter(cur, key, nextVal);
-		if (next && next !== cur) applyDocTextUpdate(next);
+		if (next === null) sayNotEditedHere(key);
+		else if (next !== cur) applyDocTextUpdate(next);
 	};
 
 	const commonKeysForDoc = (): { group: string; keys: readonly string[] }[] => {
@@ -1287,7 +1296,10 @@ export function MarkdownInspector() {
 		const cur = activeMdDoc()?.model.getValue() ?? text();
 		if (totalValues > 1 || isListProperty(key)) {
 			const next = removeFromFrontMatterList(cur, key, value);
-			if (next && next !== cur) {
+			// Null says the one value could not be taken out of a list laid out over several lines: the whole
+			// property is not removed in its place.
+			if (next === null) return void sayNotEditedHere(key);
+			if (next !== cur) {
 				const cleaned = stripEmptyFrontMatter(next);
 				applyDocTextUpdate(cleaned);
 				if (!frontMatterInnerSpan(cleaned)) setEditYaml(false);

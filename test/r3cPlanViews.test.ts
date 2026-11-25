@@ -440,7 +440,8 @@ describe("PlanTests.tsx — validTestScript, draft cleanup, and Generate button 
 		const src = readSrc("../src/view/plan/PlanTests.tsx");
 
 		// Both NodeTests and PlanTests guard tests.script before calling baseName(...)
-		const scriptGuards = src.match(/typeof tests\?\.script === "string" && tests\.script\.length > 0/g) ?? [];
+		// `tests` is an accessor since <Show> lost `keyed`.
+		const scriptGuards = src.match(/typeof tests\(\)\?\.script === "string" && tests\(\)\.script\.length > 0/g) ?? [];
 		expect(scriptGuards.length).toBeGreaterThanOrEqual(2);
 
 		// TestCaseList supports onConsumeDraft and NodeTests clears draftReq on node change

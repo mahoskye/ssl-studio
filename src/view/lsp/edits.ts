@@ -85,13 +85,26 @@ function merge(ranges: [number, number][]): [number, number][] {
 	return result;
 }
 
-/** The smallest single replacement turning `before` into `after`, by offsets into `before`. */
+/** The first of the two UTF-16 units of a character outside the basic plane (an emoji, say). */
+const opensPair = (unit: number) => unit >= 0xd800 && unit <= 0xdbff;
+
+/**
+ * The smallest single replacement turning `before` into `after`, by offsets into `before`.
+ *
+ * It never starts or ends between the two units of one character. The texts are compared unit by unit, and 🔴 and
+ * 🟢 have the same first unit: a status changed from one to the other gave a replacement that started inside the
+ * pair. The editor will not cut a pair, so it widened the range to take the first unit in, the new text still held
+ * only the second, and half a character was left in the document. So what is the same stops short of a first
+ * unit, at either end, in either text.
+ */
 export function minimalReplace(before: string, after: string): { start: number; end: number; text: string } | null {
 	if (before === after) return null;
 	let start = 0;
 	while (start < before.length && start < after.length && before[start] === after[start]) start++;
+	while (start > 0 && opensPair(before.charCodeAt(start - 1))) start--;
 	let tail = 0;
 	while (tail < before.length - start && tail < after.length - start && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
+	while (tail > 0 && (opensPair(before.charCodeAt(before.length - tail - 1)) || opensPair(after.charCodeAt(after.length - tail - 1)))) tail--;
 	return { start, end: before.length - tail, text: after.slice(start, after.length - tail) };
 }
 

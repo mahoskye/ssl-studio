@@ -153,9 +153,9 @@ describe("one file by two names", () => {
 				return;
 			}
 			expect(fileKey(join(root, "link", "later", "New.ssl"))).toBe(fileKey(join(root, "none", "later", "New.ssl")));
-			// A link that leads nowhere has only the name it was given.
+			// A link that leads nowhere is known as the file it leads to: a save through it makes that file.
 			symlinkSync(join(root, "nowhere"), join(root, "broken"));
-			expect(fileKey(join(root, "broken")).toLowerCase()).toContain("broken");
+			expect(fileKey(join(root, "broken"))).toBe(fileKey(join(root, "nowhere")));
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

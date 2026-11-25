@@ -9,7 +9,7 @@ import { activeEditor } from "../editor/EditorGroup";
 import { activeLiveEditor, liveSelectionVersion } from "../editor/liveBridge";
 import { review, openReview, type Check } from "../editor/Review";
 import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, save, scriptsCameTo, setState, state } from "../state";
-import { agent, ask, chooseModel, clearEntries, clearSavedThreads, currentModel, interrupt, resume, safely, setAgent, start, startNewThread, stop, switchThread, syncWorkspaceThreads, type Entry } from "./store";
+import { agent, ask, chatSessionEpoch, chooseModel, clearEntries, clearSavedThreads, currentModel, interrupt, resume, safely, setAgent, start, startNewThread, stop, switchThread, syncWorkspaceThreads, type Entry } from "./store";
 import {
 	applySimpleUnifiedDiff,
 	composeQuestion,
@@ -522,6 +522,7 @@ async function runAskAbout(
 		return (r ? canonical(r) : null) === curRoot;
 	};
 	const chatSession = snapshot(agent).chatSession;
+	const chatEpoch = chatSessionEpoch();
 	if (!chatSession || sentContext.session !== chatSession || sentContext.root !== curRoot) {
 		sentContext = { session: chatSession, root: curRoot, hashes: new Map() };
 	}
@@ -544,6 +545,10 @@ async function runAskAbout(
 		},
 	);
 	if (!sameWorkspace()) return;
+	// The conversation's session was ended while the context was being read (another model was picked, New, opencode
+	// stopped). What was prepared is what that session had not seen yet, and asking with its id would carry on the
+	// session that was just ended, on the model just changed away from: prepared again for the conversation as it is.
+	if (chatSessionEpoch() !== chatEpoch) return runAskAbout(question, includeSelection, includeWork, extra);
 	const text = composeQuestion(question, context && { ...context, file }, prepared.text || undefined);
 	const withWhat = [context ? `${file} ${context.label}` : "", ...prepared.labels].filter(Boolean).join("; ");
 	const isCatalogPrompt = /INDEX\.md|Update catalogs/i.test(question);
@@ -560,7 +565,9 @@ async function runAskAbout(
 	});
 	// Discard post-await session & context hash updates if the workspace changed mid-turn.
 	if (!sameWorkspace()) return;
-	if (reply) {
+	// Ended during the turn (see chatSessionEpoch): the reply's session is not the conversation's any more, so the
+	// next question starts a new one, with the model the picker now shows and the whole context.
+	if (reply && chatSessionEpoch() === chatEpoch) {
 		setAgent((s) => {
 			s.chatSession = reply.sessionID;
 		});
@@ -1342,6 +1349,25 @@ export function AgentPanel() {
 	};
 	const modelOf = (ref: string) => agent.models.find((m) => modelRef(m) === ref);
 	const usable = () => agent.models.filter((m) => m.tools);
+	const pickedTicketMissing = createMemo(() => {
+		const picked = agentCtx.pickedTicket;
+		return Boolean(picked) && !allTickets().some((t) => t.ticket === picked);
+	});
+	let modelSelectEl: HTMLSelectElement | undefined;
+	createEffect(
+		() => [usable(), currentModel()] as const,
+		([, model]) => {
+			if (modelSelectEl && modelSelectEl.value !== model) modelSelectEl.value = model;
+		},
+	);
+	let ticketSelectEl: HTMLSelectElement | undefined;
+	createEffect(
+		() => [allTickets(), agentCtx.pickedTicket] as const,
+		([, picked]) => {
+			const wanted = picked === null ? "__auto__" : picked;
+			if (ticketSelectEl && ticketSelectEl.value !== wanted) ticketSelectEl.value = wanted;
+		},
+	);
 
 	// The conversation follows the reply as it is written, until the user scrolls up to read.
 	let scroller!: HTMLDivElement;
@@ -1797,21 +1823,21 @@ export function AgentPanel() {
 			>
 				<label class="agent-model">
 					Model for a new session
-					<select value={currentModel()} onChange={(e) => void pickModel(e.currentTarget)}>
+					<select ref={modelSelectEl} value={currentModel()} onChange={(e) => void pickModel(e.currentTarget)}>
 						{/* A saved model opencode does not list must not read as the first one in the list. */}
 						<Show when={!modelOf(currentModel())?.tools}>
-							<option value={currentModel()} selected disabled>
+							<option value={currentModel()} disabled>
 								{currentModel() ? `${currentModel()} (not in the list below)` : "No model chosen"}
 							</option>
 						</Show>
 						{/* Under headings: a provider may offer hundreds, and the ones on this machine come first. */}
-						<For each={groupModels(usable())}>
+						<For each={groupModels(usable())} keyed={(g) => g.label}>
 							{(group) => (
-								<optgroup label={group.label}>
-									<For each={group.models}>
+								<optgroup label={group().label}>
+									<For each={group().models} keyed={(m) => modelRef(m)}>
 										{(m) => (
-											<option value={modelRef(m)} selected={modelRef(m) === currentModel()}>
-												{m.local ? `${m.name} · ${m.providerID}` : `$ ${m.name}`}
+											<option value={modelRef(m())}>
+												{m().local ? `${m().name} · ${m().providerID}` : `$ ${m().name}`}
 											</option>
 										)}
 									</For>
@@ -1940,11 +1966,12 @@ export function AgentPanel() {
 				<label class="check">
 					<input type="checkbox" checked={withSelection()} onChange={(e) => setWithSelection(e.currentTarget.checked)} /> include the selection
 				</label>
-				<Show when={allTickets().length > 0}>
+				<Show when={allTickets().length > 0 || Boolean(agentCtx.pickedTicket)}>
 					<div class="agent-context-bar">
 						<label class="agent-ticket-picker" title="Choose which ticket's context (specs, decisions, open questions) goes with your question">
 							<span class="agent-ticket-label">Ticket:</span>
 							<select
+								ref={ticketSelectEl}
 								class="agent-ticket-select"
 								aria-label="Ticket context for the agent"
 								value={agentCtx.pickedTicket === null ? "__auto__" : agentCtx.pickedTicket}
@@ -1967,11 +1994,16 @@ export function AgentPanel() {
 							>
 								<option value="__auto__">Auto{autoTicket() ? ` (${autoTicket()})` : " (none)"}</option>
 								<option value="">None</option>
-								<For each={allTickets()}>
+								<Show when={pickedTicketMissing()}>
+									<option value={agentCtx.pickedTicket!} disabled>
+										{agentCtx.pickedTicket} (not in list)
+									</option>
+								</Show>
+								<For each={allTickets()} keyed={(t) => t.ticket!}>
 									{(t) => (
-										<option value={t.ticket!}>
-											{t.ticket}
-											{t.title ? ` — ${t.title.slice(0, 32)}` : ""}
+										<option value={t().ticket!}>
+											{t().ticket}
+											{t().title ? ` — ${t().title?.slice(0, 32)}` : ""}
 										</option>
 									)}
 								</For>

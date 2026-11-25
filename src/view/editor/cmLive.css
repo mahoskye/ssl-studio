@@ -2114,6 +2114,8 @@
 	font-family: var(--read-font, var(--ui-font));
 	font-size: var(--text-md);
 	line-height: 1.55;
+	/* The card stands on the window itself, outside the editor: anything positioned in the note it shows stays in the card. */
+	contain: layout;
 }
 
 .md-hover-body h1,

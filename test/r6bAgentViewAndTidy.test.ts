@@ -109,7 +109,7 @@ mock.module("monaco-editor/editor/contrib/semanticTokens/browser/documentSemanti
 mock.module("monaco-editor/editor/editor.worker?worker", () => ({ default: class {} }));
 mock.module(`${resolve(import.meta.dir, "../src/view/editor/markdownLive.worker.ts")}?worker`, () => ({ default: class {} }));
 
-const { REPLY_PURIFY_CONFIG, rewriteFileLinksBeforeParse } = await import("../src/view/agent/markdown");
+const { REPLY_PURIFY_CONFIG, replyKeepsAttribute, rewriteFileLinksBeforeParse } = await import("../src/view/agent/markdown");
 const { evaluateTidyChecks, fenced, isExplicitUnchanged, notePath, pickPrimarySslBlock } = await import("../src/view/agent/tidy");
 const { MAX_SAVED_ENTRY_CHARS, trimThreadsForStorage, writeSavedThreads } = await import("../src/view/agent/store");
 const { codeOnly } = await import("../src/view/editor/textmate");
@@ -172,6 +172,31 @@ describe("R6B — decideModel fail-closed paid-model confirmation", () => {
 });
 
 describe("R6B — markdown.ts exfiltration/spoofing hardening & inline backtick fence", () => {
+	test("a reply keeps no class, id or name of its own: it cannot dress itself as one of the window's dialogs", () => {
+		// `<div class="overlay"><div class="dialog">…` drew a full-window layer in the app's own style.
+		for (const [tag, cls] of [["div", "overlay"], ["div", "dialog"], ["a", "primary"], ["span", "toast error"], ["code", "overlay"], ["code", "language-ssl overlay"], ["pre", "language-ssl"]] as const) {
+			expect(replyKeepsAttribute(tag, "class", cls), `${tag}.${cls}`).toBe(false);
+		}
+		for (const name of ["id", "ID", "name"]) expect(replyKeepsAttribute("div", name, "app")).toBe(false);
+		expect(REPLY_PURIFY_CONFIG.FORBID_ATTR).toContain("id");
+		expect(REPLY_PURIFY_CONFIG.FORBID_ATTR).toContain("name");
+		// What the Markdown renderer writes on a fenced block, and the highlighter reads, stays. So does everything else.
+		for (const lang of ["language-ssl", "language-sql", "language-c++", "language-objective-c", "language-c#"]) expect(replyKeepsAttribute("CODE", "class", lang), lang).toBe(true);
+		expect(replyKeepsAttribute("a", "href", "docs/spec.md")).toBe(true);
+		expect(replyKeepsAttribute("td", "align", "right")).toBe(true);
+	});
+
+	test("the link pattern lets workspace paths through and stops schemes with a hyphen", () => {
+		const allowed = (href: string) => REPLY_PURIFY_CONFIG.ALLOWED_URI_REGEXP.test(href);
+		// These lost their address: `.-:` was read as a range, which took in `/` and the digits.
+		for (const href of ["docs/specs/due-dates.md", "src/DueDates/SetSampleDueDates.ssl#L10-L25", "spec2.md", "README.md", "https://example.com/x", "mailto:a@example.com", "ticket:LIMS-1", "wiki:Note", "#heading"]) {
+			expect(allowed(href), href).toBe(true);
+		}
+		for (const href of ["javascript:alert(1)", "ms-msdt:/id%20PCWDiagnostic", "search-ms:query=x", "ms-excel:ofe|u|https://x", "view-source:https://x", "data:text/html,x", "vbscript:x"]) {
+			expect(allowed(href), href).toBe(false);
+		}
+	});
+
 	test("REPLY_PURIFY_CONFIG forbids zero-click exfiltration attributes, data-* attrs, and spoofing tags", () => {
 		for (const tag of ["canvas", "dialog", "area", "track", "img", "iframe", "style", "svg", "math", "form", "input", "button"]) {
 			expect(REPLY_PURIFY_CONFIG.FORBID_TAGS).toContain(tag);

@@ -104,6 +104,23 @@ export function matchesDocType(doc: DocFile | undefined, path: string, wantedRaw
 	}
 }
 
+/**
+ * The workspace symbols to list for what is typed now. The list the language server gave for this very question
+ * is listed whole. One it gave for an earlier question, still held while the new one is waited for, is listed
+ * only where a symbol's name has every word typed now: such a row answers the new question too. Without this the
+ * rows of the earlier question stayed in the list through the wait, and Enter opened one of them.
+ */
+export function symbolsFor<S extends { name: string }>(held: { query: string; list: readonly S[] } | undefined, query: string): readonly S[] {
+	if (!held) return [];
+	if (held.query === query) return held.list;
+	const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+	if (!words.length) return [];
+	return held.list.filter((symbol) => {
+		const name = symbol.name.toLowerCase();
+		return words.every((word) => name.includes(word));
+	});
+}
+
 function Picker(props: { mode: QuickMode }) {
 	const listId = createUniqueId();
 	/** What is in the box, the first character included. */
@@ -153,13 +170,15 @@ function Picker(props: { mode: QuickMode }) {
 	);
 	let symbolSeq = 0;
 	onCleanup(() => symbolSeq++);
+	// The list is kept with the question it answers: while a newer question waits for its own, the old list is
+	// still the query's value, and `symbolsFor` lists of it only what the newer question would list too.
 	const [symbols] = createAsyncQuery(debouncedSymbolQuery, async (q) => {
 		const seq = ++symbolSeq;
 		try {
 			const list = await session.workspaceSymbols(q);
-			return seq === symbolSeq ? list : [];
+			return { query: q, list: seq === symbolSeq ? list : [] };
 		} catch {
-			return [];
+			return { query: q, list: [] };
 		}
 	});
 	const items = createMemo<Item[]>(() => {
@@ -426,7 +445,7 @@ function Picker(props: { mode: QuickMode }) {
 			run: () => void openFile(d.path, { keep: true }),
 		}));
 
-		const codeSymbols: Item[] = (symbols() ?? []).slice(0, 150).map((s) => {
+		const codeSymbols: Item[] = symbolsFor(symbols(), query()).slice(0, 150).map((s) => {
 			const path = monaco.Uri.parse(s.location.uri).fsPath;
 			const r = s.location.range;
 			return {

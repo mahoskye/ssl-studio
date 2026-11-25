@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createEffect, createMemo, createRoot, createSignal, flush, untrack } from "solid-js";
 import { buildNotices, FALLBACK_LICENSE, NOTICE_FILENAMES } from "../scripts/notices";
+import { createDraft } from "../src/view/draft";
 import type { PreviewTarget } from "../src/view/plan/PlanCodeDrilldown";
 
 // Minimal headless browser & Monaco shims so pure exported helpers from .tsx views can be imported cleanly.
@@ -318,29 +319,30 @@ describe("SolidJS 2.0.3 reactive invariants", () => {
 		}
 	});
 
-	test("draft signal seeded with untrack() stays synced on source changes without losing user typing", () => {
+	test("createDraft follows a changed source, and keeps the typing when the source is only worked out again", () => {
+		// The shape the plan's rows have: every plan edit hands each row a new object, usually holding the same text.
 		const ctx = createRoot((dispose) => {
-			const [source, setSource] = createSignal("Sample/A.ssl");
-			const [draft, setDraft] = createSignal(untrack(source));
-			createEffect(
-				() => source(),
-				(v) => {
-					setDraft(v);
-				},
-			);
-			return { setSource, draft, setDraft, dispose };
+			const [row, setRow] = createSignal({ answer: "Sample/A.ssl" });
+			const [draft, setDraft, committed] = createDraft(() => row().answer);
+			return { setRow, draft, setDraft, committed, dispose };
 		});
 		try {
 			flush();
 			expect(ctx.draft()).toBe("Sample/A.ssl");
 
-			// User edits locally via onInput.
+			// The user types.
 			ctx.setDraft("Sample/A.ssl, Sample/B.ssl");
 			flush();
 			expect(ctx.draft()).toBe("Sample/A.ssl, Sample/B.ssl");
 
-			// External source update resyncs draft.
-			ctx.setSource("Sample/C.ssl");
+			// An unrelated edit: a new row object with the same saved text. The typing stays.
+			ctx.setRow({ answer: "Sample/A.ssl" });
+			flush();
+			expect(ctx.draft()).toBe("Sample/A.ssl, Sample/B.ssl");
+			expect(ctx.committed()).toBe("Sample/A.ssl");
+
+			// The saved text itself changes: the draft follows it.
+			ctx.setRow({ answer: "Sample/C.ssl" });
 			flush();
 			expect(ctx.draft()).toBe("Sample/C.ssl");
 		} finally {
@@ -399,7 +401,7 @@ describe("Plan views — Solid 2 audit regression checks", () => {
 		expect(src).toContain("export function samePreviewTarget(");
 		expect(src).toMatch(/const defaultTarget = createMemo<PreviewTarget \| null>\([\s\S]*?\{ equals: samePreviewTarget \}/);
 		expect(src).toContain("const activeTarget = createMemo<PreviewTarget | null>(() => pickedTarget() ?? defaultTarget(), { equals: samePreviewTarget });");
-		expect(src).toContain("const [scriptsDraft, setScriptsDraft] = createSignal(untrack(scriptsText));");
+		expect(src).toContain('const [scriptsDraft, setScriptsDraft, scriptsText] = createDraft(() => targets().join(", "));');
 		expect(src).toContain("ref={props.bindTextarea(scriptsDraft)}");
 		expect(src).toContain("value={scriptsDraft()}");
 		expect(src).toContain("setScriptsDraft(e.currentTarget.value);");
@@ -476,7 +478,7 @@ describe("Pass-2 adversarial audit fixes — Plan, Graph, Backend & Notices", ()
 		const src = readRepo("src/view/plan/PlanAssistant.tsx");
 
 		expect(src).toContain("function DraftAnswerInput(");
-		expect(src).toContain("const [draft, setDraft] = createSignal(untrack(() => props.value));");
+		expect(src).toContain("const [draft, setDraft] = createDraft(() => props.value);");
 		expect(src).toMatch(/onSettled\(\(\) => \{[\s\S]*?const cur = untrack\(\(\) => props\.value\);[\s\S]*?setDraft\(cur\);/);
 		expect(src).toContain("<DraftAnswerInput");
 		expect(src).toContain("<For each={open()} keyed={(q) => q.question}>");
@@ -558,18 +560,22 @@ describe("Pass-2 adversarial audit fixes — Plan, Graph, Backend & Notices", ()
 		expect(solidLicense).toContain("MIT License");
 		expect(solidLicense).toContain("Ryan Carniato");
 
+		// src/view/public/THIRD-PARTY-NOTICES.md is a build artefact (gitignored), so it is not compared here:
+		// a stale local copy failed this test and a clean checkout skipped it. What is built is what is checked.
 		const built = await buildNotices(root);
-		const committed = readRepo("src/view/public/THIRD-PARTY-NOTICES.md");
-		expect(committed).toBe(built.text);
 
 		const sectionOf = (pkg: string) => {
-			const idx = committed.indexOf(`## ${pkg} `);
+			const idx = built.text.indexOf(`## ${pkg} `);
 			expect(idx, `missing heading for ${pkg}`).toBeGreaterThan(-1);
-			const next = committed.indexOf("\n## ", idx + 1);
-			return committed.slice(idx, next === -1 ? undefined : next);
+			const next = built.text.indexOf("\n## ", idx + 1);
+			return built.text.slice(idx, next === -1 ? undefined : next);
 		};
 
-		for (const pkg of ["solid-js", "@solidjs/web", "rolldown", "katex", "cytoscape", "d3", "dagre-d3-es", "roughjs"]) {
+		for (const pkg of [
+			"solid-js", "@solidjs/web", "rolldown", "katex", "cytoscape", "d3", "dagre-d3-es", "roughjs",
+			// Bundled through CodeMirror, Monaco and the XML formatter.
+			"@lezer/common", "@lezer/lr", "style-mod", "w3c-keyname", "crelt", "@marijn/find-cluster-break", "@vscode/diff", "@xml-tools/parser", "nearley",
+		]) {
 			const sec = sectionOf(pkg);
 			expect(sec, `${pkg} should include fenced license text`).toContain("```");
 		}
