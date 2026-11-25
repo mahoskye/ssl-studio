@@ -14,6 +14,7 @@ import {
 	formatFrontMatterInnerReplacement,
 	frontMatter,
 	frontMatterInnerSpan,
+	innerLineEndingFrontMatter,
 	one,
 	quoteYamlScalar,
 	removeFrontMatterKey,
@@ -102,7 +103,7 @@ import {
 	type InspectorPropertyFact,
 	type MarkdownLinksTab,
 } from "./markdownBridge";
-import { searchFor } from "./Search";
+import { codeExcludeGlob, searchFor } from "./Search";
 
 type HoverCardState = HoverPreviewData & {
 	x: number;
@@ -219,6 +220,13 @@ export function MarkdownInspector() {
 	let hoverCardEl: HTMLDivElement | undefined;
 	let hoverBodyEl: HTMLDivElement | undefined;
 	let lastYamlEditAt = 0;
+	// The raw YAML box holds a line that is not written (see applyYamlInnerEdit): said once, and marked on the box.
+	let yamlHeld = false;
+	const holdYaml = (held: boolean) => {
+		yamlHeld = held;
+		if (held) yamlInputEl?.setAttribute("aria-invalid", "true");
+		else yamlInputEl?.removeAttribute("aria-invalid");
+	};
 	let hoverTimer: ReturnType<typeof setTimeout> | undefined;
 	let hideTimer: ReturnType<typeof setTimeout> | undefined;
 	let hoverSeq = 0;
@@ -348,6 +356,8 @@ export function MarkdownInspector() {
 			queueMicrotask(() => {
 				if (!yamlInputEl) return;
 				if (yamlInputEl.value !== inner) yamlInputEl.value = inner;
+				// The box shows the document again: nothing in it is held back.
+				holdYaml(false);
 				resizeYamlInput(yamlInputEl);
 			});
 		},
@@ -377,6 +387,20 @@ export function MarkdownInspector() {
 		const cur = d.model.getValue();
 		const span = frontMatterInnerSpan(cur);
 		if (!span) return;
+		// Three dashes or three dots on a line of their own end the front matter where they stand. Written in, the
+		// block closed there, the lines typed under it became the document's text, and the box was emptied of them.
+		// No spelling keeps such a line inside the block, so the box is not written while it holds one: the document
+		// stays as it was, the box keeps what was typed, and the person is told once. The next edit that leaves no
+		// such line is written whole.
+		const ends = innerLineEndingFrontMatter(nextInner);
+		if (ends) {
+			if (!yamlHeld) {
+				notify(`Line ${ends.line} of the YAML is ${ends.text}, which ends the front matter there: the lines under it would become the document's text. Nothing in the box is written until that line is changed.`, "error");
+			}
+			holdYaml(true);
+			return;
+		}
+		holdYaml(false);
 		const replacement = formatFrontMatterInnerReplacement(nextInner, span.eol);
 		if (cur.slice(span.start, span.end) === replacement) return;
 		const now = Date.now();
@@ -570,13 +594,7 @@ export function MarkdownInspector() {
 			return ident && root ? { ident, root, version: state.treeVersion } : null;
 		},
 		async ({ ident, root }) => {
-			const cleanDir = (dir?: string) => (dir ?? "").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
-			const dRel = cleanDir(state.project?.docs ?? "docs");
-			const pRel = cleanDir(state.project?.plans ?? "design");
-			const sRel = cleanDir(state.project?.schema ?? "schema");
-			const exclude = [dRel ? `${dRel}/**` : "", pRel ? `${pRel}/**` : "", sRel ? `${sRel}/**` : "", "README.md", "AGENTS.md", "**/INDEX.md"]
-				.filter(Boolean)
-				.join(", ");
+			const exclude = codeExcludeGlob();
 			const hits = await backend.search(ident, { wholeWord: true, exclude }).catch(() => []);
 			const codeHits = hits.map((h) => ({
 				path: h.path,
@@ -1773,6 +1791,7 @@ export function MarkdownInspector() {
 										ref={(el) => {
 											yamlCompleter?.dispose();
 											yamlInputEl = el;
+											yamlHeld = false;
 											el.value = untrack(() => span().inner);
 											yamlCompleter = createTextareaCompleter(el, {
 												mode: "yaml",

@@ -37,7 +37,7 @@ import { MenuBar } from "./MenuBar";
 import { useNavigation } from "./navigation";
 import { StatusBar } from "./StatusBar";
 import { applyFonts, applyTheme, resolveTheme } from "./themes/themes";
-import { activePath, dismiss, focusEditor, focusRequest, isTabsReady, markdownMode, notify, openFolder, planMode, rememberTabs, rememberViews, setState, state, tableTextMode, unsavedPaths, type PanelId } from "./state";
+import { activePath, dismiss, focusEditor, focusRequest, isTabsReady, keepForFolder, markdownMode, notify, openFolder, planMode, rememberTabs, rememberViews, setState, state, tableTextMode, unsavedPaths, type PanelId } from "./state";
 import { focusPanel, getOutlineMemory, getPlanPaletteMemory, isPanelAvailable, isPlanChartActive, isShown, lastShown, loadOutlineMemory, loadPlanPaletteMemory, movePanel, narrowHosted, narrowPanels, panelOn, PANELS, recordOutlineActive, recordPlanPaletteActive, setCrowded, setNarrowHosted, setNarrowPanels, setOutlineMemory, setPlanPaletteMemory, sideOf, togglePanel } from "./panels/registry";
 import { transitionOutlineAvailability, transitionPanelAvailability } from "./panels/outlineState";
 import { isPlanPath } from "./plan/model";
@@ -195,9 +195,10 @@ function useLayoutPersistence(isTemporaryNarrowLeft: () => boolean) {
 			// The self-test opens the fixture itself, not a copy: it leaves no trace in it.
 			if (!root || snapshot(state).info?.selftest) return;
 			const targetRoot = root;
-			const timer = setTimeout(() => {
-				if (state.workspace?.root !== targetRoot) return;
-				void backend.saveSettings("workspace", { layout: JSON.parse(layout) }).then(
+			// A moment after the layout stops changing, and only into the folder it is the layout of: when another
+			// folder is opened first, it is written before the backend leaves this one, or not at all (keepForFolder).
+			return keepForFolder(targetRoot, () =>
+				backend.saveSettings("workspace", { layout: JSON.parse(layout) }).then(
 					() => (layoutRefused = null),
 					(e) => {
 						// The folder's settings file cannot be written (it does not read as settings, say). Said once
@@ -206,9 +207,8 @@ function useLayoutPersistence(isTemporaryNarrowLeft: () => boolean) {
 						if (layoutRefused !== targetRoot) notify(`The window's layout is not being kept for this folder: ${String(e?.message ?? e)}`, "error");
 						layoutRefused = targetRoot;
 					},
-				);
-			}, 600);
-			return () => clearTimeout(timer);
+				),
+			);
 		},
 	);
 }

@@ -12,7 +12,7 @@ import { lspReadyEpoch, session } from "../lsp/session";
 import { docs } from "../project";
 import { activeDoc, notify, openFile, state } from "../state";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
-import { searchFor } from "./Search";
+import { docsFolderGlob, searchFor } from "./Search";
 import { SectionSplitter } from "./SectionSplitter";
 import { recall, remember } from "../graph/canvas";
 import { followReplyLink, renderReply } from "../agent/markdown";
@@ -161,9 +161,7 @@ export function Reference() {
 		return cur ? matchingProjectDocsForReference(cur.label, docs()) : { snippets: [] as DocFile[], notes: [] as DocFile[] };
 	});
 	const findInDocs = (label: string) => {
-		const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
-		const include = docsRel && docsRel !== "." ? `${docsRel}/**` : "**/*.md";
-		searchFor(label, { include, exclude: "" });
+		searchFor(label, { include: docsFolderGlob(), exclude: "" });
 	};
 	const findUsages = (label: string) => {
 		searchFor(label, { wholeWord: true, include: "", exclude: "" });

@@ -1,6 +1,7 @@
 // Files inside one workspace folder. Every path the UI sends is absolute
 // and must stay inside the root.
 import {
+	accessSync,
 	chmodSync,
 	constants,
 	existsSync,
@@ -187,6 +188,13 @@ const SEARCH_MAX_BYTES = 4 * 1024 * 1024;
 const SEARCH_TIMEOUT_MS = 5000;
 /** The largest picture that is sent to the window to be shown. */
 const IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+/**
+ * The largest text that is read to be opened. 20 MB is the most the app takes anywhere else (a file dropped on the
+ * Explorer, an import, an export, a picture), so what was put into a workspace through the app can be opened in
+ * it; it is the size from which the editor itself stops colouring and checking a file; and it leaves room, in the
+ * 32 MB the browser host carries in one message, for what JSON adds to a text.
+ */
+export const READ_MAX_BYTES = 20 * 1024 * 1024;
 
 export class WorkspaceFiles {
 	readonly root: string;
@@ -264,6 +272,13 @@ export class WorkspaceFiles {
 			const file = Bun.file(full);
 			const sniff = new Uint8Array(await file.slice(0, SNIFF_BYTES).arrayBuffer());
 			if (looksBinary(sniff, true)) return { path: full, text: "", mtime, binary: { size: st.size } };
+			// Asked of the file's size before any more of it is read: a text of gigabytes (a dump, a log) was read whole
+			// into memory and handed to the window, which could not hold it either.
+			if (st.size > READ_MAX_BYTES) {
+				const err = new Error(`${relative(this.root, full)} is ${sizeText(st.size)}: too large to open here (the most is ${sizeText(READ_MAX_BYTES)}).`) as NodeJS.ErrnoException;
+				err.code = "EFBIG";
+				throw err;
+			}
 			const bytes = st.size <= SNIFF_BYTES && sniff.length === st.size ? sniff : new Uint8Array(await file.arrayBuffer());
 			const { text, encoding } = decode(bytes);
 			return { path: full, text, mtime, encoding };
@@ -274,7 +289,8 @@ export class WorkspaceFiles {
 	}
 
 	/**
-	 * Writes through a temporary file, so a crash never leaves half a script. A file is written in what it is
+	 * Writes through a temporary file, so a crash never leaves half a script (but for a file with other names, and
+	 * never over a read-only one: `atomicWriteFile`). A file is written in what it is
 	 * written in now, mark and all; a new file in UTF-8. Writes of one file go one after another, in the order
 	 * they were asked for: asked for at once (Ctrl+S twice), they used to share the temporary file, and one failed
 	 * or the file was left with the older text.
@@ -387,7 +403,43 @@ export class WorkspaceFiles {
 		this.inside(named);
 		const full = this.landing(named);
 		mkdirSync(dirname(full), { recursive: true });
-		const temp = join(dirname(full), `.${basename(full)}.${process.pid}.${randomBytes(6).toString("hex")}${TMP_SUFFIX}`);
+		let there: ReturnType<typeof lstatSync> | undefined;
+		try {
+			there = lstatSync(full);
+		} catch (e: any) {
+			if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") throw e;
+		}
+		if (there?.isFile()) {
+			// A file this user may not write is not written. The temporary file renamed over its name asks the folder
+			// and not the file, so a file made read-only on purpose was replaced without a word. Its permissions are
+			// the user's to change, not this program's.
+			let writable = true;
+			try {
+				accessSync(full, constants.W_OK);
+			} catch (e: any) {
+				writable = !(e?.code === "EACCES" || e?.code === "EPERM" || e?.code === "EROFS");
+			}
+			if (!writable) throw new Error(`${relative(this.root, named)} is read-only: it is not written over from here. Make the file writable, then save again.`);
+			// A file with other names (hard links) is written where it is: the temporary file renamed over this name
+			// gave the name a file of its own, and the other names kept the old text. What is given up for that is the
+			// rename's all-or-nothing: a crash or a full disk part of the way leaves the file cut short under every name,
+			// and a reader in that moment sees it so.
+			if (there.nlink > 1) {
+				this.markOwnWrite(full);
+				const fh = await open(full, process.platform === "win32" ? "w" : constants.O_WRONLY | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0));
+				try {
+					await fh.writeFile(bytes);
+				} finally {
+					await fh.close();
+				}
+				this.markOwnWrite(full);
+				return;
+			}
+		}
+		// A short name of its own, not the file's name with more after it: a name near the 255 bytes a file system
+		// allows could be created and then never saved, since its temporary file's name was longer than any name may
+		// be. Still told by what it ends with, which is what the listings and the watcher leave out.
+		const temp = join(dirname(full), `.${process.pid}.${randomBytes(6).toString("hex")}${TMP_SUFFIX}`);
 		const flags =
 			process.platform === "win32"
 				? "wx"
@@ -631,7 +683,23 @@ export class WorkspaceFiles {
 		});
 	}
 
+	/**
+	 * The files of a folder and of the folders in it. The folder asked for is held to the workspace as every other
+	 * path is: `docs`, `src` or another folder of the project may be a link, and one that leads out of the workspace
+	 * was listed through, so the Docs panel showed the titles and summaries of documents outside it. A link that
+	 * stays inside is followed. Below the folder asked for no link is followed at all (a link is neither a folder
+	 * nor a file to the walk), so it cannot go round.
+	 */
 	*files(dir = this.root): Generator<string> {
+		try {
+			this.inside(dir);
+		} catch {
+			return;
+		}
+		yield* this.walk(dir);
+	}
+
+	private *walk(dir: string): Generator<string> {
 		let entries;
 		try {
 			entries = readdirSync(dir, { withFileTypes: true });
@@ -641,7 +709,7 @@ export class WorkspaceFiles {
 		for (const d of entries) {
 			if (SKIP.has(d.name) || d.name.endsWith(TMP_SUFFIX)) continue;
 			const path = join(dir, d.name);
-			if (d.isDirectory()) yield* this.files(path);
+			if (d.isDirectory()) yield* this.walk(path);
 			else if (d.isFile()) yield path;
 		}
 	}

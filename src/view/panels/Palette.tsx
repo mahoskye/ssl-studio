@@ -35,12 +35,12 @@ import { driftFor } from "../plan/drift";
 import { addNodeDoc, nodeDocsOf, printPlan, removeNodeDoc, SHAPE_DRAG, type NodeKind, type Plan } from "../plan/model";
 import { PlanAssistant } from "../plan/PlanAssistant";
 import { NodeImplementation, PlanImplementation } from "../plan/PlanCodeDrilldown";
-import { activePlanBridge, planPaletteTabRequest, setActivePlanTab } from "../plan/planBridge";
+import { activePlanBridge, pendingField, planPaletteTabRequest, setActivePlanTab } from "../plan/planBridge";
 import "../plan/planExtra.css";
 import { NodeTests, PlanTests } from "../plan/PlanTests";
 import { assistOf } from "../plan/run";
 import { docs, isMarkdown } from "../project";
-import { activeDoc, activePath, applyText, markdownMode, notify, openFile, planMode, setMarkdownMode, state } from "../state";
+import { activeDoc, activePath, applyText, holdsPendingEdit, markdownMode, notify, openFile, planMode, setMarkdownMode, state } from "../state";
 import { insertCalloutInteractive, insertImageInteractive, insertMarkdownTemplate, loadMarkdownTemplates, manageTemplates, newNoteFromTemplate } from "../templater";
 import { IconButton, Row, RowGroup, Rows, setFolds } from "./Rows";
 import { SectionSplitter } from "./SectionSplitter";
@@ -566,30 +566,27 @@ export function Palette() {
 			}
 		};
 	};
+	// A plan field's draft, and what it was typed for (`resetKey`: the node's id, or the plan's path). The text
+	// reaches the plan when the field is left, and also when the selection moves on, the field is taken away, or
+	// a save asks for what is pending, without the field having been left: `pendingField` (planBridge.ts) says why.
 	const DraftInput = (props: {
 		value: string;
 		resetKey?: string;
 		placeholder?: string;
 		list?: string;
 		onKeyDown?: (e: KeyboardEvent) => void;
-		onCommit: (value: string) => void;
+		/** `key` is the `resetKey` the text was typed under, which may no longer be the one shown. */
+		onCommit: (value: string, key: string) => void;
 	}) => {
-		const [draft, setDraft] = createSignal(untrack(() => props.value));
+		const field = pendingField(props, { hold: holdsPendingEdit });
 		let reverted = false;
 		let disposed = false;
 		onCleanup(() => {
 			disposed = true;
 		});
-		const syncVal = createMemo(
-			() => ({ key: props.resetKey ?? "", value: props.value }),
-			{ equals: (a, b) => a.key === b.key && a.value === b.value },
-		);
-		createEffect(syncVal, ({ value }) => {
-			setDraft(value);
-		});
 		return (
 			<input
-				value={draft()}
+				value={field.draft()}
 				placeholder={props.placeholder}
 				list={props.list}
 				onFocus={() => {
@@ -601,9 +598,7 @@ export function Palette() {
 						e.stopPropagation();
 						reverted = true;
 						const el = e.currentTarget;
-						const cur = untrack(() => props.value);
-						setDraft(cur);
-						el.value = cur;
+						el.value = field.revert();
 						el.blur();
 						return;
 					}
@@ -611,7 +606,7 @@ export function Palette() {
 				}}
 				onInput={(e) => {
 					reverted = false;
-					setDraft(e.currentTarget.value);
+					field.type(e.currentTarget.value);
 				}}
 				onChange={(e) => {
 					if (reverted) {
@@ -619,11 +614,11 @@ export function Palette() {
 						return;
 					}
 					const el = e.currentTarget;
-					props.onCommit(el.value);
+					field.commit(el.value);
 					onSettled(() => {
 						if (disposed) return;
 						const cur = untrack(() => props.value);
-						setDraft(cur);
+						field.show(cur);
 						if (el.value !== cur) el.value = cur;
 					});
 				}}
@@ -635,26 +630,19 @@ export function Palette() {
 		resetKey?: string;
 		rows?: number;
 		placeholder?: string;
-		onCommit: (value: string) => void;
+		onCommit: (value: string, key: string) => void;
 	}) => {
-		const [draft, setDraft] = createSignal(untrack(() => props.value));
+		const field = pendingField(props, { hold: holdsPendingEdit });
 		let reverted = false;
 		let disposed = false;
 		onCleanup(() => {
 			disposed = true;
 		});
-		const syncVal = createMemo(
-			() => ({ key: props.resetKey ?? "", value: props.value }),
-			{ equals: (a, b) => a.key === b.key && a.value === b.value },
-		);
-		createEffect(syncVal, ({ value }) => {
-			setDraft(value);
-		});
 		return (
 			<textarea
-				ref={bindAutoTextarea(draft)}
+				ref={bindAutoTextarea(field.draft)}
 				rows={props.rows}
-				value={draft()}
+				value={field.draft()}
 				placeholder={props.placeholder}
 				onFocus={() => {
 					reverted = false;
@@ -665,16 +653,14 @@ export function Palette() {
 						e.stopPropagation();
 						reverted = true;
 						const el = e.currentTarget;
-						const cur = untrack(() => props.value);
-						setDraft(cur);
-						el.value = cur;
+						el.value = field.revert();
 						fitTextarea(el);
 						el.blur();
 					}
 				}}
 				onInput={(e) => {
 					reverted = false;
-					setDraft(e.currentTarget.value);
+					field.type(e.currentTarget.value);
 					fitTextarea(e.currentTarget);
 				}}
 				onChange={(e) => {
@@ -683,11 +669,11 @@ export function Palette() {
 						return;
 					}
 					const el = e.currentTarget;
-					props.onCommit(el.value);
+					field.commit(el.value);
 					onSettled(() => {
 						if (disposed) return;
 						const cur = untrack(() => props.value);
-						setDraft(cur);
+						field.show(cur);
 						if (el.value !== cur) {
 							el.value = cur;
 							fitTextarea(el);
@@ -1608,7 +1594,7 @@ export function Palette() {
 																						value={node().text}
 																						placeholder="Describe this step"
 																						onKeyDown={commitOnEnter}
-																						onCommit={(val) => plan.setNodeText(val)}
+																						onCommit={(val, id) => plan.setNodeText(val, id)}
 																					/>
 																				</label>
 																				<label class="plan-prop-field">
@@ -1619,7 +1605,7 @@ export function Palette() {
 																						list="plan-palette-groups"
 																						placeholder="None (unassigned)"
 																						onKeyDown={commitOnEnter}
-																						onCommit={(val) => plan.setNodeGroup(val)}
+																						onCommit={(val, id) => plan.setNodeGroup(val, id)}
 																					/>
 																				</label>
 																				<datalist id="plan-palette-groups">
@@ -1632,7 +1618,7 @@ export function Palette() {
 																						rows={2}
 																						value={node().notes ?? ""}
 																						placeholder="Business rules, exceptions, or context"
-																						onCommit={(val) => plan.setNodeField("notes", val)}
+																						onCommit={(val, id) => plan.setNodeField("notes", val, id)}
 																					/>
 																				</label>
 																				<div class="plan-prop-field plan-node-docs">

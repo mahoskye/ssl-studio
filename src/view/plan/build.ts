@@ -7,6 +7,7 @@ import { bannerTemplate } from "../../shared/houseStyle";
 import { decisionsOf, hashText, planTargetsOf, readBlocks, type NodeMap, type SpecUnit } from "./assist";
 import { nodeDocsOf, type Plan } from "./model";
 import { isLocalModelRef } from "../../shared/agentModels";
+import { languageFor } from "../../shared/languages";
 
 /** `kept`: already built, and the chart has not touched it. It is never sent to the agent or reprinted. */
 export type UnitStatus = "pending" | "running" | "passed" | "stuck" | "skipped" | "kept";
@@ -117,7 +118,67 @@ export function requeueRunning(run: BuildRun): boolean {
 	return found;
 }
 
-export const overBudget = (run: BuildRun) => run.tokens >= run.budget.tokens || (run.budget.cost !== undefined && run.cost >= run.budget.cost);
+export const overTokens = (run: BuildRun) => run.tokens >= run.budget.tokens;
+export const overCost = (run: BuildRun) => run.budget.cost !== undefined && run.cost >= run.budget.cost;
+export const overBudget = (run: BuildRun) => overTokens(run) || overCost(run);
+
+/**
+ * What a build does next: builds a unit, or ends. With nothing left to build it is built, whatever it has spent:
+ * the budget used to be looked at first, so a run whose last unit took it over was "stopped at its budget" with
+ * nothing to carry on with. With a unit waiting and the budget reached, it stops there.
+ */
+export function nextStep(run: BuildRun): { unit: BuildUnit } | { ends: "built" | "budget" } {
+	const unit = nextUnit(run);
+	if (!unit) return { ends: "built" };
+	return overBudget(run) ? { ends: "budget" } : { unit };
+}
+
+/**
+ * Whether the budget ran out on a unit that still had tries to come. Such a unit has not had its tries, so it is
+ * not stuck: it goes back to waiting, and is built when the build is carried on with more to spend. Marked stuck,
+ * it had to be tried again by hand before a carried-on build would take it, and what calls it was passed over as
+ * waiting on a stuck unit.
+ */
+export const cutShort = (run: BuildRun, attempt: number) => overBudget(run) && attempt < MAX_ATTEMPTS;
+
+/**
+ * What a run must be given before it is carried on, because it has reached that budget and has units waiting to
+ * be built; null when it can simply go on. A run that stopped at its budget used to be started again with the
+ * budget it had already reached: it stopped at once, and the only way on was to discard it, and with it every
+ * unit that had passed. A run with nothing waiting is asked for nothing: there is nothing to spend it on.
+ */
+export function spentUp(run: BuildRun): { cost: boolean; tokens: boolean } | null {
+	if (!run.units.some((u) => u.status === "pending" || u.status === "running")) return null;
+	const [cost, tokens] = [overCost(run), overTokens(run)];
+	return cost || tokens ? { cost, tokens } : null;
+}
+
+/**
+ * The cost budget offered when a run that stopped at its budget is carried on: twice the one it had, or, when one
+ * turn has taken it past that already, as much again on top of what is spent. Always above what is spent.
+ */
+export function nextCostBudget(run: BuildRun): number {
+	const had = run.budget.cost ?? 0;
+	if (had * 2 > run.cost) return had * 2;
+	const more = Math.round((run.cost + had) * 100) / 100;
+	return more > run.cost ? more : run.cost + 1;
+}
+
+/** A cost budget as it was typed, for a run that has spent `spent`: a number above zero and above that, or null. */
+export function readCostBudget(answer: string, spent = 0): number | null {
+	const cost = Number(answer.trim());
+	return answer.trim() && Number.isFinite(cost) && cost > 0 && cost > spent ? cost : null;
+}
+
+/**
+ * What a run that reached its budget may spend from here: the cost budget it is given, and another token budget
+ * on top of the tokens it has used. Only what was agreed to is raised, so a run with one of the two still used
+ * up stops again at once. Its units are left as they are: what has passed is not built again.
+ */
+export function raiseBudget(run: BuildRun, more: { cost?: number; tokens?: boolean }) {
+	if (more.cost !== undefined) run.budget.cost = more.cost;
+	if (more.tokens) run.budget.tokens = run.tokens + DEFAULT_TOKEN_BUDGET;
+}
 
 /**
  * Whether a model is known to cost nothing: opencode lists it as local, or its name is a local provider's (or one
@@ -240,6 +301,37 @@ export function unbuiltNodes(plan: Plan, run: BuildRun): string[] {
 
 export const scriptOf = (unit: SpecUnit, plan: Plan) =>
 	unit.script?.trim() || planTargetsOf(plan)[0] || `${plan.title.replace(/[^\w-]+/g, "") || "Plan"}.ssl`;
+
+/**
+ * Why a build may not write a script, or null when it may. A build writes SSL scripts in the workspace's own
+ * folders: the path is relative to the workspace and does not step out of it, no folder on the way is hidden and
+ * the file is not (.git, .ssl-studio, .github and the like), and it is a file SSL Studio itself takes for SSL
+ * (.ssl, .srvscr, .ds, or one of those saved as .txt: the language catalog's rule).
+ *
+ * A unit's script comes from the plan doc, which a model wrote, or from the plan's target scripts. The backend
+ * refuses a path outside the workspace, and that was the only check: inside it a unit could name a git hook or
+ * the project's own settings, and the review offered to create that file, or to rewrite it, as SSL.
+ */
+export function scriptProblem(script: string): string | null {
+	const norm = script.trim().replace(/\\/g, "/");
+	const parts = norm.split("/").filter((part) => part && part !== ".");
+	if (!parts.length || norm.includes("\0")) return "it names no file";
+	if (norm.startsWith("/") || /^[A-Za-z]:/.test(norm) || parts.includes("..")) return "it is not a path inside the workspace";
+	if (parts.some((part) => part.startsWith("."))) return "it is hidden, or in a hidden folder";
+	if (languageFor(norm) !== "ssl") return "it is not an SSL file (.ssl, .srvscr or .ds)";
+	return null;
+}
+
+/** The first unit a build would write whose script it may not, and why. A unit kept as it is, is not written. */
+export function unwritableUnit(units: readonly (SpecUnit & { status?: UnitStatus })[], plan: Plan): { unit: string; script: string; why: string } | null {
+	for (const unit of units) {
+		if (unit.status === "kept") continue;
+		const script = scriptOf(unit, plan);
+		const why = scriptProblem(script);
+		if (why) return { unit: unit.name, script, why };
+	}
+	return null;
+}
 
 /** Sanitizes free-text titles/stage names for single-line SSL comments (`/* ... ;`). */
 const sanitizeSslComment = (text: string): string =>

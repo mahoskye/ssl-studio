@@ -27,7 +27,8 @@ import { isPlanPath } from "../plan/model";
 import { PlanView } from "../plan/PlanView";
 import { baseName, dirName, isInside, relativePath, relativeTo } from "../../shared/paths";
 import { linkWritten } from "../../shared/docLinks";
-import { extractCommentSpans } from "../../shared/editorDocHelpers";
+import { droppedFileNote, extractCommentSpans, writtenInComment } from "../../shared/editorDocHelpers";
+import { sslCommentSpans } from "./textmate";
 import { tabLabels } from "./tabs";
 import { Menu, type MenuItem } from "../Menu";
 import { backend } from "../backend";
@@ -1442,13 +1443,18 @@ export function EditorGroup(props: { index: number }) {
 										: relativePath(dirName(curPath), droppedPath).replace(/\\/g, "/");
 								let insideComment = false;
 								if (pos.lineNumber <= 5000) {
-									const lines: string[] = [];
-									for (let i = 1; i <= pos.lineNumber; i++) lines.push(model.getLineContent(i));
-									const spans = extractCommentSpans(lines, lang)[pos.lineNumber - 1];
-									const offset = pos.column - 1;
-									insideComment = Boolean(spans?.some((s) => offset >= s.from && offset <= s.to));
+									const before: string[] = [];
+									for (let i = 1; i < pos.lineNumber; i++) before.push(model.getLineContent(i));
+									// Where a comment is in SSL is the grammar's to say, the one the colours come from (ADR 0003).
+									const spansOf = lang === "ssl" ? sslCommentSpans : extractCommentSpans;
+									insideComment = writtenInComment(before, model.getLineContent(pos.lineNumber), pos.column - 1, spansOf);
 								}
-								snippet = insideComment ? rel : `/* See ${rel}; */`;
+								const note = droppedFileNote(rel, lang, insideComment);
+								if (note === null) {
+									notify(`${rel} was not written here: its path has “${lang === "ssl" ? ";" : "*/"}” in it, which ends a comment in ${lang === "ssl" ? "SSL" : "SQL"}.`, "error");
+									return;
+								}
+								snippet = note;
 							} else {
 								const root = state.workspace?.root;
 								snippet =

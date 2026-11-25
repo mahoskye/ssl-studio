@@ -267,25 +267,41 @@ class HrWidget extends WidgetType {
 
 const activeImageResizeCleanup = new WeakMap<HTMLElement, () => void>();
 
+/**
+ * Where a drawn widget's source stands in the document now: from where its element is drawn, for as long as the
+ * source is. A widget that is the same but for where it stands keeps the element it was drawn in (its `eq` does
+ * not ask where it stands), so what the element's listeners do, they do where it stands when they run, and not
+ * where it stood when it was drawn.
+ */
+export function widgetRangeNow(view: Pick<EditorView, "posAtDOM" | "state">, dom: HTMLElement, length: number): { from: number; to: number } {
+	const end = view.state.doc.length;
+	const from = Math.min(view.posAtDOM(dom), end);
+	return { from, to: Math.min(from + length, end) };
+}
+
 class ImageWidget extends WidgetType {
+	/** `sourceLength` is how long the picture's Markdown is: where it stands is not kept (see `eq`). */
 	constructor(
 		private readonly spec: ParsedImageSpec,
-		private readonly from: number,
-		private readonly to: number,
+		private readonly sourceLength: number,
 		private readonly filePath: string,
 		private readonly readMode: boolean,
 		private readonly inline = false,
 	) {
 		super();
 	}
+	/**
+	 * Where the picture stands is not part of what it is. It was: a letter typed on a line above moved every
+	 * picture below it, each was then another widget, and its element was thrown away and drawn again from
+	 * nothing, blank until the picture was loaded once more, at every keystroke.
+	 */
 	eq(other: ImageWidget) {
 		return (
 			other.spec.src === this.spec.src &&
 			other.spec.alt === this.spec.alt &&
 			other.spec.width === this.spec.width &&
 			other.spec.height === this.spec.height &&
-			other.from === this.from &&
-			other.to === this.to &&
+			other.sourceLength === this.sourceLength &&
 			other.filePath === this.filePath &&
 			other.readMode === this.readMode &&
 			other.inline === this.inline
@@ -296,6 +312,11 @@ class ImageWidget extends WidgetType {
 		const cb = view.state.facet(liveCallbacksFacet);
 		const wrap = document.createElement(this.inline ? "span" : "div");
 		wrap.className = this.inline ? "cm-md-image-wrap is-inline" : "cm-md-image-wrap";
+		const range = () => widgetRangeNow(view, wrap, this.sourceLength);
+		const resize = (width: number | null) => {
+			const at = range();
+			cb?.onResizeImage(at.from, at.to, width);
+		};
 
 		const frame = document.createElement(this.inline ? "span" : "div");
 		frame.className = "cm-md-image-frame";
@@ -339,13 +360,13 @@ class ImageWidget extends WidgetType {
 			);
 
 			if (!isRead) {
-				tools.appendChild(makeBtn("320", "Resize image width to 320px", this.spec.width === 320, () => cb?.onResizeImage(this.from, this.to, 320)));
-				tools.appendChild(makeBtn("520", "Resize image width to 520px", this.spec.width === 520, () => cb?.onResizeImage(this.from, this.to, 520)));
-				tools.appendChild(makeBtn("Full", "Use natural full width", !this.spec.width, () => cb?.onResizeImage(this.from, this.to, null)));
+				tools.appendChild(makeBtn("320", "Resize image width to 320px", this.spec.width === 320, () => resize(320)));
+				tools.appendChild(makeBtn("520", "Resize image width to 520px", this.spec.width === 520, () => resize(520)));
+				tools.appendChild(makeBtn("Full", "Use natural full width", !this.spec.width, () => resize(null)));
 				tools.appendChild(
 					makeBtn("Edit", "Edit Markdown image syntax", false, () => {
 						view.focus();
-						view.dispatch({ selection: EditorSelection.cursor(Math.min(this.from, view.state.doc.length)), scrollIntoView: true });
+						view.dispatch({ selection: EditorSelection.cursor(range().from), scrollIntoView: true });
 					}),
 				);
 
@@ -401,7 +422,7 @@ class ImageWidget extends WidgetType {
 						cleanup();
 						if (!connected) return;
 						if (nextW !== startW) {
-							cb?.onResizeImage(this.from, this.to, nextW);
+							resize(nextW);
 						}
 					};
 					activeImageResizeCleanup.set(wrap, cleanup);
@@ -446,7 +467,7 @@ class ImageWidget extends WidgetType {
 				return;
 			}
 			view.focus();
-			view.dispatch({ selection: EditorSelection.cursor(Math.min(this.from, view.state.doc.length)), scrollIntoView: true });
+			view.dispatch({ selection: EditorSelection.cursor(range().from), scrollIntoView: true });
 		});
 		return wrap;
 	}
@@ -1017,13 +1038,16 @@ function setDetailsOpen(key: string, open: boolean) {
 
 /** Collapsible `<details><summary>...</summary>...</details>` block widget for Live & Read modes. */
 class DetailsWidget extends WidgetType {
+	/**
+	 * `sourceLength` is how long the block's Markdown is, and `nth` which of the document's blocks with this summary
+	 * it is (0 the first). Where it stands is not kept (see `eq`).
+	 */
 	constructor(
 		private readonly summaryMd: string,
 		private readonly bodyMd: string,
 		private readonly defaultOpen: boolean,
-		private readonly from: number,
-		private readonly to: number,
-		private readonly startLine: number,
+		private readonly sourceLength: number,
+		private readonly nth: number,
 		private readonly filePath: string,
 		private readonly readOnly: boolean,
 		private readonly themeVer: number,
@@ -1031,18 +1055,27 @@ class DetailsWidget extends WidgetType {
 		super();
 	}
 
+	/**
+	 * Where the block stands is not part of what it is, nor of the name its open state is kept under. Both were:
+	 * a line added above made it another widget, drawn again from nothing, and what was kept for it was kept under
+	 * the line it had stood on, so a block that had been opened was drawn closed.
+	 */
 	eq(other: DetailsWidget): boolean {
 		return (
 			other.summaryMd === this.summaryMd &&
 			other.bodyMd === this.bodyMd &&
 			other.defaultOpen === this.defaultOpen &&
-			other.from === this.from &&
-			other.to === this.to &&
-			other.startLine === this.startLine &&
+			other.sourceLength === this.sourceLength &&
+			other.nth === this.nth &&
 			other.filePath === this.filePath &&
 			other.readOnly === this.readOnly &&
 			other.themeVer === this.themeVer
 		);
+	}
+
+	/** The name the block's open state is kept under: its file, its summary, and which block with that summary it is. */
+	get openStateKey(): string {
+		return `${this.filePath}:${this.nth}:${this.summaryMd}`;
 	}
 
 	toDOM(view: EditorView): HTMLElement {
@@ -1052,7 +1085,7 @@ class DetailsWidget extends WidgetType {
 
 		const details = document.createElement("details");
 		details.className = "cm-md-details";
-		const stateKey = `${this.filePath}:${this.startLine}:${this.summaryMd}`;
+		const stateKey = this.openStateKey;
 		details.open = detailsOpenState.has(stateKey) ? detailsOpenState.get(stateKey)! : this.defaultOpen;
 		details.addEventListener("toggle", () => {
 			setDetailsOpen(stateKey, details.open);
@@ -1060,8 +1093,7 @@ class DetailsWidget extends WidgetType {
 
 		const enterRaw = () => {
 			if (this.readOnly) return;
-			const curFrom = Math.min(this.from, view.state.doc.length);
-			const curTo = Math.min(this.to, view.state.doc.length);
+			const { from: curFrom, to: curTo } = widgetRangeNow(view, card, this.sourceLength);
 			view.focus();
 			view.dispatch({
 				selection: EditorSelection.cursor(curFrom),
@@ -1570,6 +1602,8 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 	}
 
 	// 2c. Collapsible `<details><summary>...</summary>...</details>` and block display math (`$$...$$`).
+	// How many `<details>` blocks with each summary have been met so far: what tells two with one summary apart.
+	const detailsSeen = new Map<string, number>();
 	for (let n = startLineNum; n <= state.doc.lines; n++) {
 		const line = state.doc.line(n);
 		if (inFence(line.from) || handledTables.has(n) || handledCallouts.has(n) || handledComments.has(n)) continue;
@@ -1599,6 +1633,9 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 				const from = line.from;
 				const to = state.doc.line(endLineNum).to;
 				const parsed = parseDetailsBlock(state.sliceDoc(from, to));
+				// Counted whether or not the block is drawn now, so that the cursor in one block does not rename the next.
+				const nth = parsed ? (detailsSeen.get(parsed.summaryMd) ?? 0) : 0;
+				if (parsed) detailsSeen.set(parsed.summaryMd, nth + 1);
 				if (
 					parsed &&
 					!isRawEditing(state, from, to) &&
@@ -1612,9 +1649,8 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 								parsed.summaryMd,
 								parsed.bodyMd,
 								parsed.defaultOpen,
-								from,
-								to,
-								n,
+								to - from,
+								nth,
 								filePath,
 								isRead,
 								currentThemeVersion(),
@@ -1713,7 +1749,7 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 			if (cleanSpec.src && !searchMatchesBlock(state, line.from, line.to) && guard.canAdd(line.from, line.to)) {
 				decos.push(
 					Decoration.replace({
-						widget: new ImageWidget(cleanSpec, line.from, line.to, filePath, isRead, false),
+						widget: new ImageWidget(cleanSpec, line.to - line.from, filePath, isRead, false),
 						block: true,
 					}).range(line.from, line.to),
 				);
@@ -2145,7 +2181,7 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 					if (!selectionTouches(state, mFrom, mTo) && guard.canAdd(mFrom, mTo)) {
 						decos.push(
 							Decoration.replace({
-								widget: new ImageWidget(cleanSpec, mFrom, mTo, filePath, state.facet(readOnlyModeFacet), true),
+								widget: new ImageWidget(cleanSpec, mTo - mFrom, filePath, state.facet(readOnlyModeFacet), true),
 							}).range(mFrom, mTo),
 						);
 					}

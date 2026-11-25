@@ -12,6 +12,8 @@ import { Portal, type JSX } from "@solidjs/web";
 import {
 	addCsvColumn,
 	appendRowEdit,
+	cellChangeEdit,
+	cellsToClipboardText,
 	columnOf,
 	compareCellText,
 	convertCsvDelimiter,
@@ -23,7 +25,7 @@ import {
 	deleteCsvColumn,
 	deleteCsvRows,
 	insertRowEdit,
-	moveCsvRow,
+	moveCsvRowEdit,
 	parseClipboardGrid,
 	parseCsv,
 	rawRowText,
@@ -31,7 +33,7 @@ import {
 	renameCsvColumn,
 	reorderCsvColumns,
 	rowSpan,
-	sortCsvRows,
+	sortCsvRowsEdit,
 	tableToTsv,
 	tally,
 	type Cell,
@@ -88,6 +90,7 @@ import { modalOpen } from "../modal";
 import { placeAnchoredMenu, submenuOrInline } from "../../shared/contextMenu";
 import {
 	AUTOFIT_SAMPLE_LIMIT,
+	cellBeforeInTabOrder,
 	cellEditGuard,
 	cellsToMarkdownTable,
 	compareRowsBySorts,
@@ -95,14 +98,19 @@ import {
 	computeVirtualWindow,
 	DEFAULT_ROW_HEIGHT,
 	extractFirstHttpUrl,
+	fillNotice,
 	findUnknownTicketTokens,
+	focusAfterRowsDrawn,
 	generateFillSeries,
 	getTableViewState,
 	isCellInFindSelection,
 	isDedicatedTicketColumn,
 	isSchemaTableColumn,
+	keyActsOnCell,
 	nextTableIssueIndex,
 	parseTableViewStateStore,
+	pasteFit,
+	pasteNotice,
 	pasteStart,
 	pruneSortSpecs,
 	remapSortSpecs,
@@ -116,6 +124,7 @@ import {
 	tableViewStateStorageKey,
 	toggleSortSpec,
 	tokenizeCellLinks,
+	trackedColumn,
 	upsertTableViewState,
 	type CellFindOptions,
 	type SortSpec,
@@ -713,6 +722,8 @@ export function TableView(props: { path: string; group?: number }) {
 	const [onlyMissing, setOnlyMissing] = createSignal(false);
 	let checkRunId = 0;
 	let userCancelledRunId = 0;
+	/** The column of the check that is running, followed through columns deleted or put in another order meanwhile. */
+	let checkedColumn: ReturnType<typeof trackedColumn> | null = null;
 	let disposed = false;
 	onCleanup(() => {
 		disposed = true;
@@ -1201,6 +1212,10 @@ export function TableView(props: { path: string; group?: number }) {
 			(existing.options.include ?? "") === (options.include ?? "") &&
 			(existing.options.exclude ?? "") === (options.exclude ?? "");
 		const counts = canMerge ? new Map(existing.counts) : new Map<string, number>();
+		// The result goes to the column where it is when the check ends, not where it was when the check began:
+		// with a column to its left deleted meanwhile, the counts were shown on the column that took its place.
+		const target = trackedColumn(spec.column);
+		checkedColumn = target;
 
 		setChecking({ done: 0, total: terms.length, columnName: colName });
 		let cancelled = false;
@@ -1231,9 +1246,9 @@ export function TableView(props: { path: string; group?: number }) {
 			const isCurrentRun = !disposed && runId === checkRunId;
 			const isUserCancelled = !disposed && userCancelledRunId === runId;
 			if (isUserCancelled) userCancelledRunId = 0;
-			if (isCurrentRun || (isUserCancelled && completed > 0)) {
+			if (target.at() >= 0 && (isCurrentRun || (isUserCancelled && completed > 0))) {
 				setCodeCheck({
-					column: spec.column,
+					column: target.at(),
 					columnName: colName,
 					splitLists: spec.splitLists,
 					caseSensitive: spec.caseSensitive,
@@ -1253,8 +1268,23 @@ export function TableView(props: { path: string; group?: number }) {
 				}
 			}
 		} finally {
+			if (checkedColumn === target) checkedColumn = null;
 			if (!disposed && runId === checkRunId) setChecking(null);
 		}
+	};
+
+	/**
+	 * Tells the check that is running where its column went: `remap` gives a column's new place, or -1 for one that
+	 * was deleted. A check of a deleted column is stopped; there is nothing left for its result to be shown on.
+	 */
+	const moveCheckedColumn = (remap: (column: number) => number) => {
+		if (!checkedColumn) return;
+		checkedColumn.moved(remap);
+		if (checkedColumn.at() >= 0) return;
+		checkedColumn = null;
+		userCancelledRunId = 0;
+		checkRunId++;
+		setChecking(null);
 	};
 
 	const findValueInCode = (value: string) => {
@@ -2214,6 +2244,38 @@ export function TableView(props: { path: string; group?: number }) {
 		},
 	);
 
+	// The rows are drawn a window at a time, so the row of the cell that has the focus is taken off the page when it
+	// is scrolled far enough away. The browser then gives the focus to the page's body: no key reached the table,
+	// and the arrows and typing did nothing until a cell was clicked again. The table itself takes the focus
+	// instead and holds it for the active cell, which gets it back when its row is drawn again. A key pressed
+	// meanwhile goes to the active cell all the same (`keyToActiveCell`).
+	let focusHeld = false;
+	createEffect(
+		() => {
+			drawnEntryIds();
+			const ac = activeCell();
+			// Asked here, before the rows are drawn again: whether the focus is in them.
+			return { wasInRows: Boolean(body?.contains(document.activeElement)), cell: ac && !ac.ghost ? ac : null };
+		},
+		({ wasInRows, cell }) => {
+			const focused = document.activeElement;
+			const lost = !focused || focused === document.body;
+			// Most times the rows are drawn nothing was lost and nothing is held: the cell is not looked for.
+			if (!(wasInRows && lost) && !focusHeld) return;
+			const td = cell ? body?.querySelector<HTMLElement>(`tr[data-row="${cell.row}"] > td[data-col="${cell.column}"]`) : null;
+			const next = focusAfterRowsDrawn({
+				wasInRows,
+				lost,
+				held: focusHeld,
+				onTable: focused === rootEl,
+				cellDrawn: Boolean(td),
+			});
+			focusHeld = next.held;
+			if (next.focus === "table") rootEl?.focus({ preventScroll: true });
+			else if (next.focus === "cell") td?.focus({ preventScroll: true });
+		},
+	);
+
 	const visEntryIdxForRow = (rowIdx: number) => displayEntries().findIndex((e) => e.kind === "row" && e.index === rowIdx);
 
 	/** Adjusts `scrollEl.scrollTop` synchronously so entry `visIdx` in `displayEntries()` renders inside the virtual window. */
@@ -2634,6 +2696,7 @@ export function TableView(props: { path: string; group?: number }) {
 			const cols = visibleColumns();
 			const t = table();
 			const updates: { row: number; col: number; value: string }[] = [];
+			let leftAlone = 0;
 			const { axis, target } = drag;
 
 			if (axis === "down" || axis === "up") {
@@ -2650,7 +2713,11 @@ export function TableView(props: { path: string; group?: number }) {
 					for (let i = 0; i < count; i++) {
 						const targetVr = axis === "down" ? target.r1 + i : target.r2 - i;
 						const item = list[targetVr];
-						if (item) updates.push({ row: item.index, col, value: series[i] ?? "" });
+						if (!item) continue;
+						// Past the end of a series that ends (a numbered name does not count below zero) a cell is left as it is.
+						const value = series[i];
+						if (value === undefined) leftAlone++;
+						else updates.push({ row: item.index, col, value });
 					}
 				}
 			} else {
@@ -2667,7 +2734,10 @@ export function TableView(props: { path: string; group?: number }) {
 					for (let i = 0; i < count; i++) {
 						const targetVc = axis === "right" ? target.c1 + i : target.c2 - i;
 						const col = cols[targetVc];
-						if (col !== undefined) updates.push({ row: item.index, col, value: series[i] ?? "" });
+						if (col === undefined) continue;
+						const value = series[i];
+						if (value === undefined) leftAlone++;
+						else updates.push({ row: item.index, col, value });
 					}
 				}
 			}
@@ -2685,9 +2755,8 @@ export function TableView(props: { path: string; group?: number }) {
 				setCellAnchor({ row: startRowItem.index, column: startCol });
 				focusCell(endRowItem.index, endCol, { keepAnchor: true });
 			}
-			if (changed > 0) {
-				notify(`${useLiteral ? "Copied" : "Filled"} ${changed} ${changed === 1 ? "cell" : "cells"} (Ctrl+Z to undo).`);
-			}
+			const said = fillNotice(changed, leftAlone, useLiteral);
+			if (said) notify(said);
 		};
 
 		cancelActiveFillDrag?.();
@@ -2702,18 +2771,18 @@ export function TableView(props: { path: string; group?: number }) {
 	const copyCellRangeAsTsv = async (range: CellRangeRect) => {
 		const list = displayRows();
 		const cols = visibleColumns();
-		const lines: string[] = [];
+		const block: string[][] = [];
 		for (let vr = range.r1; vr <= range.r2; vr++) {
 			const item = list[vr];
 			if (!item) continue;
 			const rowVals: string[] = [];
 			for (let vc = range.c1; vc <= range.c2; vc++) {
 				const col = cols[vc];
-				rowVals.push(col === undefined ? "" : csvCell(item.cells[col]?.text ?? "", "\t"));
+				rowVals.push(col === undefined ? "" : (item.cells[col]?.text ?? ""));
 			}
-			lines.push(rowVals.join("\t"));
+			block.push(rowVals);
 		}
-		await copyText(lines.join("\n"), `Copied ${range.rowCount} × ${range.colCount} cells as TSV.`);
+		await copyText(cellsToClipboardText(block), `Copied ${range.rowCount} × ${range.colCount} cells as TSV.`);
 	};
 
 	const copyCellRangeAsMarkdown = async (range: CellRangeRect) => {
@@ -2834,17 +2903,14 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!model) return;
 		const cells = table().rows[row];
 		if (!cells) return;
-		const delimiter = table().delimiter;
-		const cell = cells[column];
-		if (cell && cell.text === value) return;
-		const last = cells[cells.length - 1]!;
-		const [start, end, written] = cell
-			? [cell.start, cell.end, serializeCellInRow(value, cells.length, delimiter)]
-			: [last.end, last.end, delimiter.repeat(column - cells.length + 1) + csvCell(value, delimiter)];
-		const from = model.getPositionAt(start);
-		const to = model.getPositionAt(end);
+		// Nothing is written when the table would show nothing different: a cell that a short row does not have,
+		// emptied or committed as it is, padded the row and left the file changed (`cellChangeEdit`).
+		const edit = cellChangeEdit(cells, column, value, table().delimiter);
+		if (!edit) return;
+		const from = model.getPositionAt(edit.start);
+		const to = model.getPositionAt(edit.end);
 		model.pushStackElement();
-		model.pushEditOperations([], [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: written }], () => null);
+		model.pushEditOperations([], [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: edit.text }], () => null);
 		model.pushStackElement();
 	};
 
@@ -2904,19 +2970,24 @@ export function TableView(props: { path: string; group?: number }) {
 			return;
 		}
 		if (move === "prev") {
-			if (visCol > 0) {
-				const prevCol = cols[visCol - 1]!;
+			const vis = displayRows().findIndex((r) => r.index === row);
+			const before = cellBeforeInTabOrder(vis, visCol, cols.length);
+			if (before.visRow !== vis) {
+				navigateToVisRow(before.visRow, cols[before.visCol] ?? 0, { edit: true });
+				return;
+			}
+			if (before.visCol !== visCol) {
+				const prevCol = cols[before.visCol]!;
 				setCellAnchor(null);
 				setActiveCell({ ghost: false, row, column: prevCol });
 				setEditing({ ghost: false, row, column: prevCol });
 				return;
 			}
-			const list = displayRows();
-			const vis = list.findIndex((r) => r.index === row);
-			if (vis > 0) {
-				navigateToVisRow(vis - 1, cols[cols.length - 1] ?? 0, { edit: true });
-				return;
-			}
+			// Shift+Tab in the first cell has nowhere to go and stays there, as in Excel and Sheets. The editor
+			// closed and nothing was given the focus: it fell to the page, and the next key went nowhere.
+			setEditing(null);
+			focusCell(row, column);
+			return;
 		}
 		if (move === "down") {
 			setEditing(null);
@@ -2968,7 +3039,9 @@ export function TableView(props: { path: string; group?: number }) {
 				}
 			}
 			setEditing(null);
-			if (move === "stay" || move === "down") focusGhostCell(column);
+			// Tab in the blank row's last cell, and Shift+Tab in its first with no row above, have nowhere to go and
+			// stay there: the editor closed with the focus given to nothing. Only a click away ("none") leaves it.
+			if (move !== "none") focusGhostCell(column);
 			return;
 		}
 
@@ -3003,7 +3076,18 @@ export function TableView(props: { path: string; group?: number }) {
 		}
 		setEditing(null);
 		if (move === "down") focusGhostCell(column);
-		else if (move === "stay") queueMicrotask(() => focusCell(newRow, column));
+		// Shift+Tab from the first cell of the row just added stays on that cell.
+		else if (move === "stay" || move === "prev") queueMicrotask(() => focusCell(newRow, column));
+	};
+
+	/** Applies one edit of the text, from `start` up to `end`, as one undoable step. Nothing outside it is written (ADR 0002). */
+	const applyTextEdit = (edit: { start: number; end: number; text: string }) => {
+		if (!model) return;
+		const from = model.getPositionAt(edit.start);
+		const to = model.getPositionAt(edit.end);
+		model.pushStackElement();
+		model.pushEditOperations([], [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: edit.text }], () => null);
+		model.pushStackElement();
 	};
 
 	const moveRowTo = (fromRow: number, toRow: number, focusCol?: number) => {
@@ -3024,8 +3108,8 @@ export function TableView(props: { path: string; group?: number }) {
 		if (fromRow < 0 || fromRow >= count || toRow < 0 || toRow >= count || fromRow === toRow) return;
 		const raw = model.getValue();
 		const fresh = parseCurrentCsv(raw);
-		const next = moveCsvRow(raw, fresh, fromRow, toRow);
-		if (next === raw) return;
+		const edit = moveCsvRowEdit(raw, fresh, fromRow, toRow);
+		if (!edit || raw.slice(edit.start, edit.end) === edit.text) return;
 
 		setSelectedRows((prev) => {
 			if (!prev.size) return prev;
@@ -3042,10 +3126,9 @@ export function TableView(props: { path: string; group?: number }) {
 		clearFindSelectionScope();
 		clearRowHeights();
 
-		const fullRange = model.getFullModelRange();
-		model.pushStackElement();
-		model.pushEditOperations([], [{ range: fullRange, text: next }], () => null);
-		model.pushStackElement();
+		// The edit is of the rows from the one moved to where it goes. The whole text was written anew, and with
+		// it went the blank lines anywhere among the rows.
+		applyTextEdit(edit);
 
 		const col = focusCol ?? activeCell()?.column ?? visibleColumns()[0] ?? 0;
 		queueMicrotask(() => focusCell(toRow, col));
@@ -3249,16 +3332,11 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!targetRows.length) return;
 		const ops: { range: { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number }; text: string }[] = [];
 		for (const r of targetRows) {
-			const cells = t.rows[r]!;
-			const cell = cells[colIdx];
-			if (cell && cell.text === value) continue;
-			const last = cells[cells.length - 1]!;
-			const [start, end, written] = cell
-				? [cell.start, cell.end, serializeCellInRow(value, cells.length, t.delimiter)]
-				: [last.end, last.end, t.delimiter.repeat(colIdx - cells.length + 1) + csvCell(value, t.delimiter)];
-			const from = model.getPositionAt(start);
-			const to = model.getPositionAt(end);
-			ops.push({ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: written });
+			const edit = cellChangeEdit(t.rows[r]!, colIdx, value, t.delimiter);
+			if (!edit) continue;
+			const from = model.getPositionAt(edit.start);
+			const to = model.getPositionAt(edit.end);
+			ops.push({ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: edit.text });
 		}
 		if (!ops.length) return;
 		model.pushStackElement();
@@ -3492,6 +3570,7 @@ export function TableView(props: { path: string; group?: number }) {
 				clearCodeCheck();
 			}
 		}
+		moveCheckedColumn(shift);
 		const nextFrozen = frozenCols().map(shift).filter((c) => c >= 0);
 		setFrozenCols(nextFrozen);
 		const nextHidden = new Set([...hiddenCols()].map(shift).filter((c) => c >= 0));
@@ -3551,9 +3630,11 @@ export function TableView(props: { path: string; group?: number }) {
 			.map((cells, idx) => ({ idx, cells }))
 			.sort((a, b) => compareRowsBySorts(a.cells, b.cells, sorts, (cells, col) => cells[col]?.text ?? ""))
 			.map((x) => x.idx);
-		const next = sortCsvRows(raw, t, sortedIndices);
+		// One edit, from the first row that changes place to the last. Blank lines among the rows are no rows:
+		// they stay on the lines they are on, and the rows change places around them.
+		const edit = sortCsvRowsEdit(raw, t, sortedIndices);
 		setOrder([]);
-		if (!next) {
+		if (!edit) {
 			notify("Rows are already in that order.");
 			return;
 		}
@@ -3566,7 +3647,9 @@ export function TableView(props: { path: string; group?: number }) {
 		setEditing(null);
 		clearFindSelectionScope();
 		clearRowHeights();
-		applyFullText(next, "Saved row sort order to file (Ctrl+Z to undo).");
+		applyTextEdit(edit);
+		notify("Saved row sort order to file (Ctrl+Z to undo).");
+		queueMicrotask(() => rootEl?.focus());
 	};
 
 	const copyFilteredAs = async (fmt: "tsv" | "csv" | "markdown") => {
@@ -3577,7 +3660,7 @@ export function TableView(props: { path: string; group?: number }) {
 			fmt === "tsv"
 				? hasHeader()
 					? tableToTsv(headers, bodyRows)
-					: bodyRows.map((r) => r.map((v) => csvCell(v, "\t")).join("\t")).join("\n")
+					: cellsToClipboardText(bodyRows)
 				: fmt === "csv"
 					? (hasHeader() ? [csvRow(headers, table().delimiter), ...bodyRows.map((r) => csvRow(r, table().delimiter))] : bodyRows.map((r) => csvRow(r, table().delimiter))).join("\n")
 					: cellsToMarkdownTable(headers, bodyRows);
@@ -3687,7 +3770,7 @@ export function TableView(props: { path: string; group?: number }) {
 		const cols = visibleColumns();
 		const headers = cols.map((c) => headerName(c));
 		const bodyRows = ordered.map((r) => cols.map((c) => r.cells[c]?.text ?? ""));
-		const out = hasHeader() ? tableToTsv(headers, bodyRows) : bodyRows.map((r) => r.map((v) => csvCell(v, "\t")).join("\t")).join("\n");
+		const out = hasHeader() ? tableToTsv(headers, bodyRows) : cellsToClipboardText(bodyRows);
 		await copyText(out, `Copied ${bodyRows.length} selected ${bodyRows.length === 1 ? "row" : "rows"} as TSV for Excel/Sheets.`);
 	};
 
@@ -3949,17 +4032,16 @@ export function TableView(props: { path: string; group?: number }) {
 				const rowIdx = list[targetVis]!.index;
 				const cells = t.rows[rowIdx];
 				if (!cells?.length) continue;
-				const maxColNeeded = Math.max(
-					-1,
-					...pasteRow.map((_, cOff) => cols[startVisCol + cOff] ?? -1),
-				);
 				// Collect missing trailing cells first so we know the resulting row width before serializing existing cells.
+				// An empty value pasted onto a cell the row does not have changes nothing to see, and is not written
+				// (as in `applyCellUpdates`): a block of empty cells pasted over short rows padded every one of them.
 				const tailVals = new Map<number, string>();
 				for (let cOff = 0; cOff < pasteRow.length; cOff++) {
 					const targetCol = cols[startVisCol + cOff];
 					if (targetCol === undefined) break;
-					if (!cells[targetCol]) tailVals.set(targetCol, pasteRow[cOff]!);
+					if (!cells[targetCol] && pasteRow[cOff] !== "") tailVals.set(targetCol, pasteRow[cOff]!);
 				}
+				const maxColNeeded = Math.max(-1, ...tailVals.keys());
 				const finalCellCount = tailVals.size && maxColNeeded >= cells.length ? maxColNeeded + 1 : cells.length;
 				for (let cOff = 0; cOff < pasteRow.length; cOff++) {
 					const targetCol = cols[startVisCol + cOff];
@@ -4016,7 +4098,10 @@ export function TableView(props: { path: string; group?: number }) {
 		model.pushEditOperations([], ops, () => null);
 		model.pushStackElement();
 		if (appended.length === 1) pinRowIfFiltered(t.rows.length);
-		notify(`Pasted ${grid.length} × ${Math.max(...grid.map((r) => r.length))} cells (Ctrl+Z to undo).`);
+		// A paste adds rows, never columns: what was copied past the last column shown is left out, and said to be.
+		// The notice gave the size of what was copied as the size of what was pasted.
+		const fit = pasteFit(Math.max(...grid.map((r) => r.length)), startVisCol, cols.length);
+		notify(pasteNotice(grid.length, fit.cols, fit.leftOut));
 	};
 
 	// --- In-table Find & Replace (Ctrl+F / Ctrl+H) --------------------------
@@ -4889,6 +4974,7 @@ export function TableView(props: { path: string; group?: number }) {
 			nextCheck = mapped >= 0 ? { ...curCheck, column: mapped } : null;
 			setCodeCheck(nextCheck);
 		}
+		moveCheckedColumn((oldCol) => remapColumnIndex(oldCol, applied));
 
 		setColOrder([]);
 		const afterAlt = model.getAlternativeVersionId();
@@ -5015,7 +5101,7 @@ export function TableView(props: { path: string; group?: number }) {
 	};
 
 	/** Arrow / Shift+Arrow / Page / Home / End / Alt+Arrow keys index `displayRows()` across virtualized windows; ContextMenu / Shift+F10 opens cell actions (ADR 0010). */
-	const onCellKey = (e: KeyboardEvent, row: number, column: number) => {
+	const onCellKey = (e: KeyboardEvent, row: number, column: number, cellEl?: HTMLElement) => {
 		if (editing()) return;
 		const targetEl = e.target as HTMLElement | null;
 		const onInnerButton = targetEl !== e.currentTarget && Boolean(targetEl?.closest("button"));
@@ -5023,7 +5109,7 @@ export function TableView(props: { path: string; group?: number }) {
 			e.preventDefault();
 			e.stopPropagation();
 			lastKeyMenuAt = performance.now();
-			void openCellContextMenu(pointUnder(e.currentTarget as HTMLElement), row, column);
+			void openCellContextMenu(pointUnder(cellEl ?? (e.currentTarget as HTMLElement)), row, column);
 			return;
 		}
 		if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
@@ -5144,6 +5230,24 @@ export function TableView(props: { path: string; group?: number }) {
 			if (!isCellInRange(row, column)) setCellAnchor(null);
 			setEditing({ ghost: false, row, column, seed: e.key });
 		}
+	};
+
+	/**
+	 * Gives a key pressed while the table itself has the focus to the active cell, and says whether it did. The
+	 * table has the focus while the active cell's row is scrolled too far away to be drawn (see `focusHeld`). As in
+	 * Sheets, an arrow or typing then first brings the active cell back into view, and acts on it as it would have.
+	 */
+	const keyToActiveCell = (e: KeyboardEvent): boolean => {
+		const ac = activeCell();
+		if (!ac || ac.ghost || editing() || modalOpen() || !keyActsOnCell(e)) return false;
+		const visIdx = visEntryIdxForRow(ac.row);
+		if (visIdx < 0) return false;
+		ensureVisRowInWindow(visIdx);
+		// The rows are drawn now, so that the cell is on the page, with the focus again, before the key acts on it.
+		flush();
+		const td = body?.querySelector<HTMLElement>(`tr[data-row="${ac.row}"] > td[data-col="${ac.column}"]`);
+		onCellKey(e, ac.row, ac.column, td ?? undefined);
+		return true;
 	};
 
 	const onGhostKey = (e: KeyboardEvent, column: number) => {
@@ -5708,6 +5812,8 @@ export function TableView(props: { path: string; group?: number }) {
 				void pasteGridAt(raw);
 			}}
 			onKeyDown={(e) => {
+				// A key pressed on the table itself, not on a cell in it, goes to the active cell.
+				if (e.target === e.currentTarget && keyToActiveCell(e)) return;
 				// F8 / Shift+F8: jump to next/previous inline validation issue across the table.
 				if (e.key === "F8" && !e.ctrlKey && !e.metaKey && !e.altKey) {
 					if (editing() || modalOpen()) return;
@@ -6329,6 +6435,14 @@ export function TableView(props: { path: string; group?: number }) {
 				}}
 				onMouseDown={(e) => {
 					const target = e.target as HTMLElement | null;
+					// A press on the scroll bar scrolls the table and leaves the selection as it is, as in Excel and
+					// Sheets. It counted as a press on the empty space beside the table, which takes the selection away.
+					const box = e.currentTarget.getBoundingClientRect();
+					const onScrollBar =
+						target === e.currentTarget &&
+						(e.clientX - box.left - e.currentTarget.clientLeft >= e.currentTarget.clientWidth ||
+							e.clientY - box.top - e.currentTarget.clientTop >= e.currentTarget.clientHeight);
+					if (onScrollBar) return;
 					if (!target?.closest("td, th, button, input")) clearCellSelection();
 				}}
 			>

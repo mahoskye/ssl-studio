@@ -1,4 +1,5 @@
 import type { Cell, Table } from "./csv";
+import { folderPattern } from "./fileGlob";
 import type { SearchOptions } from "./searchPattern";
 
 // A table's values against the project's files: is the thing a cell names
@@ -74,12 +75,13 @@ export function defaultExcludePattern(apart: readonly string[]): string {
 	const seen = new Set<string>();
 	const parts: string[] = [];
 	for (const raw of apart) {
-		const clean = raw.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+|\/+$/g, "");
-		if (!clean || clean === ".") continue;
-		const key = clean.toLowerCase();
+		// A folder's name is not a pattern: a comma or a brace in it is that character (folderPattern).
+		const pattern = folderPattern(raw);
+		if (!pattern) continue;
+		const key = pattern.toLowerCase();
 		if (seen.has(key)) continue;
 		seen.add(key);
-		parts.push(`${clean}/**`);
+		parts.push(pattern);
 	}
 	return parts.join(", ");
 }

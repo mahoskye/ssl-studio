@@ -1542,7 +1542,16 @@ export function copyPlanSelection(plan: Plan, ids: ReadonlySet<string>, sourcePl
 	};
 }
 
-/** Pastes copied nodes and internal edges with fresh IDs and a slight canvas offset. */
+/**
+ * Pastes copied nodes and internal edges with fresh IDs. Back into the plan they were copied from, each keeps its
+ * stage and stands a little off where its original was nudged to.
+ *
+ * Into another plan, nothing of the first plan's layout comes along. A stage's id means something only in its
+ * own plan, so a step joins the stage of the same name where the other plan has one, and stands outside every
+ * stage otherwise: the stage itself is not copied, as a frame is not on a whiteboard when only what is in it
+ * was. Its offset is left behind as well, since that is a distance from where the first plan's layout had put
+ * it: the steps are laid out as any new loose step is, and the chart selects them and pans to the first.
+ */
 export function pastePlanSelection(
 	plan: Plan,
 	clip: PlanClipboard,
@@ -1564,11 +1573,13 @@ export function pastePlanSelection(
 		idMap.set(src.id, freshId);
 		pastedIds.push(freshId);
 		const curOff = offsetFor(src.offset, dir);
-		const nextOffset: PlanOffset = {
-			x: Math.round(curOff.x + shift),
-			y: Math.round(curOff.y + shift),
-			...(dir === "RIGHT" ? { dir: "RIGHT" } : {}),
-		};
+		const nextOffset: PlanOffset | null = samePlan
+			? {
+					x: Math.round(curOff.x + shift),
+					y: Math.round(curOff.y + shift),
+					...(dir === "RIGHT" ? { dir: "RIGHT" } : {}),
+				}
+			: null;
 		const docs = nodeDocsOf(src);
 		const kind: NodeKind = src.kind === "start" && alreadyHasStart ? "step" : src.kind;
 		if (kind === "start") alreadyHasStart = true;
@@ -1603,7 +1614,7 @@ export function pastePlanSelection(
 			...(resolvedGroup ? { group: resolvedGroup } : {}),
 			...(typeof src.notes === "string" && src.notes ? { notes: src.notes } : {}),
 			...(docs.length ? { docs } : {}),
-			offset: nextOffset,
+			...(nextOffset ? { offset: nextOffset } : {}),
 		};
 		working = { ...working, nodes: [...working.nodes, clone] };
 	}
@@ -1617,6 +1628,29 @@ export function pastePlanSelection(
 		newEdges.push({ ...edgeRest, from, to, ...(typeof e.label === "string" && e.label ? { label: e.label } : {}) });
 	}
 	return { plan: { ...working, edges: [...working.edges, ...newEdges] }, pastedIds };
+}
+
+/** What was copied on a chart last, for a paste on any chart. */
+let copiedSteps: PlanClipboard | null = null;
+
+/**
+ * Copy on a chart: the steps, with the plan they are copied from. The plan is asked for here, where it cannot be
+ * left out. The chart used to call `copyPlanSelection` and `pastePlanSelection` itself, without it, so a paste
+ * into another plan was taken for a paste back into the same one, and a step went into whichever stage there
+ * happened to have the id its own stage had in the plan it came from. Null when there is nothing to copy; what
+ * was copied before then stays.
+ */
+export function copySteps(plan: Plan, ids: ReadonlySet<string>, planPath: string): PlanClipboard | null {
+	const clip = copyPlanSelection(plan, ids, planPath);
+	if (clip) copiedSteps = clip;
+	return clip;
+}
+
+export const hasCopiedSteps = (): boolean => copiedSteps !== null;
+
+/** Paste on a chart: what was copied last, into this plan. Null when nothing has been copied. */
+export function pasteSteps(plan: Plan, planPath: string, dir: LayoutDirection = "DOWN"): { plan: Plan; pastedIds: string[] } | null {
+	return copiedSteps ? pastePlanSelection(plan, copiedSteps, dir, 36, planPath) : null;
 }
 
 // --- Plan node lookup for Call Graph -> Plan jumps (Wave 4.4) --------------------

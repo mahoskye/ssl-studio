@@ -10,7 +10,7 @@ import { ask, choose, quickPick, type QuickPickOption } from "../dialogs";
 import { localDay } from "../../shared/dates";
 import { docChecks } from "../../shared/docChecks";
 import { aggregateDocIssues, applyMultiSelectClick, hasAnyDocIssue, type DocIssueSummary } from "../../shared/docSelection";
-import { addToFrontMatterList, frontMatter, one, withFrontMatter } from "../../shared/frontMatter";
+import { addToFrontMatterList, frontMatter, frontMatterRefusal, one, withFrontMatter } from "../../shared/frontMatter";
 import { CATALOG_AREAS, DOC_FOLDERS, docMatches, isCatalog, KNOWLEDGE, progress, progressShort, projectDocLabel, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
 import { normalizeTag, tagSearchPattern, workspaceTags } from "../../shared/tags";
 import { descendantTickets, ticketWork } from "../../shared/workContext";
@@ -54,7 +54,7 @@ import {
 	updateCatalogs,
 	updateManifest,
 } from "../projectDocs";
-import { searchFor } from "./Search";
+import { codeExcludeGlob, searchFor } from "./Search";
 import { manageTemplates, newNoteFromTemplate } from "../templater";
 import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, newOfKind, plainSection, schemaFolderOf, schemaOf, sectionFolder, sectionMenuEntries, SHOW_FOLDER, type DocSection } from "../../shared/docSections";
 import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
@@ -89,7 +89,13 @@ const DocsPanelContext = createContext<DocsPanelContextValue>({
 
 const isBulkSelectable = (file: DocFile) => file.exists && !isCatalog(file) && /\.(md|markdown)$/i.test(file.name);
 
-async function editDocFrontMatter(path: string, transform: (text: string) => string | null): Promise<boolean> {
+/**
+ * Changes one document's front matter; true when the document changed, false when it already read that way. A
+ * change the writer refuses (null) is raised, for the caller's own notice to name the document: it was once passed
+ * over like a value already set, and a selection was told it "already had" a status that one of its documents
+ * did not take.
+ */
+async function editDocFrontMatter(path: string, field: string, transform: (text: string) => string | null): Promise<boolean> {
 	const key = canonical(path);
 	const open = documents.get(key);
 	if (open?.binary) return false;
@@ -97,7 +103,8 @@ async function editDocFrontMatter(path: string, transform: (text: string) => str
 	const cur = liveOpen ? liveOpen.model.getValue() : await backend.read(path).then((r) => (r.binary ? null : r.text), () => null);
 	if (cur === null) return false;
 	const next = transform(cur);
-	if (next === null || next === cur) return false;
+	if (next === null) throw new Error(frontMatterRefusal(cur, field));
+	if (next === cur) return false;
 	if (liveOpen) {
 		const clean = !state.dirty[key];
 		if (!applyText(key, next)) throw new Error(`Could not update open buffer for ${baseName(path)}.`);
@@ -296,7 +303,7 @@ async function archiveSpecOrDecision(file: DocFile): Promise<void> {
 	// Update status on the moved path directly without invoking the interactive supersede wizard mid-archive.
 	if (picked === ARCHIVE_MARK) {
 		try {
-			await editDocFrontMatter(dest, (text) => withFrontMatter(text, "status", targetStatus));
+			await editDocFrontMatter(dest, "status", (text) => withFrontMatter(text, "status", targetStatus));
 		} catch (e: any) {
 			notify(`Archived, but could not update status on ${baseName(dest)}: ${e?.message ?? e}`, "error");
 		}
@@ -599,14 +606,7 @@ async function rowMenu(file: DocFile, at: Point) {
 	else if (picked === LINK_SQL_SOURCE) await linkSchemaDocToSql(file.path);
 	else if (picked === FIND_IN_CODE) {
 		const rawStem = (file.name.split(/[\\/]/).pop() || file.title || "").replace(/\.[^.]+$/, "").trim();
-		const cleanDir = (dir?: string) => (dir ?? "").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
-		const dRel = cleanDir(state.project?.docs ?? "docs");
-		const pRel = cleanDir(state.project?.plans ?? "design");
-		const sRel = cleanDir(state.project?.schema ?? "schema");
-		const exc = [dRel ? `${dRel}/**` : "", pRel ? `${pRel}/**` : "", sRel ? `${sRel}/**` : "", "README.md", "AGENTS.md", "**/INDEX.md"]
-			.filter(Boolean)
-			.join(", ");
-		if (rawStem) searchFor(rawStem, { wholeWord: true, include: "", exclude: exc });
+		if (rawStem) searchFor(rawStem, { wholeWord: true, include: "", exclude: codeExcludeGlob() });
 	}
 	else if (picked === ARCHIVE_TICKET) await archiveTicket(file);
 	else if (picked === UNARCHIVE_TICKET) await unarchiveTicket(file);
@@ -1340,17 +1340,22 @@ export function Docs() {
 		let failed = 0;
 		for (const doc of targets) {
 			try {
+				// The status is set whether or not the day it was answered can be: an `answered:` the document writes
+				// over several lines is left as it is, and said.
+				let answeredLeft = false;
 				if (targets.length === 1) {
 					await setStatus(doc.path, picked);
 					changed++;
 				} else if (
-					await editDocFrontMatter(doc.path, (text) => {
+					await editDocFrontMatter(doc.path, "status", (text) => {
 						let next = withFrontMatter(text, "status", picked);
 						if (next === null) return null;
 						if (doc.group === "knowledge" && doc.kind === "questions" && toneOf(picked) === "done") {
 							const fm = frontMatter(next);
 							if (!one(fm.values.answered)) {
-								next = withFrontMatter(next, "answered", todayStr) ?? next;
+								const dated = withFrontMatter(next, "answered", todayStr);
+								if (dated === null) answeredLeft = true;
+								else next = dated;
 							}
 						}
 						return next;
@@ -1358,6 +1363,7 @@ export function Docs() {
 				) {
 					changed++;
 				}
+				if (answeredLeft) notify(`${baseName(doc.path)} has its status, but not the day it was answered: its answered: is written over several lines. Change it in the text.`, "error");
 			} catch (e: any) {
 				failed++;
 				notify(`Could not update ${baseName(doc.path)}: ${e?.message ?? e}`, "error");
@@ -1426,7 +1432,7 @@ export function Docs() {
 		let failed = 0;
 		for (const doc of targets) {
 			try {
-				if (await editDocFrontMatter(doc.path, (text) => addToFrontMatterList(text, "tags", tag))) changed++;
+				if (await editDocFrontMatter(doc.path, "tags", (text) => addToFrontMatterList(text, "tags", tag))) changed++;
 			} catch (e: any) {
 				failed++;
 				notify(`Could not update ${baseName(doc.path)}: ${e?.message ?? e}`, "error");
@@ -1488,7 +1494,7 @@ export function Docs() {
 		let failed = 0;
 		for (const doc of targets) {
 			try {
-				if (await editDocFrontMatter(doc.path, (text) => withFrontMatter(text, "release", val))) changed++;
+				if (await editDocFrontMatter(doc.path, "release", (text) => withFrontMatter(text, "release", val))) changed++;
 			} catch (e: any) {
 				failed++;
 				notify(`Could not update ${baseName(doc.path)}: ${e?.message ?? e}`, "error");
@@ -1559,7 +1565,7 @@ export function Docs() {
 		let failed = 0;
 		for (const doc of targets) {
 			try {
-				if (await editDocFrontMatter(doc.path, (text) => withFrontMatter(text, field, value))) changed++;
+				if (await editDocFrontMatter(doc.path, field, (text) => withFrontMatter(text, field, value))) changed++;
 			} catch (e: any) {
 				failed++;
 				notify(`Could not update ${baseName(doc.path)}: ${e?.message ?? e}`, "error");

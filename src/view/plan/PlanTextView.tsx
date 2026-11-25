@@ -110,6 +110,8 @@ export function PlanTextView(props: {
 	codeStateOf: (id: string) => CodeIndicator;
 	troubleOf: (id: string) => string[] | undefined;
 	builderRequest?: TextTestBuilderRequest | null;
+	/** Told once a request has opened the builder here, so the next text view is not handed it again. */
+	onBuilderRequestTaken?: (req: TextTestBuilderRequest) => void;
 	onSelectNode: (id: string | null) => void;
 	onPeekNode: (id: string | null, opts?: { pan?: boolean }) => void;
 	onShowOnChart: (id?: string) => void;
@@ -275,6 +277,7 @@ export function PlanTextView(props: {
 				}
 				openFreshBuilder({ nodeId: req.nodeId, journeyIndex: req.journeyIndex });
 			});
+			props.onBuilderRequestTaken?.(req);
 		},
 	);
 

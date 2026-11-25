@@ -30,6 +30,8 @@ export type Node = {
 	children: Node[];
 	/** Stable across edits that do not move the node: kind, name and start. */
 	key: string;
+	/** What the block's fold is remembered by (`nameFolds`): its place in the structure, not its line. Leaves have none. */
+	fold?: string;
 };
 
 /** A one-line statement's place: 1-based line, Monaco columns (end exclusive), and its keyword. */
@@ -83,6 +85,7 @@ export function buildTree(lines: string[], symbols: SymbolIn[], folds: FoldIn[])
 		stack.push(node);
 	}
 	fill(root, lines);
+	nameFolds(root);
 	return root;
 }
 
@@ -187,6 +190,22 @@ export function swapLines(lines: string[], a: { start: number; end: number }, b:
 	return { start: a.start, end: b.end, lines: [...second, ...between, ...first] };
 }
 
+/**
+ * The lines an edit made in the blocks leaves to be formatted (ADR 0002: an edit, then a range format of what it
+ * touched), in the text as it is after the edit. `text` is what was put at line `start`, in place of the lines
+ * that were there or between two lines: those are its own lines. Null is a deletion of whole lines from `start`:
+ * what it touched is where the text now joins, the line before and the line that moved up, as far as there are
+ * such lines. `lineCount` is the text's after the edit.
+ */
+export function editedLines(start: number, text: string | null, lineCount: number): Span {
+	const last = Math.max(1, lineCount);
+	const within = (line: number) => Math.min(Math.max(1, line), last);
+	if (text === null) return { start: within(start - 1), end: within(start) };
+	// A line break that ends the text ends its last line: it does not begin another.
+	const count = text.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n").length;
+	return { start: within(start), end: within(start + count - 1) };
+}
+
 // --- From the server's syntax tree (L1, docs/LSP-REQUESTS.md) ------------------
 //
 // starlims-lsp's ssl/syntaxTree, shape version 1 (its catalog entry
@@ -257,6 +276,7 @@ export function treeFromSyntax(lines: string[], nodes: SyntaxNodeIn[], paramsOf?
 	for (const n of nodes) convert(n, root);
 	groupClassHead(root, statementRanges);
 	fill(root, lines, closers);
+	nameFolds(root);
 	return root;
 }
 
@@ -311,6 +331,50 @@ export function procedureGroups(children: Node[]): Node[][] {
 		groups.push([child]);
 	}
 	return groups;
+}
+
+/**
+ * Gives every block that can be folded the name its fold is remembered by. The name is the block's place in the
+ * structure, never the line it starts on: remembered by line, a fold sat on whichever block had come to start
+ * there once a line was added or removed above, and the block that had been folded sprang open.
+ *
+ * - A procedure is known by its name, wherever in the file it is: moved, or wrapped in a region, it stays folded.
+ * - A doc block is known by the procedure it is drawn with.
+ * - Anything else (a region, a control-flow block, a comment, a class's head) is known by what it is, under what
+ *   it is in: `procedure:Run/block:IF#2` is the second `:IF` block directly in Run.
+ *
+ * All of it is the language server's own: names, kinds, keywords, and the order of a node's children. What it
+ * cannot tell apart, this cannot either. A procedure or a region that is renamed is a new one: its fold, and the
+ * folds in it, are not carried over, and it shows unfolded. And when a block is added or removed before another
+ * of its kind under the same parent, the folds of the later ones of that kind there move on by one. Nothing else
+ * moves a fold, and a name whose block is gone is kept: the block is folded again if it comes back (an undo).
+ */
+function nameFolds(root: Node) {
+	const taken = new Set<string>();
+	// One name, one block: a name that is taken (the second `:IF` of its parent, a second procedure of one name) is counted on.
+	const unique = (name: string) => {
+		let key = name;
+		for (let n = 2; taken.has(key); n++) key = `${name}#${n}`;
+		taken.add(key);
+		return key;
+	};
+	const label = (node: Node) => {
+		if (node.kind === "region") return `region:${node.name ?? ""}`;
+		if (node.kind === "block") return node.classHead ? "class" : `block:${node.header?.keyword.toUpperCase() ?? ""}`;
+		return node.kind;
+	};
+	const walk = (parent: Node, path: string) => {
+		for (const group of procedureGroups(parent.children)) {
+			const procedure = group.length > 1 ? group.at(-1)! : group[0]!.kind === "procedure" ? group[0]! : undefined;
+			if (procedure) procedure.fold = unique(`procedure:${procedure.name ?? ""}`);
+			for (const child of group) {
+				if (LEAVES.has(child.kind)) continue;
+				if (child !== procedure) child.fold = unique(procedure && child.doc ? `doc:${procedure.fold}` : `${path}${label(child)}`);
+				walk(child, `${child.fold}/`);
+			}
+		}
+	};
+	walk(root, "");
 }
 
 /**

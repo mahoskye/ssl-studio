@@ -3,6 +3,7 @@
 // (`![[diagram.png]]` resolved across relative folder, attachments/, assets/, and workspace files),
 // and safe sanitized local SVG diagrams.
 import DOMPurify from "dompurify";
+import { pictureFolders } from "../../shared/docLinks";
 import { imageType } from "../../shared/fileKind";
 import { baseName, dirName, isInside, joinPath, relativePath, relativeTo, resolvePath } from "../../shared/paths";
 import { backend } from "../backend";
@@ -139,21 +140,8 @@ export async function resolveImageTarget(src: string, docPath: string): Promise<
 	// Obsidian bare attachment resolution: check local attachments/assets, project attachmentsFolder, then workspace basename.
 	const wantedName = baseName(decoded).toLowerCase();
 	const docDir = docInWorkspace ? dirName(docPath) : root;
-	const rawDocsRoot = resolvePath(root, state.project?.docs ?? "docs");
-	const docsRoot = isInside(root, rawDocsRoot) ? rawDocsRoot : joinPath(root, "docs");
-	const configured = state.settings.attachmentsFolder?.trim();
-	const configuredDir = configured ? resolvePath(root, configured) : null;
-	const candidateDirs = [
-		...(configuredDir && isInside(root, configuredDir) ? [configuredDir] : []),
-		...(docInWorkspace
-			? [joinPath(docDir, "attachments"), joinPath(docDir, "assets"), joinPath(docDir, "images")]
-			: []),
-		joinPath(docsRoot, "attachments"),
-		joinPath(docsRoot, "assets"),
-		joinPath(docsRoot, "images"),
-		joinPath(root, "assets"),
-		joinPath(root, "images"),
-	];
+	// The order of the folders is the one a rename follows a bare name by (`bareNameTarget`): both read it from one list.
+	const candidateDirs = pictureFolders(docInWorkspace ? docDir : null, { root, docs: state.project?.docs, attachments: state.settings.attachmentsFolder });
 
 	for (const dir of candidateDirs) {
 		const cand = resolvePath(dir, decoded);

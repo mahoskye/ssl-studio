@@ -1079,6 +1079,144 @@ describe("SolidJS 2.0.3 audit — plan/buildRun.ts", () => {
 			expect(done.status).toBe("built");
 			expect(prompts.filter((p) => unitAsked(p) === "Mark").at(-1)).toContain("THE USER SAID: SAMPLES");
 		});
+
+		// Pass 3, lows: a build stopped at its budget is carried on, and a script it may not write is refused.
+		const priced = (reply: any, cost: number) => ({ ...reply, cost });
+
+		test("a build stopped at its cost budget is carried on once the budget is raised, and what passed is not built again", async () => {
+			const { startBuild } = await setUp({
+				models: [local, paid],
+				model: "openrouter/paid-model",
+				reply: (prompt) => priced(unitAsked(prompt) ? codeFor(unitAsked(prompt)!) : said("It does what the chart says."), 1.5),
+			});
+			let answers: (string | null)[] = ["1"];
+			askHandler = (prompt) => {
+				questions.push(prompt);
+				return answers.length ? answers.shift()! : null;
+			};
+			await startBuild(planPath);
+			// Mark cost 1.50 against a budget of 1: the build stops before Notify.
+			expect(latestAssistOf(planPath).run?.status).toBe("budget");
+			expect(unitsNow()).toEqual([
+				["Mark", "passed"],
+				["Notify", "pending"],
+			]);
+			const turns = prompts.length;
+			// Carried on, and the question backed out of: nothing is spent, and nothing changes.
+			answers = [null];
+			await startBuild(planPath);
+			expect(questions.at(-1)).toBe("The build has spent 1.50, and its budget was 1. Stop it at what cost now?");
+			expect(prompts.length).toBe(turns);
+			expect(latestAssistOf(planPath).run?.status).toBe("budget");
+			// A budget that is not above what is spent is refused.
+			answers = ["1.5"];
+			await startBuild(planPath);
+			expect(prompts.length).toBe(turns);
+			expect(latestAssistOf(planPath).run?.budget.cost).toBe(1);
+			// Raised: the unit not built yet is built, and the one that passed is not asked for again.
+			answers = ["5"];
+			await startBuild(planPath);
+			expect(latestAssistOf(planPath).run?.budget.cost).toBe(5);
+			expect(prompts.map(unitAsked)).toEqual(["Mark", "Notify", null]);
+			expect(latestAssistOf(planPath).run?.status).toBe("built");
+			expect(unitsNow()).toEqual([
+				["Mark", "passed"],
+				["Notify", "passed"],
+			]);
+		});
+
+		test("a unit the budget ran out on, with tries still to come, waits: it is not stuck, and is built when the build is carried on", async () => {
+			const { startBuild } = await setUp({
+				models: [local, paid],
+				model: "openrouter/paid-model",
+				// Mark's first try has no code, and costs more than the budget.
+				reply: (prompt) => priced(unitAsked(prompt) === "Mark" && !prompt.includes("THESE ARE WRONG WITH IT") ? said("I will write it later.") : unitAsked(prompt) ? codeFor(unitAsked(prompt)!) : said("It does what the chart says."), 1.5),
+			});
+			let answers: (string | null)[] = ["1"];
+			askHandler = (prompt) => {
+				questions.push(prompt);
+				return answers.length ? answers.shift()! : null;
+			};
+			await startBuild(planPath);
+			expect(latestAssistOf(planPath).run?.status).toBe("budget");
+			expect(unitsNow()).toEqual([
+				["Mark", "pending"],
+				["Notify", "pending"],
+			]);
+			answers = ["10"];
+			await startBuild(planPath);
+			expect(latestAssistOf(planPath).run?.status).toBe("built");
+			expect(unitsNow()).toEqual([
+				["Mark", "passed"],
+				["Notify", "passed"],
+			]);
+		});
+
+		test("a run that has used its tokens is carried on after a yes, and not without one", async () => {
+			const { run, startBuild } = await setUp({ models: [local], model: "ollama/qwen3" });
+			run.status = "budget";
+			run.tokens = 400_100;
+			updateAssist(planPath, { run });
+			const asked: [string, string[] | undefined][] = [];
+			let say: string | null = null;
+			chooseHandler = (prompt, options) => {
+				asked.push([prompt, options]);
+				return say;
+			};
+			await startBuild(planPath);
+			expect(asked.length).toBe(1);
+			expect(asked[0]![1]).toEqual(["Carry on"]);
+			expect(prompts.length).toBe(0);
+			expect(latestAssistOf(planPath).run?.status).toBe("budget");
+			say = "Carry on";
+			await startBuild(planPath);
+			expect(latestAssistOf(planPath).run?.status).toBe("built");
+			expect(latestAssistOf(planPath).run?.budget.tokens).toBe(400_100 + 400_000);
+		});
+
+		test("a run past its budget with nothing left to build is built, and is asked for nothing", async () => {
+			const { run, startBuild } = await setUp({ models: [local, paid], model: "openrouter/paid-model" });
+			run.status = "budget";
+			run.cost = 3;
+			run.budget.cost = 1;
+			for (const unit of run.units) Object.assign(unit, { status: "passed", code: `:PROCEDURE ${unit.name};\n:ENDPROC;` });
+			updateAssist(planPath, { run });
+			await startBuild(planPath);
+			expect(questions).toEqual([]);
+			expect(prompts.length).toBe(0);
+			expect(latestAssistOf(planPath).run?.status).toBe("built");
+		});
+
+		test("carrying on a build that has finished asks the model nothing more", async () => {
+			const { startBuild } = await setUp({
+				models: [local],
+				model: "ollama/local-model",
+				reply: (prompt) => (unitAsked(prompt) ? codeFor(unitAsked(prompt)!) : said("It does what the chart says.")),
+			});
+			await startBuild(planPath);
+			expect(latestAssistOf(planPath).run?.status).toBe("built");
+			expect(latestAssistOf(planPath).run?.review).toBe("It does what the chart says.");
+			const turns = prompts.length;
+			// The button is still there on a finished run: pressed again, there is nothing to build and nothing new to read.
+			await startBuild(planPath);
+			await startBuild(planPath);
+			expect(prompts.length).toBe(turns);
+			expect(latestAssistOf(planPath).run?.status).toBe("built");
+			expect(latestAssistOf(planPath).run?.review).toBe("It does what the chart says.");
+		});
+
+		test("a unit whose script is in a hidden folder stops the build before anything is asked", async () => {
+			const { run, startBuild } = await setUp({ models: [local], model: "ollama/qwen3" });
+			run.units[1]!.script = ".git/hooks/pre-commit";
+			updateAssist(planPath, { run });
+			await startBuild(planPath);
+			expect(agentCalls).toEqual([]);
+			expect(state.messages.at(-1)?.text).toBe("The build cannot write .git/hooks/pre-commit, where Notify is to go: it is hidden, or in a hidden folder. Discard this build, and correct the plan doc or the plan's target scripts.");
+			expect(unitsNow()).toEqual([
+				["Mark", "pending"],
+				["Notify", "pending"],
+			]);
+		});
 	});
 });
 
@@ -1711,6 +1849,25 @@ describe("SolidJS 2.0.3 audit — state.ts & recentTabs.ts", () => {
 				expect(asked[0]).toContain("unsaved changes");
 				expect(snapshot(state).groups[0]!.tabs).toContain(path);
 				expect((documents.get(path)!.model as any).getValue()).toBe("id,name\n1,CHANGED\n");
+			} finally {
+				release();
+			}
+		});
+
+		test("is put in its document before the keyboard steps to the next tab", async () => {
+			const { cell, release } = await openCell();
+			try {
+				rpcHandler = (method) => (method === "read" ? { text: "other\n", mtime: 1, encoding: "utf-8" } : null);
+				await openFile("/ws/data/other.csv", { keep: true });
+				await openFile(path, { keep: true });
+				flush();
+				cell.typed = "TYPED";
+				// The tab is left by a key: nothing takes the focus out of the cell, so nothing else commits it.
+				nextTab();
+				flush();
+				expect(snapshot(state).groups[0]!.active).toBe("/ws/data/other.csv");
+				expect(cell.typed).toBeNull();
+				expect(documents.get(path)!.model.getValue()).toBe("id,name\n1,TYPED\n");
 			} finally {
 				release();
 			}

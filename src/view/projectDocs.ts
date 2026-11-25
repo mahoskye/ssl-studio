@@ -5,8 +5,8 @@
 // be undone, and a file that exists is never written over.
 import DOMPurify from "dompurify";
 import { marked } from "marked";
-import { CATALOG_FILE, catalogBlock, catalogList, catalogStale, hasCatalogPlace, withCatalog, type CatalogItem } from "../shared/catalog";
-import { csvCell, csvRow, parseCsv } from "../shared/csv";
+import { CATALOG_FILE, catalogBlock, catalogEndMissing, catalogList, catalogStale, hasCatalogPlace, withCatalog, type CatalogItem } from "../shared/catalog";
+import { addCsvColumn, csvCell, csvDelimiterForPath, csvRow, parseCsv } from "../shared/csv";
 import { localDay } from "../shared/dates";
 import { docChecks } from "../shared/docChecks";
 import {
@@ -110,7 +110,7 @@ import {
 } from "../shared/projectDocs";
 import { folderParts, typedParts } from "../shared/docSections";
 import type { DocFile, LinkTo, NameIn } from "../shared/protocol";
-import { backend } from "./backend";
+import { backend, fileExists } from "./backend";
 import { ask, browseWorkspaceFile, choose, quickPick, quickPickMany, type QuickPickOption } from "./dialogs";
 import { recall, remember } from "./graph/canvas";
 import { tasks, toggleTask } from "../shared/tasks";
@@ -121,6 +121,7 @@ import { docs, isMarkdown } from "./project";
 import {
 	codeMatchesRef,
 	descendantTickets,
+	pathMatchesRef,
 	ticketAtHand as listedTicketAtHand,
 	scriptsForTicket,
 	ticketForFile,
@@ -223,6 +224,11 @@ async function writeCatalog(
 	if (before !== null && optional && !hasCatalogPlace(before)) return false;
 	if (before !== null && !catalogStale(before, items)) return false;
 	await put(path, withCatalog(before ?? catalogTemplate(area), items), before !== null);
+	// With the line that ends the list gone, the old list cannot be told from the person's words under it: all of it
+	// is kept, and the person is told, since a line of the old list may now stand under the new one.
+	if (before !== null && catalogEndMissing(before)) {
+		notify(`${relativeTo(root(), path)} had lost the line that ends its list (<!-- /catalog -->). The list is written anew, and everything that stood under the old one is kept below it: take out any line of the old list left there.`);
+	}
 	// The docs folder's catalog names the catalogs of the folders under it: one of those just started is one more for
 	// it to name, where it is kept.
 	if (before === null && area in DOC_FOLDERS && !options.alone) await writeCatalog("docs", await backend.docs(), { kept: true });
@@ -871,7 +877,12 @@ export async function setStatus(path: string, status: string) {
 	if (after === null) return notify("The status could not be set here: it is written over several lines. Change it in the text.", "error");
 	// A question that is answered says when, once: the day is part of the answer.
 	const question = docs().some((d) => d.group === "knowledge" && d.kind === "questions" && canonical(d.path) === canonical(path));
-	if (question && toneOf(status) === "done" && !one(frontMatter(after).values.answered)) after = withFrontMatter(after, "answered", today()) ?? after;
+	if (question && toneOf(status) === "done" && !one(frontMatter(after).values.answered)) {
+		const dated = withFrontMatter(after, "answered", today());
+		// The status is set either way; an `answered:` written over several lines is left as it is, and said.
+		if (dated === null) notify("The day it was answered could not be set: answered: is written over several lines. Change it in the text.", "error");
+		else after = dated;
+	}
 	if (after === before) return;
 	try {
 		await put(path, after, true);
@@ -2315,10 +2326,24 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 	}
 }
 
+/**
+ * The values of a ticket's `specs:` or `plans:` that name the document at `targetPath`: the ones to take out to
+ * unlink it. A value names it by the rule that lists the document under the ticket (`pathMatchesRef`), so a path
+ * written from the ticket's own folder, `../specs/Due-dates.md`, is one. It was once compared with the path from
+ * the project's folder alone: the document was listed as linked, and its Unlink found nothing to take out.
+ */
+export function refsNaming(values: readonly string[], targetPath: string, ticketPath: string, rootPath: string): string[] {
+	const normRef = (v: string) => v.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").toLowerCase();
+	const targetNorm = normRef(relativeTo(rootPath, targetPath));
+	return values.filter((v) => {
+		const vn = normRef(v);
+		return vn === targetNorm || targetNorm.endsWith(`/${vn}`) || vn.endsWith(`/${targetNorm}`) || pathMatchesRef(targetPath, v, ticketPath);
+	});
+}
+
 /** Removes the YAML/JSON association between `ticketPath` (`key`) and `target`. */
 export async function unlinkDocumentFromTicket(ticketPath: string, key: string, target: DocFile): Promise<void> {
 	if (!ready()) return;
-	const relTarget = relativeTo(root(), target.path).split("\\").join("/");
 	try {
 		let changed = false;
 		// A field laid out over several lines is not edited from here. It is named afterwards: the link is written,
@@ -2333,17 +2358,9 @@ export async function unlinkDocumentFromTicket(ticketPath: string, key: string, 
 		const tBefore = await current(ticketPath);
 		if (tBefore !== null) {
 			let tNext = tBefore;
-			const normRef = (v: string) => v.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").toLowerCase();
-			const targetNorm = normRef(relTarget);
 			const removePathField = (src: string, field: string) => {
-				const vals = many(frontMatter(src).values[field]);
 				let cur = src;
-				for (const v of vals) {
-					const vn = normRef(v);
-					if (vn === targetNorm || targetNorm.endsWith(`/${vn}`) || vn.endsWith(`/${targetNorm}`)) {
-						cur = take(cur, field, v, ticketPath);
-					}
-				}
+				for (const v of refsNaming(many(frontMatter(src).values[field]), target.path, ticketPath, root())) cur = take(cur, field, v, ticketPath);
 				return cur;
 			};
 			if (target.group === "specs") {
@@ -2452,6 +2469,36 @@ export async function linkNonTicketToTicket(docPath: string): Promise<void> {
 	}
 }
 
+/**
+ * A registry's text with one more row, for a ticket: `name` in its first column, the ticket's key in its ticket
+ * column, "found" as its status. With `addTicketColumn`, a registry that has no ticket column is given one first.
+ * Both are edits of the text where they land (ADR 0002): the column goes on the end of each row's own line, and
+ * the row on the end of the file. The column was once added by printing the whole table again from its cells:
+ * every value was requoted, the blank lines went, and in a row with fewer or more cells than the header the new
+ * empty cell (or the row's own last one) came to stand under the wrong column. Null when there is no header row.
+ */
+export function registryTextWithRow(text: string, path: string, name: string, key: string, addTicketColumn: boolean): string | null {
+	let table = parseCsv(text, { prefer: csvDelimiterForPath(path) });
+	if (!table.header.length) return null;
+	let next = text;
+	if (addTicketColumn && ticketColumn(table) < 0) {
+		const widened = addCsvColumn(text, table, "ticket");
+		if (widened === null) return null;
+		next = widened;
+		table = parseCsv(next, { delimiter: table.delimiter });
+	}
+	const nl = text.includes("\r\n") ? "\r\n" : "\n";
+	const row = table.header.map((h, idx) => {
+		const col = h.text.trim().toLowerCase();
+		if (idx === 0) return name;
+		if (col === "ticket" || col === "tickets") return key;
+		if (col === "status") return "found";
+		return "";
+	});
+	const prefix = next && !/\r?\n$/.test(next) ? nl : "";
+	return `${next}${prefix}${csvRow(row, table.delimiter)}${nl}`;
+}
+
 /** Appends a new row to a chosen CSV registry pre-filled with `key` in its Ticket column (adding a `ticket` column if missing). */
 export async function addRegistryRowForTicket(key: string, initialItem?: string): Promise<void> {
 	if (!ready()) return;
@@ -2476,7 +2523,7 @@ export async function addRegistryRowForTicket(key: string, initialItem?: string)
 	if (!state.workspace || root() !== startRoot) return;
 	const text = await current(reg.path);
 	if (text === null) return;
-	const table = parseCsv(text);
+	const table = parseCsv(text, { prefer: csvDelimiterForPath(reg.path) });
 	if (!table.header.length) return notify(`${reg.name} has no header row.`, "error");
 	const hasTicketCol = ticketColumn(table) >= 0;
 	let addTicketCol = false;
@@ -2495,32 +2542,8 @@ export async function addRegistryRowForTicket(key: string, initialItem?: string)
 	// Re-read current CSV after user prompts so edits made meanwhile are preserved.
 	const freshText = await current(reg.path);
 	if (freshText === null) return;
-	const freshTable = parseCsv(freshText);
-	if (!freshTable.header.length) return notify(`${reg.name} has no header row.`, "error");
-	const nl = freshText.includes("\r\n") ? "\r\n" : "\n";
-	let nextText = freshText;
-	if (addTicketCol && ticketColumn(freshTable) < 0) {
-		const headerVals = [...freshTable.header.map((h) => h.text), "ticket"];
-		const dataLines = freshTable.rows.map((r) => csvRow([...r.map((c) => c.text), ""], freshTable.delimiter));
-		const newRow = headerVals.map((h, idx) => {
-			const col = h.trim().toLowerCase();
-			if (idx === 0) return name;
-			if (col === "ticket") return key;
-			if (col === "status") return "found";
-			return "";
-		});
-		nextText = [csvRow(headerVals, freshTable.delimiter), ...dataLines, csvRow(newRow, freshTable.delimiter)].join(nl) + nl;
-	} else {
-		const row = freshTable.header.map((h, idx) => {
-			const col = h.text.trim().toLowerCase();
-			if (idx === 0) return name;
-			if (col === "ticket" || col === "tickets") return key;
-			if (col === "status") return "found";
-			return "";
-		});
-		const prefix = freshText && !/\r?\n$/.test(freshText) ? nl : "";
-		nextText = `${freshText}${prefix}${csvRow(row, freshTable.delimiter)}${nl}`;
-	}
+	const nextText = registryTextWithRow(freshText, reg.path, name, key, addTicketCol);
+	if (nextText === null) return notify(`${reg.name} has no header row.`, "error");
 	try {
 		await put(reg.path, nextText, true);
 		setState((s) => { s.treeVersion += 1; });
@@ -2578,7 +2601,7 @@ export async function trashTicket(file: DocFile): Promise<void> {
 	const isLayout2 = Boolean(file.ticketFolder && !isLayout1);
 	if (!file.ticketFolder) {
 		await (await import("./panels/Explorer")).trashFile(file.path);
-		const stillExists = await backend.read(file.path).then(() => true, () => false);
+		const stillExists = await fileExists(file.path);
 		if (!stillExists) {
 			await clearActiveIfMatching().catch(() => {});
 			setState((s) => { s.treeVersion += 1; });
@@ -3022,6 +3045,32 @@ export async function unarchiveTicket(file: DocFile): Promise<void> {
 }
 
 /**
+ * A template with the line it keeps for the writer's own words (`PROMPTS`) replaced by those words; null when it
+ * has no such line. Words saved into a new document are its own words: with the prompt left standing above them
+ * the document opened with "One sentence on what this explains." and was still listed as not written yet.
+ */
+function inPlaceOfPrompt(template: string, words: string): string | null {
+	const lines = template.split("\n");
+	const at = lines.findIndex((line) => Object.values(PROMPTS).some((prompt) => prompt === line.trim()));
+	if (at < 0) return null;
+	lines[at] = words;
+	return lines.join("\n");
+}
+
+/** A new reference note that holds a reply: the note's template with the reply, under its heading if it has one, where the prompt was. */
+export function referenceNoteHolding(template: string, body: string, heading?: string): string {
+	const words = `${heading ? `## ${heading}\n\n` : ""}${body.trim()}`;
+	return inPlaceOfPrompt(template, words) ?? `${template.replace(/\s*$/, "")}\n\n${words}\n`;
+}
+
+/** A new question that holds a reply: the reply is why it matters, where the prompt was, and the answer is left to be written. */
+export function questionHolding(template: string, body: string): string {
+	const upToAnswer = template.replace(/\n## Answer[\s\S]*$/, "");
+	const asked = inPlaceOfPrompt(upToAnswer, body.trim()) ?? `${upToAnswer.replace(/\s*$/, "")}\n\n${body.trim()}\n`;
+	return `${asked}\n## Answer\n\n`;
+}
+
+/**
  * Promotes an answered question (or any Markdown text from Agent / Plan Assistant) into a
  * properly structured knowledge base document (Decision, Question, or Reference note).
  */
@@ -3051,9 +3100,7 @@ export async function promoteToKnowledge(
 			const withT = withFrontMatter(template, "ticket", ticket);
 			template = withT ?? `---\ntitle: ${title}\nticket: ${ticket}\n---\n\n${template}`;
 		}
-		const final = bodyText
-			? `${template.split("## ")[0] ?? template}${input.heading ? `## ${input.heading}\n\n` : ""}${bodyText}\n`
-			: template;
+		const final = bodyText ? referenceNoteHolding(template, bodyText, input.heading) : template;
 		await start(dest, final, "knowledge");
 		return dest;
 	}
@@ -3061,9 +3108,7 @@ export async function promoteToKnowledge(
 	if (kind === "questions") {
 		const dest = joinPath(folder, `${slug(title)}.md`);
 		const template = questionTemplate({ title, date: today(), ticket });
-		const final = bodyText
-			? `${template.replace(/\n## Answer[\s\S]*$/, "")}\n${bodyText}\n\n## Answer\n\n`
-			: template;
+		const final = bodyText ? questionHolding(template, bodyText) : template;
 		await start(dest, final, "knowledge");
 		return dest;
 	}
@@ -3128,6 +3173,18 @@ export async function promoteToKnowledge(
 	return dest;
 }
 
+/**
+ * A new snippet that holds code: the template's opening comment with the snippet's name, then the code. The line
+ * that asks what the snippet is for and the statement the SQL template stands in for the code (`SELECT 1;`) are
+ * left out: with them, saved code ran `SELECT 1;` first and was listed as a snippet not written yet.
+ */
+export function snippetHolding(template: string, code: string): string {
+	const prompts: readonly string[] = Object.values(PROMPTS);
+	const opening = template.split("\n").filter((line) => !prompts.includes(line.replace(/^\s*(?:--\s*)?/, "").trim()) && line.trim() !== "SELECT 1;");
+	// An SSL comment ends at its semicolon: with the prompt's line gone it closes on the line of the name.
+	return `${opening.join("\n").replace(/\s*$/, "").replace(/\n;$/, ";")}\n\n${code}\n`;
+}
+
 /** Saves a raw code snippet (e.g. from an Agent reply or Markdown code block) into `docs/knowledge/snippets/`. */
 export async function saveAsSnippet(code: string, langHint?: string): Promise<string | null> {
 	if (!ready()) return null;
@@ -3147,8 +3204,7 @@ export async function saveAsSnippet(code: string, langHint?: string): Promise<st
 	const folder = joinPath(areaFolder("knowledge"), "snippets");
 	const ext = lang === "sql" ? "sql" : "ssl";
 	const dest = joinPath(folder, `${slug(title)}.${ext}`);
-	const header = snippetTemplate({ title, language: lang });
-	await start(dest, `${header}\n${cleanCode}\n`, "knowledge");
+	await start(dest, snippetHolding(snippetTemplate({ title, language: lang }), cleanCode), "knowledge");
 	return dest;
 }
 
@@ -4170,7 +4226,7 @@ async function saveExportFile(
 			return false;
 		}
 		try {
-			const exists = await backend.read(dest).then(() => true, () => false);
+			const exists = await fileExists(dest);
 			if (exists) {
 				const OVERWRITE = "Overwrite file";
 				if ((await choose(`${relativeTo(startRoot, dest)} already exists. Overwrite it?`, [OVERWRITE], { danger: OVERWRITE })) !== OVERWRITE) {

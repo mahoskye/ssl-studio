@@ -1,6 +1,6 @@
 // Finding the external tools: starlims-lsp (pinned, ADR 0003) and opencode
 // (a supported range, ADR 0004).
-import { existsSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import type { ToolStatus } from "../shared/protocol";
@@ -127,9 +127,24 @@ export function lspCommand(path: string, args: string[], platform: string = proc
 	return [path, ...args];
 }
 
+/**
+ * Whether what is at `path` is a program this user can start: a file, and outside Windows one with its execute bit.
+ * A candidate that is not is passed over before anything is started. That it was passed over at all used to rest on
+ * the start failing: a vendor/starlims-lsp left without the bit by a download that broke off was tried each time.
+ */
+export function runnable(path: string, platform: string = process.platform): boolean {
+	try {
+		if (!statSync(path).isFile()) return false;
+		if (platform !== "win32") accessSync(path, constants.X_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 export async function findLsp(configured?: string): Promise<ToolStatus> {
 	for (const path of lspCandidates(configured)) {
-		if (!existsSync(path)) continue;
+		if (!runnable(path)) continue;
 		const out = await run(lspCommand(path, ["--version"]));
 		// A developer build says "version dev": usable, with the pin warning.
 		const version = out && /starlims-lsp version (\S+)/.exec(out)?.[1];

@@ -101,20 +101,37 @@ export function withCatalog(text: string, items: readonly CatalogItem[]): string
 	const eol = (written: string) => (text.includes("\r\n") ? written.replace(/\n/g, "\r\n") : written);
 	const at = catalogBlock(text);
 	if (at) return text.slice(0, at.start) + eol(block(items)) + text.slice(at.end);
-	// A start marker whose end marker has gone: the list after it is the old list, as far as it runs. It is replaced,
-	// and what a person wrote after it stays. A second list is never added beside the first.
+	// A start marker whose end marker has gone. What follows it may be the old list, the person's own words, or one
+	// after the other, and no line says which it is: a bullet that links to a document, or a third-level heading, is
+	// what the list writes and what a person writes. So the only lines taken up are those the fresh list says again
+	// (and the words for an empty list); from the first line that is anything else, everything stays as it is, under
+	// the new end marker. That can leave a line of the old list that is out of date standing there, for the person
+	// to take out. Taking every line shaped like the list's did worse: it took a heading and a bullet a person had
+	// written under the list. A second start marker is never added beside the first.
 	const open = markerAt(text, CATALOG_START);
 	if (open >= 0) {
 		const rest = text.slice(open + CATALOG_START.length);
-		// Only what a catalog's list is made of: a line that links to a document, a section's heading as the list writes
-		// it, the words for an empty list, and the blank lines between. A heading or a bullet of the person's own ends it.
-		const listed = /^(?:[ \t]*\r?\n|- \[(?:\\.|[^\]\n])*\]\([^)\n]*\).*\r?\n?|### .*\r?\n?|Nothing here yet\.[ \t]*\r?\n?)*/.exec(rest)![0];
-		const after = rest.slice(listed.length);
+		const fresh = new Set(catalogList(items).split("\n"));
+		let taken = 0;
+		while (taken < rest.length) {
+			const lineEnd = rest.indexOf("\n", taken);
+			const next = lineEnd < 0 ? rest.length : lineEnd + 1;
+			const line = rest.slice(taken, next).trimEnd();
+			if (line && !fresh.has(line) && line !== "Nothing here yet.") break;
+			taken = next;
+		}
+		const after = rest.slice(taken);
 		return text.slice(0, open) + eol(block(items)) + (after ? eol("\n\n") + after : eol("\n"));
 	}
 	const body = text.replace(/\s+$/, "");
 	return `${body}${eol(`${body ? "\n\n" : ""}${block(items)}\n`)}`;
 }
+
+/**
+ * Whether a catalog has the line its list opens with and not the one it closes with. `withCatalog` then cannot
+ * tell the old list from the person's words under it and keeps all of it, so whoever writes the catalog says so.
+ */
+export const catalogEndMissing = (text: string) => hasCatalogPlace(text) && catalogBlock(text) === null;
 
 /** Whether the list no longer says what the documents do: a document added, gone, retitled, or in another state. */
 export function catalogStale(text: string, items: readonly CatalogItem[]): boolean {

@@ -23,7 +23,7 @@ import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { regionColor } from "../editor/regions";
 import { canonical, documents, notify, openFile, openToSide, restartLsp, setState, state } from "../state";
-import { canvasMeasure, clearLabels, clearOf, fitShare, fitView, legibleScale, mapArea, outOfSight, nearest, recall, remember, reveal, smoothEdgePath, smoothEdgePoint, zoomAt, type Point } from "./canvas";
+import { canvasMeasure, clearLabels, clearOf, fitShare, fitView, legibleScale, mapArea, outOfSight, nearest, recall, remember, reveal, secondClick, smoothEdgePath, smoothEdgePoint, wheelZoom, zoomAt, type Click, type Point } from "./canvas";
 import { loadGraph } from "./load";
 import { Minimap, type MapBox } from "./Minimap";
 import { Finder } from "./Finder";
@@ -1038,6 +1038,9 @@ export function GraphView() {
 					nodeEls.clear();
 					setPointed(null);
 					setPointedLine(null);
+					// A layout that failed says so in the bar. This one did not: what the bar still says of that one is
+					// taken back, where it used to stay over a picture that had since been drawn.
+					if (progress().startsWith("Layout failed: ")) setProgress("");
 					setLayout({ boxes, lines, width: result.width, height: result.height, key: layoutKey });
 					flush();
 					// What is folded is kept with the workspace, so the graph opens next time as it was left: kept
@@ -1738,6 +1741,9 @@ export function GraphView() {
 	let dragging: { x: number; y: number } | null = null;
 	/** How far the pointer has moved the picture since it was pressed. */
 	let panned = 0;
+	/** The last click, if it was on a node, and the node: the click that makes it a double-click opens this node. */
+	let clicked: (Click & { box: Box }) | null = null;
+	const clickAt = (e: MouseEvent): Click => ({ detail: e.detail, at: e.timeStamp, x: e.clientX, y: e.clientY });
 	/** Too narrow for every button of the bar: the zoom buttons go to the menu. */
 	const [narrow, setNarrow] = createSignal(false);
 	let widthCleanup: (() => void) | undefined;
@@ -1961,8 +1967,21 @@ export function GraphView() {
 						class="graph-canvas"
 						ref={(el) => {
 							svg = el;
-							// The picture was moved by what the pointer was on: letting go of it there is not a click on it.
-							el.addEventListener("click", (e) => panned > 3 && (e.stopPropagation(), (panned = 0)), true);
+							el.addEventListener(
+								"click",
+								(e) => {
+									// The picture was moved by what the pointer was on: letting go of it there is not a click on it.
+									if (panned > 3) return e.stopPropagation(), void (panned = 0);
+									// The second click of a double-click is the first one's node's, wherever it lands (secondClick):
+									// heard here, before any node hears it, since the node now under the pointer may be another.
+									const first = clicked;
+									clicked = null;
+									if (!first || !secondClick(clickAt(e), first)) return;
+									e.stopPropagation();
+									if (first.box.kind !== "fold" && first.box.kind !== "dir") open(first.box);
+								},
+								true,
+							);
 						}}
 						role="group"
 						aria-label="Call graph. The arrow keys move between nodes; the question mark key lists the rest."
@@ -1971,8 +1990,11 @@ export function GraphView() {
 						onKeyDown={onKey}
 						onWheel={(e) => {
 							e.preventDefault();
+							// By as much as the wheel turned, and not at all for a movement sideways (wheelZoom).
+							const factor = wheelZoom(e);
+							if (factor === 1) return;
 							const box = e.currentTarget.getBoundingClientRect();
-							zoomBy(e.deltaY < 0 ? 1.1 : 0.9, { x: e.clientX - box.left, y: e.clientY - box.top });
+							zoomBy(factor, { x: e.clientX - box.left, y: e.clientY - box.top });
 						}}
 						onMouseDown={(e) => {
 							if (e.button !== 0) return;
@@ -2187,8 +2209,7 @@ export function GraphView() {
 												onFocus={() => setCurrent(b.id)}
 												onMouseEnter={() => setPointed(b.id)}
 												onMouseLeave={() => setPointed(null)}
-												onClick={(e) => (e.stopPropagation(), far() ? comeIn(b) : b.kind === "dir" ? toggleDir(b.folder) : b.kind === "fold" ? toggleFold(b.path) : focus(b.id))}
-												onDblClick={() => b.kind !== "fold" && b.kind !== "dir" && open(b)}
+												onClick={(e) => (e.stopPropagation(), (clicked = { ...clickAt(e), box: b }), far() ? comeIn(b) : b.kind === "dir" ? toggleDir(b.folder) : b.kind === "fold" ? toggleFold(b.path) : focus(b.id))}
 												onContextMenu={(e) => {
 													if (b.kind === "dir" || !b.path || b.path === "(unresolved)") return;
 													e.preventDefault();

@@ -651,6 +651,9 @@ export function PlanAssistant(props: {
 											<Show when={r().status === "budget"}> · stopped at its budget</Show>
 											<Show when={r().status === "stopped" && !a().running}> · stopped</Show>
 										</p>
+										<Show when={r().status === "budget" && !a().running}>
+											<p class="hint">Carry on building asks first how much more it may spend. What has passed is kept, and is not built again.</p>
+										</Show>
 										<For each={r().units.filter((u) => u.status !== "kept")} keyed={(u) => u.name}>
 											{(unit) => (
 												<div class={`plan-unit ${unit().status}`}>

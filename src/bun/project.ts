@@ -1168,7 +1168,9 @@ export async function listDocs(
 	for (const name of Object.keys(PLACEHOLDER)) {
 		const actual = found(root, name);
 		const path = join(root, actual ?? name);
-		const text = actual ? await textOf(path) : "";
+		// A README that is a link to a file outside the workspace is there by name, and is listed, but it is not read
+		// through: its headings and links are another project's, and opening it is refused in the same way.
+		const text = actual && isInsideWorkspace(root, path) ? await textOf(path) : "";
 		const untouched = actual ? text.includes(PLACEHOLDER[name]!) : undefined;
 		const codeRefs = actual ? markdownCodeRefs(root, path, text) : [];
 		const headings = actual
@@ -1191,8 +1193,10 @@ export async function listDocs(
 	}
 	list.push({ path: project.path, name: PROJECT_FILE, group: "project", exists: project.configured, ...(project.configured ? { mtime: mtimeOf(project.path) } : {}) });
 	const docs = join(root, project.docs);
-	const state = isFolder(docs) ? found(docs, STATE_FILE) : undefined;
-	if (state) {
+	// The state file is read from the docs folder directly, not through the workspace's listing: it is held to the
+	// workspace here, or a docs folder that is a link elsewhere had its state file listed with its title and summary.
+	const state = isFolder(docs) && isInsideWorkspace(root, docs) ? found(docs, STATE_FILE) : undefined;
+	if (state && isInsideWorkspace(root, join(docs, state))) {
 		const statePath = join(docs, state);
 		const summary = await cachedMdSummary(root, statePath);
 		if (summary) {

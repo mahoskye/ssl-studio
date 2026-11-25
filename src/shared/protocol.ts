@@ -510,7 +510,8 @@ export interface BackendApi {
 	linksTo(path: string): Promise<LinkTo[]>;
 	/** The links by name ([[name]]) in the workspace's Markdown documents, as they stand on disk. */
 	namesIn(): Promise<NameIn[]>;
-	settings(): Promise<{ effective: Settings; user: Partial<Settings>; workspace: Partial<Settings> }>;
+	/** `problems`: a settings file that is there and does not read as settings, by its path and the place that is wrong; none of it is used. */
+	settings(): Promise<{ effective: Settings; user: Partial<Settings>; workspace: Partial<Settings>; problems?: string[] }>;
 	saveSettings(scope: SettingsScope, patch: SettingsPatch): Promise<Settings>;
 	themes(): Promise<ThemeFile[]>;
 	/** Asks for a VS Code theme file and keeps a copy; null when cancelled. */

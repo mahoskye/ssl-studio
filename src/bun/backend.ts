@@ -135,6 +135,23 @@ export function createBackend(host: Host, initial?: string) {
 			throw err;
 		}
 	};
+	/** What keeping local history last failed with, so the log says it once and not at every save; null while it works. */
+	let historyFailed: string | null = null;
+	/**
+	 * Local history of a file that has just been written. The file is on disk by then, and that is what the save
+	 * answers: where the snapshot could not be kept (the history folder full, or not to be written), the save was
+	 * reported as failed with the file written, and its tab stayed unsaved. The failure goes to the log.
+	 */
+	const keepWritten = async (hist: History, full: string, text: string) => {
+		try {
+			await hist.record(full, text);
+			historyFailed = null;
+		} catch (e: any) {
+			const why = String(e?.code ?? e?.message ?? e);
+			if (why !== historyFailed) console.error(`Local history is not being kept (${full} was saved, its snapshot was not): ${e?.message ?? e}`);
+			historyFailed = why;
+		}
+	};
 	/** How many open files have edits that are not on disk, as the view last said. */
 	let unsaved = 0;
 
@@ -265,7 +282,7 @@ export function createBackend(host: Host, initial?: string) {
 			const full = ws.inside(path);
 			return ws.alone(full, async (writeNow) => {
 				const result = await writeNow(text, asText);
-				await hist.record(full, text);
+				await keepWritten(hist, full, text);
 				return result;
 			});
 		},
@@ -360,7 +377,7 @@ export function createBackend(host: Host, initial?: string) {
 						// The file as it was goes into local history first, so that there is a way back.
 						await hist.record(full, change.before);
 						await write(change.after, false);
-						await hist.record(full, change.after);
+						await keepWritten(hist, full, change.after);
 						return { count: change.count, skippedProtected: change.skippedProtected, invalidJson: false };
 					});
 					if (outcome && (outcome.count || outcome.skippedProtected || outcome.invalidJson)) {

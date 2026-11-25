@@ -197,7 +197,9 @@ describe("ordering rows and filter values with one collator", () => {
 	});
 
 	test("compareRowsBySorts orders rows as before, up and down, and by a second column on a tie", () => {
-		const rows = mixed.map((name, at) => [name, String(mixed.length - at)]);
+		// Text is ordered as before. A cell that is a number is since ordered by its value, ahead of all text
+		// (test/pass3LowsTable.test.ts), so the names that are numbers are left out of this one.
+		const rows = mixed.filter((name) => !/^-?\d+(\.\d+)?$/.test(name)).map((name, at) => [name, String(mixed.length - at)]);
 		const cell = (row: string[], col: number) => row[col] ?? "";
 		for (const down of [false, true]) {
 			const sorts = [

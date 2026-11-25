@@ -12,9 +12,26 @@ import { activeDoc, activePath, applyText, documents, historyChanged, notify, st
 import { chooseFromMenu, type RowMenuEntry } from "./RowMenu";
 import { Row, RowGroup, Rows, type Point } from "./Rows";
 
+/** A row with the file it was loaded for: what the row does, it does to that file. */
+type Loaded<T> = T & { forPath: string };
+
 type HistoryRev =
-	| { kind: "snapshot"; id: string; time: number; label: string; key: string }
-	| { kind: "commit"; sha: string; shortSha: string; time: number; subject: string; repoPath: string; label: string; key: string };
+	| { kind: "snapshot"; id: string; time: number; label: string; key: string; forPath: string }
+	| { kind: "commit"; sha: string; shortSha: string; time: number; subject: string; repoPath: string; label: string; key: string; forPath: string };
+
+/** Whether what was loaded for one file may be shown, or acted on, while `activePath` is the file on screen. */
+export function stillFor(loadedPath: string | null | undefined, activePath: string | null | undefined): boolean {
+	return Boolean(loadedPath) && loadedPath === activePath;
+}
+
+/**
+ * The rows to show for the file on screen: the ones loaded for it, and none while the last ones loaded are still
+ * another file's. Those stayed on screen until the new file's had been read, and a click on one read the other
+ * file's commit and offered it as this file's text to restore.
+ */
+export function rowsFor<T>(loaded: { path: string; rows: T[] } | undefined, activePath: string | null | undefined): T[] {
+	return loaded && stillFor(loaded.path, activePath) ? loaded.rows : [];
+}
 
 export function History() {
 	const [version, setVersion] = createSignal(0);
@@ -37,20 +54,32 @@ export function History() {
 		([path, , root]) =>
 			path && !path.startsWith("untitled:") && Boolean(root && isInside(root, path))
 				? backend.history(path).then(
-						(list) => ({ list, error: "" }),
-						(e) => ({ list: [] as Snapshot[], error: String(e?.message ?? e) }),
+						(list) => ({ path, rows: list.map((snap): Loaded<Snapshot> => ({ ...snap, forPath: path })), error: "" }),
+						(e) => ({ path, rows: [] as Loaded<Snapshot>[], error: String(e?.message ?? e) }),
 					)
-				: { list: [] as Snapshot[], error: "" },
+				: { path: path ?? "", rows: [] as Loaded<Snapshot>[], error: "" },
 	);
 	const [commits] = createAsyncQuery(
 		() => [activePath(), gitVersion(), Boolean(gitStatus()), state.workspace?.root ?? ""] as const,
 		([path, , inRepo, root]) =>
 			path && inRepo && !path.startsWith("untitled:") && Boolean(root && isInside(root, path))
-				? backend.gitLog(path, 25).catch(() => [] as GitCommit[])
-				: Promise.resolve([] as GitCommit[]),
+				? backend.gitLog(path, 25).then(
+						(list) => ({ path, rows: list.map((commit): Loaded<GitCommit> => ({ ...commit, forPath: path })) }),
+						() => ({ path, rows: [] as Loaded<GitCommit>[] }),
+					)
+				: { path: path ?? "", rows: [] as Loaded<GitCommit>[] },
 	);
-	const snapshots = () => history()?.list ?? [];
-	const gitCommits = () => commits() ?? [];
+	// What is loaded is shown only while it is the open file's: the moment another file is opened there are no rows.
+	const snapshots = () => rowsFor(history(), activePath());
+	const gitCommits = () => rowsFor(commits(), activePath());
+	const historyError = () => (stillFor(history()?.path, activePath()) ? history()!.error : "");
+	const reading = () => history.loading || commits.loading || history()?.path !== (activePath() ?? "") || commits()?.path !== (activePath() ?? "");
+	/** The file a row acts on: the one it was loaded for. A row of another file's history does nothing but say so. */
+	const fileOf = (row: { forPath: string }): string | null => {
+		if (stillFor(row.forPath, activePath())) return row.forPath;
+		notify(`That entry is from the history of ${baseName(row.forPath)}, which is not the file that is open now.`);
+		return null;
+	};
 	const when = (time: number) => new Date(time).toLocaleString();
 	const shortDay = (time: number) => new Date(time).toLocaleDateString();
 	const shortTime = (time: number) => {
@@ -63,14 +92,15 @@ export function History() {
 	};
 	const size = (bytes: number) => `${Math.max(1, Math.round(bytes / 1024))} KB`;
 
-	const snapToRev = (snap: Snapshot): HistoryRev => ({
+	const snapToRev = (snap: Loaded<Snapshot>): HistoryRev => ({
 		kind: "snapshot",
 		id: snap.id,
 		time: snap.time,
 		label: `Snapshot ${shortTime(snap.time)}`,
 		key: `snap:${snap.id}`,
+		forPath: snap.forPath,
 	});
-	const commitToRev = (commit: GitCommit): HistoryRev => ({
+	const commitToRev = (commit: Loaded<GitCommit>): HistoryRev => ({
 		kind: "commit",
 		sha: commit.sha,
 		shortSha: commit.shortSha,
@@ -79,6 +109,7 @@ export function History() {
 		repoPath: commit.path,
 		label: commit.shortSha,
 		key: `git:${commit.sha}`,
+		forPath: commit.forPath,
 	});
 
 	const loadRevText = async (path: string, rev: HistoryRev): Promise<string | null> => {
@@ -89,10 +120,11 @@ export function History() {
 	};
 
 	/** Compares an older local snapshot (left) against the current editor buffer (right), with one-click Restore. */
-	const showSnapshot = async (snap: Snapshot) => {
-		const path = activePath();
+	const showSnapshot = async (snap: Loaded<Snapshot>) => {
+		const path = fileOf(snap);
+		if (!path) return;
 		const doc = activeDoc();
-		if (!path || !doc || doc.model.isDisposed()) return notify("Open the file again to see its snapshots.", "error");
+		if (!doc || doc.model.isDisposed()) return notify("Open the file again to see its snapshots.", "error");
 		if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to compare.`);
 		const docVersion = doc.model.getVersionId();
 		const currentText = doc.model.getValue();
@@ -135,10 +167,11 @@ export function History() {
 	};
 
 	/** Compares an older Git commit (left) against the current editor buffer (right), with one-click Restore. */
-	const showCommitVsCurrent = async (commit: GitCommit) => {
-		const path = activePath();
+	const showCommitVsCurrent = async (commit: Loaded<GitCommit>) => {
+		const path = fileOf(commit);
+		if (!path) return;
 		const doc = activeDoc();
-		if (!path || !doc || doc.model.isDisposed()) return notify("Open the file again to inspect its Git history.", "error");
+		if (!doc || doc.model.isDisposed()) return notify("Open the file again to inspect its Git history.", "error");
 		if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to compare.`);
 		const docVersion = doc.model.getVersionId();
 		const currentText = doc.model.getValue();
@@ -184,10 +217,11 @@ export function History() {
 	};
 
 	/** Opens what a single Git commit changed (`sha~1` on left vs `sha` on right). */
-	const showCommitDiff = async (commit: GitCommit) => {
-		const path = activePath();
+	const showCommitDiff = async (commit: Loaded<GitCommit>) => {
+		const path = fileOf(commit);
+		if (!path) return;
 		const doc = activeDoc();
-		if (!path || !doc || doc.model.isDisposed()) return notify("Open the file again to inspect its Git history.", "error");
+		if (!doc || doc.model.isDisposed()) return notify("Open the file again to inspect its Git history.", "error");
 		if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to compare.`);
 		try {
 			const { before, after } = await backend.gitCommitFile(path, commit.sha, commit.path);
@@ -214,9 +248,11 @@ export function History() {
 
 	/** Compares any two selected snapshots or Git commits chronologically (older on left, newer on right). */
 	const compareTwoRevs = async (a: HistoryRev, b: HistoryRev) => {
-		const path = activePath();
+		const path = fileOf(a);
+		if (!path) return;
+		if (b.forPath !== path) return notify("Choose a revision of the same file to compare with.");
 		const doc = activeDoc();
-		if (!path || !doc || doc.model.isDisposed()) return notify("Open the file again to compare revisions.", "error");
+		if (!doc || doc.model.isDisposed()) return notify("Open the file again to compare revisions.", "error");
 		if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to compare.`);
 		if (a.key === b.key) return notify("Choose a different revision to compare with.");
 		const [older, newer] = a.time <= b.time ? [a, b] : [b, a];
@@ -257,8 +293,8 @@ export function History() {
 		}
 	};
 
-	const openSnapshotMenu = async (snap: Snapshot, at: Point) => {
-		const path = activePath();
+	const openSnapshotMenu = async (snap: Loaded<Snapshot>, at: Point) => {
+		const path = fileOf(snap);
 		const doc = activeDoc();
 		if (!path || !doc || doc.model.isDisposed()) return;
 		const rev = snapToRev(snap);
@@ -279,8 +315,8 @@ export function History() {
 		else if (picked === SET_BASE) setBaseRev(base?.key === rev.key ? null : rev);
 	};
 
-	const openCommitMenu = async (commit: GitCommit, at: Point) => {
-		const path = activePath();
+	const openCommitMenu = async (commit: Loaded<GitCommit>, at: Point) => {
+		const path = fileOf(commit);
 		const doc = activeDoc();
 		if (!path || !doc || doc.model.isDisposed()) return;
 		const rev = commitToRev(commit);
@@ -341,12 +377,12 @@ export function History() {
 						</div>
 					)}
 				</Show>
-				<Show when={history()?.error}>
+				<Show when={historyError()}>
 					<p class="hint warn" role="alert">
-						The snapshots of {baseName(activePath()!)} could not be read: {history()!.error}
+						The snapshots of {baseName(activePath()!)} could not be read: {historyError()}
 					</p>
 				</Show>
-				<Show when={snapshots().length || gitCommits().length} fallback={<p class="hint">{history.loading || commits.loading ? "Reading history…" : `No local snapshots or Git commits for ${baseName(activePath()!)} yet.`}</p>}>
+				<Show when={snapshots().length || gitCommits().length} fallback={<p class="hint">{reading() ? "Reading history…" : `No local snapshots or Git commits for ${baseName(activePath()!)} yet.`}</p>}>
 					<Rows role="listbox" label={`History of ${baseName(activePath()!)}`}>
 						<Show when={snapshots().length}>
 							<RowGroup fold="history:local" label="Local snapshots" count={snapshots().length} head={<span class="label">Local snapshots</span>} rows={true}>

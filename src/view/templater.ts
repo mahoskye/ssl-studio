@@ -18,7 +18,7 @@ import {
 	type MarkdownTemplate,
 	type TemplaterContext,
 } from "../shared/templater";
-import { backend } from "./backend";
+import { backend, fileExists } from "./backend";
 import { ask, browseWorkspaceFile, choose, quickPick, type QuickPickOption } from "./dialogs";
 import { activeEditor } from "./editor/EditorGroup";
 import { listWorkspaceImages } from "./editor/imageResolve";
@@ -412,7 +412,7 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 	if (copyBuiltin) {
 		const fileName = `${copyBuiltin.id}.md`;
 		const dest = joinPath(dir, fileName);
-		const exists = await backend.read(dest).then(() => true, () => false);
+		const exists = await fileExists(dest);
 		if (state.workspace?.root !== startRoot) return;
 		if (!exists) {
 			const attrs = [
@@ -539,7 +539,7 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 	if (!name || state.workspace?.root !== startRoot) return;
 	const id = slug(name).toLowerCase() || "custom-template";
 	const dest = joinPath(dir, `${id}.md`);
-	const exists = await backend.read(dest).then(() => true, () => false);
+	const exists = await fileExists(dest);
 	if (state.workspace?.root !== startRoot) return;
 	if (!exists) {
 		const header = `<!-- template: ${formatTemplateHeaderAttr("name", name)} ${formatTemplateHeaderAttr("description", "Custom project template")} ${formatTemplateHeaderAttr("group", "Custom")} ${formatTemplateHeaderAttr("folder", "docs")} -->`;
@@ -547,7 +547,7 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 ---
 title: <% tp.file.yamlTitle %>
 date: <% tp.date.now("YYYY-MM-DD") %>
-ticket: <% tp.project.ticket %>
+ticket: <% tp.yaml(tp.project.ticket) %>
 status: draft
 ---
 

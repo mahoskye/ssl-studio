@@ -13,7 +13,7 @@ import { ask, choose, quickPick } from "../dialogs";
 import { activePath, canonical, closeAllTabs, closeTab, fileRemoved, fileRenamed, focusEditor, heldFromBefore, isUntitled, notify, openFile, openToSide, saveAll, scriptsCameTo, setState, state } from "../state";
 import { closeComparison } from "../editor/Review";
 import { baseName, dirName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
-import { imageType, looksBinary } from "../../shared/fileKind";
+import { imageType, looksBinary, utf16Kind } from "../../shared/fileKind";
 import { htmlToMarkdown } from "../../shared/htmlToMarkdown";
 import { ATTACH_TO_AGENT, COPY, COPY_NAME, COPY_PATH, COPY_RELATIVE, CUT, FIND_IN_FOLDER, folderFor, holdsRoot, menuEntriesFor, nameProblem, NEW_FILE, NEW_FOLDER, OPEN, OPEN_GOVERNING_DOC, OPEN_SIDE, openFolders, PASTE, RENAME, retarget, SCHEMA_FROM_SQL, TRASH, without } from "./explorerMenu";
 import { copyName, copyProblem, folderOf, moveProblem, type Clip } from "./explorerMoves";
@@ -637,8 +637,30 @@ export function dropFailure(dropped: string, sentAs: string | null, said: string
 	return `${dropped}: ${said}`;
 }
 
-/** Decodes dropped text bytes strictly as UTF-8, falling back to Windows-1252 so legacy STARLIMS files never get U+FFFD corruption. */
+/** What is said of a dropped file that is not text, a picture or a Word document. */
+const NOT_DROPPABLE = "binary files other than images and .docx cannot be dropped here";
+
+/**
+ * Decodes dropped text bytes as what they are written in: UTF-16 where they open with its mark or, with no mark,
+ * are plain letters each beside a zero byte; else strictly UTF-8, falling back to Windows-1252 so legacy STARLIMS
+ * files never get U+FFFD corruption. The mark a text opens with is not part of the text.
+ *
+ * UTF-16 was read here by the byte, as Windows-1252: its mark came out as two letters and every character had a
+ * NUL beside it. Bytes that open as UTF-16 and do not read as it (a byte left over, half a pair, a NUL) are not
+ * text: they are refused, as other bytes are.
+ */
 export function decodeDroppedText(bytes: Uint8Array): string {
+	const utf16 = utf16Kind(bytes);
+	if (utf16) {
+		let text: string;
+		try {
+			text = new TextDecoder(utf16, { fatal: true }).decode(bytes);
+		} catch {
+			throw new Error(NOT_DROPPABLE);
+		}
+		if (text.includes("\u0000")) throw new Error(NOT_DROPPABLE);
+		return text;
+	}
 	try {
 		return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 	} catch (e) {
@@ -742,12 +764,13 @@ async function importExternalFiles(files: File[], into: string): Promise<void> {
 			} else {
 				const bytes = new Uint8Array(await file.arrayBuffer());
 				if (looksBinary(bytes)) {
-					errors.push(`${file.name}: binary files other than images and .docx cannot be dropped here`);
+					errors.push(`${file.name}: ${NOT_DROPPABLE}`);
 					continue;
 				}
+				// Read before a name is taken for it: bytes that turn out not to be text take none.
+				const text = decodeDroppedText(bytes);
 				const dest = await reserveAvailableDest(safeName);
 				if (!dest) continue;
-				const text = decodeDroppedText(bytes);
 				await backend.write(dest.path, text, true);
 				imported.push(dest.path);
 			}

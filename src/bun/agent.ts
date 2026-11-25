@@ -78,6 +78,8 @@ type Waiter = {
 	overLimit?: boolean;
 	/** Why the turn failed, when opencode says so on the event and not on a message. */
 	failure?: string;
+	/** The session's messages as they were before the turn's prompt was sent: what is new after them is the turn's. */
+	before?: { seen: ReadonlySet<string>; count: number };
 };
 
 /**
@@ -497,6 +499,7 @@ export class Agent {
 					throw new Error(`opencode GET /api/event: ${response.status}`);
 				}
 				resolveReady();
+				void this.catchUp(epoch);
 
 				const decoder = new TextDecoder();
 				let buffer = "";
@@ -563,6 +566,34 @@ export class Agent {
 		})();
 
 		return ready;
+	}
+
+	/**
+	 * What the turns that are waiting missed while there was no stream. The stream does not replay: a turn that
+	 * was asked for while it was down, and ended before it was back, waited for an event that had been sent to
+	 * no one, until its own time ran out (fifteen minutes). With the stream up again the server is asked: a
+	 * session's messages end with an `idle` message, which has the outcome, once its turn is over. A turn that is
+	 * still running has none, and its end comes over the stream.
+	 */
+	private async catchUp(epoch: number) {
+		for (const [sessionID, waiter] of [...this.waiters]) {
+			// Nothing was sent for it yet, so nothing can have ended.
+			if (!waiter.before) continue;
+			try {
+				const messages = ((await this.api("GET", `/api/session/${encodeURIComponent(sessionID)}/message?limit=50&order=desc`))?.data ?? []) as any[];
+				if (epoch !== this.startEpoch || this.waiters.get(sessionID) !== waiter) continue;
+				const idle = extractNewMessages(messages, waiter.before.seen, waiter.before.count)
+					.reverse()
+					.find((m) => m?.type === "idle");
+				const outcome = /^(succeeded|failed|interrupted)$/.exec(String(idle?.outcome))?.[1] as AgentReply["outcome"] | undefined;
+				if (!outcome) continue;
+				if (outcome === "failed") waiter.failure = failureText(idle);
+				waiter.resolve(outcome);
+				this.waiters.delete(sessionID);
+			} catch {
+				// The server did not answer: the turn goes on waiting, and a stream that drops again fails it.
+			}
+		}
 	}
 
 	private dispatch(event: { type: string; data?: any }) {
@@ -751,6 +782,8 @@ export class Agent {
 				if (typeof m?.id === "string" && m.id) seenIds.add(m.id);
 			}
 			const beforeCount = beforeMessages.length;
+			// A copy: the session's own set grows with the turn's messages once it is over.
+			waiter.before = { seen: new Set(seenIds), count: beforeCount };
 
 			const turnTimeout = input.timeoutMs ?? TURN_TIMEOUT_MS;
 			turnTimer = setTimeout(() => waiter.resolve("timeout"), turnTimeout);

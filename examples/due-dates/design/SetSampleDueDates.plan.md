@@ -49,12 +49,10 @@ In `DueDateSummary`:
 
 ## Why a sample is skipped
 
-| Code | When |
-| --- | --- |
-| `NO_RECEIVED_DATE` | The sample has no received date |
-| `NO_TURNAROUND` | Its turnaround is empty, zero or less |
-| `TURNAROUND_NOT_REACHED` | The count does not finish within 730 days |
-| `NOT_WAITING` | It got a due date, or was removed, after it was read |
+- `NO_RECEIVED_DATE`: the sample has no received date.
+- `NO_TURNAROUND`: its turnaround is empty, zero or less.
+- `TURNAROUND_NOT_REACHED`: the count does not finish within 730 days.
+- `NOT_WAITING`: it got a due date, or was removed, after it was read.
 
 A skip is not a failure: the script still returns `.T.`.
 

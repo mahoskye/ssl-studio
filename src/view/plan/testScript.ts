@@ -2,7 +2,7 @@
 // them as an SSL test script for you to run in STARLIMS (skill ssl-unit-test), checked and
 // reviewed like anything else it writes. Nothing here runs SSL, and the review says so.
 import { snapshot } from "solid-js";
-import { backend } from "../backend";
+import { backend, fileExists } from "../backend";
 import { agent, currentModel } from "../agent/store";
 import { fenced } from "../agent/tidy";
 import { openReview, type Check } from "../editor/Review";
@@ -14,7 +14,7 @@ import { catalogsKeptFor, workPrompt } from "../projectDocs";
 import { applyText, canonical, documents, notify, openFile, setState, state } from "../state";
 import { baseName, joinPath } from "../../shared/paths";
 import { TEMPLATES } from "../../shared/houseStyle";
-import { MAX_ATTEMPTS, patternsFrom, placeholderIn, procedureText, retryPrompt } from "./build";
+import { MAX_ATTEMPTS, patternsFrom, placeholderIn, procedureText, retryPrompt, scriptProblem } from "./build";
 import { builtOf, MAX_PATHS, pathsMissing, planPaths, recordTests, testsPrompt } from "./built";
 import { readingOf } from "./drift";
 import { read, readScript, spansIn } from "./buildRun";
@@ -80,6 +80,9 @@ export function writeTests(path: string) {
 		);
 		if (snapshot(state).workspace?.root !== root) return;
 		const file = testFile(path, plan);
+		// It goes beside the code it tests, wherever the plan's record says that is: held to what a build may write.
+		const why = scriptProblem(file);
+		if (why) return notify(`The tests cannot be written to ${file}: ${why}.`, "error");
 		const ticketKey = (typeof plan.ticket === "string" && plan.ticket.trim()) || ticketForFile(docs(), path, root);
 		const work = ticketKey ? await workPrompt(ticketKey, { specs: false, plans: false }).catch(() => null) : null;
 		if (snapshot(state).workspace?.root !== root) return;
@@ -138,10 +141,7 @@ export function writeTests(path: string) {
 				const openNow = documents.has(canonical(full)) || documents.has(full);
 				const existsNow =
 					openNow ||
-					(await backend.read(full).then(
-						() => true,
-						() => false,
-					));
+					(await fileExists(full));
 				if (snapshot(state).workspace?.root !== root) return;
 				if (!existsNow) {
 					await backend.write(full, final);
@@ -158,7 +158,8 @@ export function writeTests(path: string) {
 				}
 				if (snapshot(state).workspace?.root !== root) return;
 				const latest = planOf(path);
-				if (latest) savePlan(path, recordTests(latest, file));
+				// Against `plan`, which the paths and the prompt were taken from, not the plan as it is by now.
+				if (latest) savePlan(path, recordTests(latest, file, plan));
 				notify(`Wrote ${file}. These tests have not been run: run them in STARLIMS.`);
 			},
 		});

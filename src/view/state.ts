@@ -234,12 +234,86 @@ export async function settleUnsaved(what: string): Promise<boolean> {
 
 let openSeq = 0;
 
+type KeptForFolder = { root: string; write: () => unknown; timer: ReturnType<typeof setTimeout> | undefined };
+/** What is waiting to be written for the open folder (keepForFolder). */
+const keptForFolder = new Set<KeptForFolder>();
+/** How many folders are being opened just now, and what waits to see which folder that leaves open. */
+let foldersOpening = 0;
+const afterFolderOpened: (() => void)[] = [];
+
+/**
+ * Asks for something to be written for the open folder a moment from now, once: the window's layout, which is
+ * saved a little after it stops changing (App.tsx). Answers with how to call it off, for when a newer one is
+ * asked for. The backend writes into the folder it is in itself, and it is in the next folder before the view has
+ * heard that the folder was opened: sent from a plain timer in that gap, the layout of the folder being left was
+ * written into the settings of the one being opened. So `write` runs only while its folder is the open one, here
+ * and in the backend. Opening another folder writes it first, while the backend is still in this one
+ * (openFolder), and one that comes due while a folder is being opened waits to see which folder is left open:
+ * its own, and it is written; another, and it is dropped.
+ */
+export function keepForFolder(root: string, write: () => unknown, after = 600): () => void {
+	const kept: KeptForFolder = { root, write, timer: undefined };
+	const due = () => {
+		kept.timer = undefined;
+		if (!keptForFolder.has(kept)) return;
+		if (foldersOpening) return void afterFolderOpened.push(due);
+		keptForFolder.delete(kept);
+		if (snapshot(state).workspace?.root === root) void writeKept(kept);
+	};
+	kept.timer = setTimeout(due, after);
+	keptForFolder.add(kept);
+	return () => {
+		clearTimeout(kept.timer);
+		keptForFolder.delete(kept);
+	};
+}
+
+/** Runs one such write to its end. A write says its own failures; one that throws all the same is kept in Output. */
+async function writeKept(kept: KeptForFolder) {
+	try {
+		await kept.write();
+	} catch (e) {
+		log(`what is kept for ${baseName(kept.root)} could not be written: ${e instanceof Error ? e.message : String(e)}`);
+	}
+}
+
+/**
+ * Writes now what is waiting to be written for the open folder, and answers when all of it has been: asked before
+ * the backend is sent to another folder. Nothing when nothing waits. What already waits on another folder being
+ * opened stays waiting: the backend may no longer be in its folder.
+ */
+function writeKeptForFolder(): Promise<void> | undefined {
+	const root = snapshot(state).workspace?.root;
+	const waiting = [...keptForFolder].filter((kept) => kept.timer !== undefined);
+	if (!waiting.length) return undefined;
+	for (const kept of waiting) {
+		clearTimeout(kept.timer);
+		keptForFolder.delete(kept);
+	}
+	return Promise.all(waiting.filter((kept) => kept.root === root).map(writeKept)).then(() => {});
+}
+
 export async function openFolder(path?: string) {
 	if (!(await settleUnsaved("Opening another folder closes them."))) return;
 	// What is still unsaved here was asked about and is to be dropped, as it stands now (see below).
 	const versionOf = (path: string) => docs.get(path)?.model.getAlternativeVersionId();
 	const droppedByChoice = new Map(snapshotUnsavedPaths().map((path) => [path, versionOf(path)]));
 	const seq = ++openSeq;
+	// From here until the folder is open, or the opening is called off, nothing kept for a folder is sent on its
+	// own (keepForFolder): what waits is written now, while the backend is still in this folder.
+	foldersOpening++;
+	try {
+		const written = writeKeptForFolder();
+		if (written) await written;
+		// Another folder was asked for while that was written: its own opening goes on, and this one is dropped.
+		if (seq === openSeq) await switchFolder(path, seq, droppedByChoice, versionOf);
+	} finally {
+		if (!--foldersOpening) for (const due of afterFolderOpened.splice(0)) due();
+	}
+}
+
+/** The rest of openFolder: sends the backend to the folder, and makes it the view's. */
+async function switchFolder(path: string | undefined, seq: number, droppedByChoice: Map<string, number | undefined>, versionOf: (path: string) => number | undefined) {
 	const curBeforeOpen = snapshot(state);
 	const prevRoot = curBeforeOpen.workspace?.root ?? null;
 	const prevLspRunning = curBeforeOpen.lsp.state === "running";
@@ -500,10 +574,21 @@ export async function loadProject() {
  * later reading (a setting saved, project.toml changed) keeps the layout on screen, which is the view's own and may
  * not be on disk yet (see saveSetting).
  */
+/**
+ * The settings files last said to be unreadable. Settings are read often, and a file broken by hand stays broken
+ * until it is mended: each is said when it is first found so, and again only once it has read well in between.
+ */
+let settingsProblemsSaid: readonly string[] = [];
+
 export async function loadSettings(fresh = false) {
 	const startRoot = snapshot(state).workspace?.root;
-	const [{ effective }, themes] = await Promise.all([backend.settings(), backend.themes()]);
+	const [{ effective, problems = [] }, themes] = await Promise.all([backend.settings(), backend.themes()]);
 	if (snapshot(state).workspace?.root !== startRoot) return;
+	// A settings file with a slip in it gives none of its settings. Without a word here the app started with the
+	// defaults and the person's own settings seemed lost, until the next change of a setting was refused.
+	for (const problem of problems) if (!settingsProblemsSaid.includes(problem)) notify(problem, "error");
+	settingsProblemsSaid = problems;
+	knownSaved = { root: startRoot, settings: structuredClone(effective) };
 	const { layout: _onDisk, ...rest } = effective;
 	setState((s) => {
 		reconcile(fresh ? effective : { ...rest, layout: snapshot(s.settings.layout) }, null)(s.settings);
@@ -523,6 +608,12 @@ let settingsAsked = 0;
 /** How many of them have not answered yet, and whether one of those that have, failed. */
 let settingsOut = 0;
 let settingFailed = false;
+/**
+ * The settings as they were last known to be saved, and the folder they were read in: from the last reading of
+ * them, or the last save that answered. What a failed save is put back to when the disk cannot be read either.
+ * A copy: the settings on screen are changed in place, and must not take this with them.
+ */
+let knownSaved: { root: string | undefined; settings: Settings } | null = null;
 
 /**
  * Saves a setting, and answers with the settings as the save left them (nothing when it failed, which has been
@@ -567,6 +658,8 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 	}
 	const sameWorkspace = snapshot(state).workspace?.root === startRoot;
 	if (!effective && sameWorkspace) settingFailed = true;
+	// Whether or not it is shown (below): an answer is the settings as the save left them on disk.
+	if (effective && sameWorkspace) knownSaved = { root: startRoot, settings: structuredClone(effective) };
 	// Saves land, and answer, in the order they were asked for, and each answer is the settings as they then are:
 	// the answer to a save asked for after this one holds this one's change too, and this older answer is not put
 	// over what has been shown since.
@@ -586,15 +679,23 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 		settingFailed = false;
 		const asked = settingsAsked;
 		const curRoot = snapshot(state).workspace?.root;
+		let unread = "";
 		const disk = await backend.settings().then(
 			(read) => read.effective,
-			() => undefined,
+			(e) => void (unread = String(e?.message ?? e)),
 		);
-		if (disk && asked === settingsAsked && snapshot(state).workspace?.root === curRoot) {
-			const { layout: _onDisk, ...rest } = disk;
-			setState((s) => {
-				reconcile({ ...rest, layout: snapshot(s.settings.layout) }, null)(s.settings);
-			});
+		if (asked === settingsAsked && snapshot(state).workspace?.root === curRoot) {
+			if (disk) knownSaved = { root: curRoot, settings: structuredClone(disk) };
+			// The disk could not be read either: what was last known to be saved is what is shown, and that is said.
+			// Left as it was, the value that was never saved stayed on screen as though it had been.
+			const saved = disk ?? (knownSaved && knownSaved.root === curRoot ? structuredClone(knownSaved.settings) : undefined);
+			if (saved) {
+				const { layout: _onDisk, ...rest } = saved;
+				setState((s) => {
+					reconcile({ ...rest, layout: snapshot(s.settings.layout) }, null)(s.settings);
+				});
+			}
+			if (!disk) notify(`The settings could not be read back after the save failed (${unread || "no answer"}). ${saved ? "What is shown is what was last known to be saved." : "What is shown may not be what is saved."}`, "error");
 		}
 	}
 	return effective;
@@ -1041,6 +1142,10 @@ export async function closeTab(path: string, group = snapshot(state).activeGroup
 
 /** The tabs of the active group, to step through. */
 function stepTab(by: number) {
+	// What is being typed in the view about to be left (a table cell, a field of a plan step) goes into its document
+	// first. A tab left by the keyboard does not take the focus out of the field as a click does, so nothing
+	// committed it, and the text went with the view.
+	commitPendingEdits();
 	const cur = snapshot(state);
 	const group = cur.groups[cur.activeGroup];
 	if (!group?.active || group.tabs.length < 2) return;

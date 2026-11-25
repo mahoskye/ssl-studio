@@ -305,13 +305,15 @@ describe("Solid 2.0.3 Audit — Palette.tsx non-keyed <Show> & draft-backed insp
 		// Draft helpers exist and back Title, Goal, Ticket, Label, Stage, Notes.
 		expect(src).toContain("const DraftInput =");
 		expect(src).toContain("const DraftTextarea =");
-		expect(src).toContain("createSignal(untrack(() => props.value))");
+		// The draft signal is in `pendingField` (planBridge.ts), which both helpers are built on; a node's field
+		// hands its text over with the id of the node it was typed for (test/pass3LowsPlan.test.ts).
+		expect(src).toContain("pendingField(props, { hold: holdsPendingEdit })");
 		expect(inspSrc).toContain('onCommit={(val) => plan.setPlanField("title", val)}');
 		expect(inspSrc).toContain('onCommit={(val) => plan.setPlanField("goal", val)}');
 		expect(inspSrc).toContain('onCommit={(val) => plan.setPlanField("ticket", val)}');
-		expect(inspSrc).toContain("onCommit={(val) => plan.setNodeText(val)}");
-		expect(inspSrc).toContain("onCommit={(val) => plan.setNodeGroup(val)}");
-		expect(inspSrc).toContain('onCommit={(val) => plan.setNodeField("notes", val)}');
+		expect(inspSrc).toContain("onCommit={(val, id) => plan.setNodeText(val, id)}");
+		expect(inspSrc).toContain("onCommit={(val, id) => plan.setNodeGroup(val, id)}");
+		expect(inspSrc).toContain('onCommit={(val, id) => plan.setNodeField("notes", val, id)}');
 	});
 
 	test("draft signal with structural memo preserves uncommitted typing across unrelated updates and resets on selection change", () => {

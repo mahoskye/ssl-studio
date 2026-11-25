@@ -9,7 +9,7 @@ import { activeEditor } from "../editor/EditorGroup";
 import { activeLiveEditor, liveSelectionVersion } from "../editor/liveBridge";
 import { review, openReview, type Check } from "../editor/Review";
 import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, save, scriptsCameTo, setState, state } from "../state";
-import { agent, ask, chatSessionEpoch, chooseModel, clearEntries, clearSavedThreads, currentModel, interrupt, resume, safely, setAgent, start, startNewThread, stop, switchThread, syncWorkspaceThreads, type Entry } from "./store";
+import { agent, ask, chatSessionEpoch, chooseModel, clearEntries, clearSavedThreads, currentModel, interrupt, isSessionBreak, resume, safely, setAgent, start, startNewThread, stop, switchThread, syncWorkspaceThreads, type Entry } from "./store";
 import {
 	applySimpleUnifiedDiff,
 	composeQuestion,
@@ -604,8 +604,42 @@ export async function askAbout(
 	}
 }
 
+/** A file a reply is compared with, as it was read: its text, or why it has none to compare with. */
+export type ReviewTarget = { text: string } | { refused: "binary" | "unreadable"; reason?: string };
+
+/** Reads the file a reply is to be compared with: from its editor when it is open (unsaved edits and all), else from disk. */
+async function readReviewTarget(path: string): Promise<ReviewTarget> {
+	const open = documents.get(canonical(path));
+	if (open) return open.binary || open.model.isDisposed() ? { refused: "binary" } : { text: open.model.getValue() };
+	try {
+		const file = await backend.read(path);
+		return file.binary ? { refused: "binary" } : { text: file.text };
+	} catch (e: any) {
+		return { refused: "unreadable", reason: String(e?.message ?? e) };
+	}
+}
+
+/**
+ * Why a reply cannot be compared with a file, or put into it, as the file is now; null when it can. `compared` is
+ * the text the comparison was made against, when one has been made: a file that no longer holds that text was
+ * changed since (in its editor or on disk), and the proposal, made for the text as it was, would write over the
+ * change. The rule the tidy steps keep for their own proposals (tidy.ts), here for a file that need not be open.
+ *
+ * A file that could not be read, or is not text, used to be taken as empty: the comparison showed the whole reply
+ * as new lines, and accepting it wrote the reply over the file.
+ */
+export function reviewTargetRefusal(rel: string, now: ReviewTarget, compared?: string): string | null {
+	if ("refused" in now) {
+		const reason = now.reason ? ` (${now.reason})` : "";
+		if (compared === undefined) return `${rel} ${now.refused === "binary" ? "is not text" : `could not be read${reason}`}, so the reply was not compared with it. Nothing was changed.`;
+		return `${rel} ${now.refused === "binary" ? "is no longer text" : `can no longer be read${reason}`}. Nothing was written: reject, and ask for Review diff again.`;
+	}
+	if (compared !== undefined && now.text !== compared) return `${rel} was changed after this proposal was made. Nothing was written: reject, and ask for Review diff again so the changes are not overwritten.`;
+	return null;
+}
+
 /** Extracts the best fenced code/Markdown block (prompting when multiple blocks exist) and opens side-by-side ReviewView against a workspace file. */
-async function reviewProposedEdit(replyText: string, preferredPath?: string) {
+export async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 	const root = state.workspace?.root;
 	if (!root) return notify("Open a folder first.");
 
@@ -635,7 +669,10 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 		targetPath = chosen.path;
 	}
 
-	const original = (await readForPrompt(targetPath)) ?? "";
+	const rel = relativeTo(root, targetPath).replace(/\\/g, "/");
+	const target = await readReviewTarget(targetPath);
+	if ("refused" in target) return notify(reviewTargetRefusal(rel, target) ?? `${rel} could not be read.`, "error");
+	const original = target.text;
 	const targetLang = languageFor(targetPath).toLowerCase();
 	const blocks = extractFencedBlocks(replyText);
 	const extraction = planMarkdownReviewExtraction(targetLang, blocks);
@@ -716,7 +753,6 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 		}
 	}
 
-	const rel = relativeTo(root, targetPath).replace(/\\/g, "/");
 	await openReview({
 		title: `Agent proposal: ${rel}`,
 		path: targetPath,
@@ -731,6 +767,12 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 		onAccept: async (final) => {
 			if (blocked) throw new Error(blocked);
 			const key = canonical(targetPath);
+			// Read again, and held against what the proposal was compared with, before anything is written: the review
+			// may have stood open a while, and the file may have been edited, saved over or opened since.
+			const rootNow = snapshot(state).workspace?.root;
+			if (!rootNow || canonical(rootNow) !== canonical(root)) throw new Error("The workspace changed while this proposal was open. Nothing was written.");
+			const stale = reviewTargetRefusal(rel, await readReviewTarget(targetPath), original);
+			if (stale) throw new Error(stale);
 			if (documents.get(key)) {
 				if (!applyText(key, final)) {
 					throw new Error(`${rel} could not be updated because its editor was closed.`);
@@ -765,6 +807,19 @@ function withQuestionAnswer(docText: string, answerMd: string): string {
 	const tail = docText.slice(sectionEnd);
 	const body = existingSection ? `${existingSection}${eol}${eol}${cleanAnswer}` : cleanAnswer;
 	return `${before}${eol}${body}${eol}${tail ? `${eol}${tail}` : ""}`;
+}
+
+/**
+ * A question document with a reply written into its `## Answer`, and its status set to answered when that is asked
+ * for. `unmarked` says the status could not be set: the front-matter writer leaves alone a value written over
+ * several lines, and a block that is not closed, and answers null. The answer is written all the same, and the
+ * caller says that the document was not marked: it used to say only that the answer was recorded.
+ */
+export function answeredQuestion(docText: string, answerMd: string, mark: boolean): { text: string; unmarked: boolean } {
+	const text = withQuestionAnswer(docText, answerMd);
+	if (!mark) return { text, unmarked: false };
+	const marked = withFrontMatter(text, "status", "answered");
+	return marked === null ? { text, unmarked: true } : { text: marked, unmarked: false };
 }
 
 /** Creates a new spec document in `docs/specs/` from an Agent reply, pre-linked to the active ticket. */
@@ -818,6 +873,19 @@ async function saveReplyAsSpec(replyText: string, ticketKey?: string): Promise<s
 	await openFile(dest, { keep: true });
 	notify(`Saved spec ${baseName(dest)}${linkedTicket ? ` linked to ${linkedTicket}` : ""}.`);
 	return dest;
+}
+
+/**
+ * Where a session ended and the next question starts another (store.ts, SESSION_BREAK): a note like the thread's
+ * other notes, under a rule drawn across the conversation. The rule is above the words, not to either side of
+ * them: the panel is usually narrow, the words then take two lines, and rules beside them shrank to nothing.
+ */
+function SessionBreakLine(props: { text: string }) {
+	return (
+		<div class="entry note" style={{ "border-top": "1px solid var(--border)", "padding-top": "var(--space-3)", "text-align": "center" }}>
+			<pre>{props.text}</pre>
+		</div>
+	);
 }
 
 /** One entry of the conversation. A reply is Markdown with 1-click actions to capture it into project docs or diff it in ReviewView. */
@@ -995,10 +1063,7 @@ function EntryView(props: { entry: Entry }) {
 		const open = documents.get(key);
 		const cur = open ? open.model.getValue() : await backend.read(target.path).then((r) => (r.binary ? null : r.text), () => null);
 		if (cur === null) return notify("Could not read the question document.", "error");
-		let next = withQuestionAnswer(cur, props.entry.text);
-		if (action === WRITE_MARK) {
-			next = withFrontMatter(next, "status", "answered") ?? next;
-		}
+		const { text: next, unmarked } = answeredQuestion(cur, props.entry.text, action === WRITE_MARK);
 		if (open) {
 			const clean = !state.dirty[key];
 			applyText(key, next);
@@ -1010,7 +1075,8 @@ function EntryView(props: { entry: Entry }) {
 		setState((s) => { s.treeVersion += 1; });
 		refreshDocAudit();
 		await openFile(target.path, { keep: true });
-		notify(`Recorded answer in ${target.title || baseName(target.path)}.`);
+		if (unmarked) notify(`Recorded answer in ${target.title || baseName(target.path)}, but it was not marked answered: its status is written over several lines, or its front matter is not closed. Change the status in the text.`, "error");
+		else notify(`Recorded answer in ${target.title || baseName(target.path)}.`);
 	};
 	return (
 		<div class={["entry", props.entry.role, { streaming: Boolean(props.entry.streaming) }]} aria-busy={props.entry.streaming ? "true" : undefined}>
@@ -1943,7 +2009,11 @@ export function AgentPanel() {
 						</div>
 					}
 				>
-					{(e) => <EntryView entry={e} />}
+					{(e) => (
+						<Show when={isSessionBreak(e)} fallback={<EntryView entry={e} />}>
+							<SessionBreakLine text={e.text} />
+						</Show>
+					)}
 				</For>
 				<Show when={agent.busy && !agent.entries.some((e) => e.streaming)}>
 					<p class="agent-waiting">{agent.stopping ? "Stopping…" : "Waiting for the agent. A local model can take a while before its first words."}</p>

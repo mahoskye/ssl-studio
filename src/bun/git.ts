@@ -95,10 +95,43 @@ function resolveRealPath(target: string, origPath: string, depth = 0): string {
 	return resolve(parentReal, basename(target));
 }
 
+/** A path as a commit names it: from the repository's top, with no step up or sideways. A tab or a line break may be in a name, and is not refused. */
 function isSafeRepoPath(p: string): boolean {
-	if (!p || p.startsWith("/") || p.includes("\0") || /[\x00-\x1f\x7f]/.test(p)) return false;
+	if (!p || p.startsWith("/") || p.includes("\0")) return false;
 	const parts = p.split("/");
 	return !parts.some((seg) => seg === ".." || seg === ".");
+}
+
+const C_ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
+
+/**
+ * A name as it is on disk, from how git prints it where it cannot be asked for the bare name (a blame's
+ * `filename`): a name with a quote, a backslash or a control character in it comes between double quotes, with
+ * backslash escapes (`"a\tb.txt"`, `\303\251` for a byte). Any other name is printed as it is, and given back so.
+ */
+export function unquoteGitPath(printed: string): string {
+	if (printed.length < 2 || !printed.startsWith('"') || !printed.endsWith('"')) return printed;
+	const body = printed.slice(1, -1);
+	const bytes: number[] = [];
+	const encoder = new TextEncoder();
+	for (let at = 0; at < body.length; at++) {
+		if (body[at] !== "\\") {
+			// Escapes stand for bytes, so everything is put back as bytes and read as one text at the end.
+			const plain = /^[^\\]+/.exec(body.slice(at))![0];
+			bytes.push(...encoder.encode(plain));
+			at += plain.length - 1;
+			continue;
+		}
+		const octal = /^[0-3][0-7]{2}/.exec(body.slice(at + 1, at + 4))?.[0];
+		if (octal) {
+			bytes.push(Number.parseInt(octal, 8));
+			at += 3;
+			continue;
+		}
+		const next = body[++at] ?? "\\";
+		bytes.push(C_ESCAPES[next] ?? next.charCodeAt(0));
+	}
+	return new TextDecoder().decode(Uint8Array.from(bytes));
 }
 
 function isSafeRangeRef(r: string): boolean {
@@ -505,30 +538,32 @@ export class Git {
 			String(cap),
 			"--format=%x1e%H%x1f%h%x1f%ct%x1f%an%x1f%s",
 			"--name-only",
+			"-z",
 			"--",
 			relHere,
 		]);
 		if (ran.code !== 0) return [];
 		const commits: GitCommit[] = [];
 		let lastKnownPath = `${this.prefix}${relHere}`;
-		for (const chunk of text(ran.out).split("\x1e")) {
-			const cleanChunk = chunk.replace(/^[\r\n]+|[\r\n]+$/g, "");
-			if (!cleanChunk) continue;
-			const lines = cleanChunk.split(/\r?\n/);
-			const header = lines[0] ?? "";
-			const [sha, shortSha, ct, author, ...subjectParts] = header.split("\x1f");
-			if (!sha || !shortSha) continue;
-			const listedPath = lines.slice(1).find((l) => l.length > 0);
-			const fileInCommit = listedPath || lastKnownPath;
-			lastKnownPath = fileInCommit;
-			commits.push({
-				sha,
-				shortSha,
-				time: (Number(ct) || 0) * 1000,
-				author: author ?? "",
-				subject: subjectParts.join(" "),
-				path: fileInCommit,
-			});
+		// With -z a name is as it is on disk, ended by a NUL. On lines of its own git puts a name that has a quote, a
+		// backslash, a tab or a line break in it between quotes with escapes, and no file in a commit has that name.
+		let commit: GitCommit | undefined;
+		for (const token of text(ran.out).split("\0")) {
+			const header = token.replace(/^[\r\n]+(?=\x1e)/, "");
+			if (header.startsWith("\x1e")) {
+				const [sha, shortSha, ct, author, ...subjectParts] = header.slice(1).split("\x1f");
+				commit = undefined;
+				if (!sha || !shortSha) continue;
+				// Until its own name follows, the file is where the commit after this one had it.
+				commit = { sha, shortSha, time: (Number(ct) || 0) * 1000, author: author ?? "", subject: subjectParts.join(" "), path: lastKnownPath };
+				commits.push(commit);
+				continue;
+			}
+			// One line break stands between a commit's header and its file's name; any after it is the name's own.
+			const listedPath = token.replace(/^\r?\n/, "");
+			if (!listedPath || !commit) continue;
+			commit.path = listedPath;
+			lastKnownPath = listedPath;
 		}
 		return commits;
 	}
@@ -763,7 +798,7 @@ export class Git {
 			if (ln.startsWith("author ")) author = ln.slice("author ".length).trim();
 			else if (ln.startsWith("author-time ")) authorTime = Number(ln.slice("author-time ".length).trim()) || 0;
 			else if (ln.startsWith("summary ")) summary = ln.slice("summary ".length).trim();
-			else if (ln.startsWith("filename ")) filename = ln.slice("filename ".length);
+			else if (ln.startsWith("filename ")) filename = unquoteGitPath(ln.slice("filename ".length));
 		}
 		const date = authorTime > 0 ? new Date(authorTime * 1000).toISOString().slice(0, 10) : "";
 		const ticket = /\b([A-Z]{2,12}-\d+)\b/.exec(summary)?.[1];
@@ -857,9 +892,19 @@ export class Git {
 		}
 		if (action === "push") {
 			const cleanMsg = message?.trim();
-			const args = ["stash", "push", ...(cleanMsg ? ["-m", cleanMsg] : [])];
+			/**
+			 * Below the repository's top a stash takes the workspace's folder and nothing else: without a path it took
+			 * every change in the repository, also in folders the workspace does not show. The path is "." read the
+			 * usual way, not as a literal name: told to read names literally, git 2.43 stashes the folder's changes
+			 * and then throws away the changes outside it. Files git does not follow stay where they are, as before.
+			 */
+			const args = this.prefix
+				? ["--no-literal-pathspecs", "stash", "push", ...(cleanMsg ? ["-m", cleanMsg] : []), "--", "."]
+				: ["stash", "push", ...(cleanMsg ? ["-m", cleanMsg] : [])];
 			const ran = await this.run(args);
 			const out = (text(ran.out) || ran.err).trim();
+			// A folder in which git follows no file has nothing a stash could hold.
+			if (ran.code !== 0 && this.prefix && /did not match any file/i.test(out)) return { ok: false, message: "No local changes to save." };
 			if (ran.code !== 0) return { ok: false, message: out || "git stash push failed." };
 			if (/no local changes to save/i.test(out)) return { ok: false, message: "No local changes to save." };
 			return { ok: true, message: out.split("\n")[0] || "Saved working tree changes to stash." };

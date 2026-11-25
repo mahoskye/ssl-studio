@@ -202,10 +202,31 @@ export const [agent, setAgent] = createStore({
 let chatEpoch = 0;
 export const chatSessionEpoch = () => chatEpoch;
 
-/** Ends the conversation's session: the next question starts a new one. */
-function dropChatSession(s: { chatSession: string | null }) {
+/**
+ * What the transcript says where a session ended: a note of its own, drawn as a line across the thread (Agent.tsx).
+ * A thread that is restored after a reload, or switched to, or carried on after the model was changed or opencode
+ * stopped, reads as one conversation, and the next question goes to a session that has seen none of it. Without
+ * this line nothing said so, and a follow-up ("do the same for the other one") was answered by a model that had
+ * never been told what the first one was.
+ */
+export const SESSION_BREAK = "A new session starts here: the model does not know the messages above.";
+export const isSessionBreak = (entry: { role: Entry["role"]; text: string }) => entry.role === "note" && entry.text === SESSION_BREAK;
+
+/** Whether a session ending now leaves replies on screen that the next one will not know: any since the last such line. */
+export function sessionBreakDue(entries: readonly { role: Entry["role"]; text: string }[]): boolean {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i]!;
+		if (isSessionBreak(entry)) return false;
+		if (entry.role === "agent" && entry.text.trim()) return true;
+	}
+	return false;
+}
+
+/** Ends the conversation's session: the next question starts a new one. What is on screen of the old one is marked off. */
+function dropChatSession(s: { chatSession: string | null; entries: Entry[] }) {
 	s.chatSession = null;
 	chatEpoch++;
+	if (sessionBreakDue(s.entries)) s.entries = [...s.entries, { id: nextEntry++, role: "note", text: SESSION_BREAK }];
 }
 
 let nextEntry = 1;

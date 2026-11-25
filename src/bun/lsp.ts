@@ -7,6 +7,52 @@ import { lspCommand, verbatim } from "./tools";
 
 const MAX_RESTARTS = 3;
 const RESTART_WINDOW_MS = 60_000;
+/** How long a server told to stop has to go by itself. */
+const STOP_GRACE_MS = 2000;
+
+/** Servers told to stop that have not gone yet. */
+const lingering = new Set<Subprocess>();
+let exiting = false;
+
+/** Whether Bun has seen the process end. Until then its id is still its own; after, the id may be another process's. */
+function ended(proc: Subprocess): boolean {
+	return proc.exitCode !== null || proc.signalCode !== null;
+}
+
+/** Kills outright, through the process's own handle and only while it is still there: never by a bare process id. */
+function kill(proc: Subprocess) {
+	lingering.delete(proc);
+	if (ended(proc)) return;
+	try {
+		proc.kill("SIGKILL");
+	} catch {
+		// Process already exited.
+	}
+}
+
+// No timer runs once the backend is exiting, so a server still in its grace period is killed there and then.
+process.on("exit", () => {
+	exiting = true;
+	for (const proc of [...lingering]) kill(proc);
+});
+
+/**
+ * Sees that a server told to stop does stop. One that ignores the request (a closed input and SIGTERM) was
+ * forgotten and lived on, one more for each restart. It has a grace period, then it is killed. Neither the wait
+ * nor the server holds the backend open: the timer and the process are both let go of.
+ */
+function killAfter(proc: Subprocess, graceMs: number) {
+	if (ended(proc)) return;
+	if (exiting) return kill(proc);
+	lingering.add(proc);
+	const timer = setTimeout(() => kill(proc), graceMs);
+	timer.unref?.();
+	proc.unref();
+	void proc.exited.finally(() => {
+		clearTimeout(timer);
+		lingering.delete(proc);
+	});
+}
 
 export class LspProcess {
 	private proc?: Subprocess<"pipe", "pipe", "pipe">;
@@ -17,6 +63,8 @@ export class LspProcess {
 		private path: string,
 		private onMessage: (message: string) => void,
 		private onState: (state: LspState) => void,
+		/** For tests: overrides how long a stopped server has before it is killed (2 s). */
+		private stopGraceMs = STOP_GRACE_MS,
 	) {}
 
 	start() {
@@ -44,10 +92,18 @@ export class LspProcess {
 				if (proc === this.proc && !this.stopping) this.lastError = String(err?.message ?? err).slice(-500);
 			}
 		});
+		const stdout = proc.stdout.getReader();
+		const stderr = proc.stderr.getReader();
+		// A read waiting on a server that says nothing holds the backend open: stop() lets go of both.
+		this.release = () => {
+			void stdout.cancel().catch(() => {});
+			void stderr.cancel().catch(() => {});
+		};
 		(async () => {
 			try {
-				for await (const chunk of proc.stdout) {
-					if (proc !== this.proc || this.stopping) break;
+				for (;;) {
+					const { value: chunk, done } = await stdout.read();
+					if (done || proc !== this.proc || this.stopping) break;
 					try {
 						read(chunk);
 					} catch (err: any) {
@@ -61,8 +117,9 @@ export class LspProcess {
 		(async () => {
 			try {
 				// The server logs to stderr; keep the tail for crash messages.
-				for await (const chunk of proc.stderr) {
-					if (proc !== this.proc || this.stopping) break;
+				for (;;) {
+					const { value: chunk, done } = await stderr.read();
+					if (done || proc !== this.proc || this.stopping) break;
 					this.lastError = new TextDecoder().decode(chunk).slice(-500);
 				}
 			} catch {
@@ -74,6 +131,7 @@ export class LspProcess {
 	}
 
 	private lastError = "";
+	private release?: () => void;
 
 	private exited(proc: Subprocess, code: number | null) {
 		if (proc !== this.proc || this.stopping) return;
@@ -120,6 +178,9 @@ export class LspProcess {
 		} catch {
 			// Process already exited.
 		}
+		this.release?.();
+		this.release = undefined;
+		if (proc) killAfter(proc, this.stopGraceMs);
 		this.onState({ state: "stopped" });
 	}
 }

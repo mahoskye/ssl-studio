@@ -50,7 +50,48 @@ export function setColumnSortDirection(
 	return current.map((s, i) => (i === idx ? { column, down } : s));
 }
 
-/** Compares two rows lexicographically across all active `SortSpec` entries (numeric-aware, case-insensitive). */
+// A number as the table's footer adds one up: digits, with or without a minus sign, a decimal part, or commas
+// between groups of three.
+const SORT_NUMBER_RE = /^-?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?$/;
+
+function trimmedSortNumber(t: string): number | null {
+	// Most cells are text, and their first character says so without the pattern being run.
+	const first = t.charCodeAt(0);
+	if (!(first >= 48 && first <= 57) && first !== 45) return null;
+	if (!SORT_NUMBER_RE.test(t)) return null;
+	const digits = t.replace(/,/g, "");
+	const dot = digits.indexOf(".");
+	// More than fifteen digits are an identifier (a barcode, a key): a number cannot hold them exactly, and two
+	// that differ in their last digit would count as equal. It stays text, which orders digits of any length.
+	if ((dot < 0 ? digits.length : dot) - (first === 45 ? 1 : 0) > 15) return null;
+	return Number(digits);
+}
+
+/** The number a cell holds, for ordering rows: `-5`, `1.5`, `1,200`. Null when what it holds is text, or nothing. */
+export function cellSortNumber(raw: string): number | null {
+	return trimmedSortNumber(raw.trim());
+}
+
+/**
+ * Orders two cell texts for sorting rows. Going up: empty cells, then numbers by their value, then text as
+ * `compareCellText` orders it (digits inside text by their number, case and accents aside); going down is the same
+ * turned round. Whether a cell is a number is asked of the cell, not of its column, so a column of numbers with a
+ * few words in it (`n/a`) still has its numbers in order, and the order of any three cells agrees with itself.
+ * Numbers were ordered as text is: `-5` came after `-3`, `1.25` after `1.5`, and `1,200` before `300`.
+ */
+export function compareSortValues(a: string, b: string): number {
+	const ta = a.trim();
+	const tb = b.trim();
+	const na = trimmedSortNumber(ta);
+	const nb = trimmedSortNumber(tb);
+	const kindA = na !== null ? 1 : ta === "" ? 0 : 2;
+	const kindB = nb !== null ? 1 : tb === "" ? 0 : 2;
+	if (kindA !== kindB) return kindA - kindB;
+	if (na !== null && nb !== null) return na < nb ? -1 : na > nb ? 1 : 0;
+	return compareCellText(a, b);
+}
+
+/** Compares two rows across all active `SortSpec` entries, each column's cells as `compareSortValues` orders them. */
 export function compareRowsBySorts<T>(
 	a: T,
 	b: T,
@@ -60,7 +101,7 @@ export function compareRowsBySorts<T>(
 	for (const spec of sorts) {
 		const va = getCellText(a, spec.column);
 		const vb = getCellText(b, spec.column);
-		const cmp = compareCellText(va, vb);
+		const cmp = compareSortValues(va, vb);
 		if (cmp !== 0) return spec.down ? -cmp : cmp;
 	}
 	return 0;
@@ -298,6 +339,82 @@ function formatIsoDay(dayIndex: number): string {
 	return `${y}-${m}-${d}`;
 }
 
+// A date that is not an ISO one: its parts set apart by slashes or dashes, the year first (`2026/11/30`) or last
+// (`30/11/2026`, `11/30/2026`).
+const YEAR_FIRST_DATE_RE = /^(\d{4})([/-])(\d{1,2})\2(\d{1,2})$/;
+const YEAR_LAST_DATE_RE = /^(\d{1,2})([/-])(\d{1,2})\2(\d{4})$/;
+
+/** A date as written: `a` and `b` are the two numbers that are not the year, in the order they stand in. */
+type WrittenDate = { yearFirst: boolean; sep: string; year: number; a: number; b: number; padded: boolean };
+
+function parseWrittenDate(raw: string): WrittenDate | null {
+	const first = YEAR_FIRST_DATE_RE.exec(raw);
+	if (first) {
+		const padded = first[3]!.length === 2 && first[4]!.length === 2;
+		return { yearFirst: true, sep: first[2]!, year: Number(first[1]), a: Number(first[3]), b: Number(first[4]), padded };
+	}
+	const last = YEAR_LAST_DATE_RE.exec(raw);
+	if (!last) return null;
+	const padded = last[1]!.length === 2 && last[3]!.length === 2;
+	return { yearFirst: false, sep: last[2]!, year: Number(last[4]), a: Number(last[1]), b: Number(last[3]), padded };
+}
+
+function dayIndexOf(year: number, month: number, day: number): number | null {
+	if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+	const utc = Date.UTC(year, month - 1, day);
+	const dt = new Date(utc);
+	if (dt.getUTCFullYear() !== year || dt.getUTCMonth() !== month - 1 || dt.getUTCDate() !== day) return null;
+	return Math.floor(utc / MS_PER_DAY);
+}
+
+let localeDayFirst: boolean | undefined;
+
+/** Whether dates are written here with the day before the month, as far as this machine's locale says. */
+function dayComesFirst(): boolean {
+	if (localeDayFirst === undefined) {
+		try {
+			const parts = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "numeric", day: "numeric" }).formatToParts(new Date(Date.UTC(2001, 1, 3, 12)));
+			localeDayFirst = parts.findIndex((p) => p.type === "day") < parts.findIndex((p) => p.type === "month");
+		} catch {
+			localeDayFirst = false;
+		}
+	}
+	return localeDayFirst;
+}
+
+/**
+ * The seeds as days, with how to write a day as they are written (the same separator, order and zero-padding),
+ * when every seed is a real calendar date written the same way. With the year last, a first number over twelve is
+ * a day and a second number over twelve says the month came first; where the seeds do not say (`01/02/2026`),
+ * `dayFirst` does, and without it the machine's locale, as a spreadsheet goes by its own.
+ */
+function writtenDates(seeds: readonly string[], dayFirst: boolean | undefined): { days: number[]; format: (day: number) => string } | null {
+	const parts: WrittenDate[] = [];
+	for (const seed of seeds) {
+		const p = parseWrittenDate(seed);
+		if (!p || (parts[0] && (p.yearFirst !== parts[0].yearFirst || p.sep !== parts[0].sep))) return null;
+		parts.push(p);
+	}
+	const { yearFirst, sep } = parts[0]!;
+	const dayLeads = !yearFirst && (parts.some((p) => p.a > 12) || (!parts.some((p) => p.b > 12) && (dayFirst ?? dayComesFirst())));
+	const days: number[] = [];
+	for (const p of parts) {
+		const day = dayLeads ? dayIndexOf(p.year, p.b, p.a) : dayIndexOf(p.year, p.a, p.b);
+		if (day === null) return null;
+		days.push(day);
+	}
+	const padded = parts.every((p) => p.padded);
+	const two = (n: number) => (padded ? String(n).padStart(2, "0") : String(n));
+	const format = (dayIndex: number) => {
+		const dt = new Date(dayIndex * MS_PER_DAY);
+		const y = String(dt.getUTCFullYear()).padStart(4, "0");
+		const m = two(dt.getUTCMonth() + 1);
+		const d = two(dt.getUTCDate());
+		return yearFirst ? `${y}${sep}${m}${sep}${d}` : dayLeads ? `${d}${sep}${m}${sep}${y}` : `${m}${sep}${d}${sep}${y}`;
+	};
+	return { days, format };
+}
+
 function formatPaddedInt(n: number, padWidth: number): string {
 	if (padWidth <= 1) return String(n);
 	if (n < 0) return `-${String(Math.abs(n)).padStart(padWidth, "0")}`;
@@ -324,17 +441,23 @@ function parsePrefixedNumber(raw: string): { prefix: string; num: number; padWid
 }
 
 /**
- * Generates `count` drag-fill continuation values from `seedValues`:
+ * Generates up to `count` drag-fill continuation values from `seedValues`:
  * - Single or arithmetic-stepped integers & decimals (`1` -> `2, 3, 4`; `10, 20` -> `30, 40`)
  * - Prefix + integer with zero-padding preservation (`DEMO-101` -> `DEMO-102, DEMO-103`; `TC-001` -> `TC-002`)
  * - ISO `YYYY-MM-DD` dates (`2026-11-23` -> `2026-11-24, 2026-11-25`; weekly `2026-11-01, 2026-11-08` -> `2026-11-15`)
+ * - Dates written with slashes, or with dashes and the year last, day by day in the way they are written
+ *   (`2026/11/30` -> `2026/12/01`; `28/02/2026` -> `01/03/2026`); `options.dayFirst` reads `01/02/2026`
  * - Plain text repeats cleanly (`in progress` -> `in progress`)
  * - `options.literal = true` (Alt-drag) copies seeds cyclically without incrementing.
+ *
+ * A plain number counts down through zero (`1` -> `0, -1`), as in Excel and Sheets. A numbered name or a
+ * zero-padded number does not: there is no `TC--001` and no `-001`, so such a series ends at zero and the result
+ * is then shorter than `count`. What is left of the cells being filled is for the caller to leave as it is.
  */
 export function generateFillSeries(
 	seedValues: readonly string[],
 	count: number,
-	options?: { literal?: boolean; reverse?: boolean },
+	options?: { literal?: boolean; reverse?: boolean; dayFirst?: boolean },
 ): string[] {
 	if (count <= 0 || seedValues.length === 0) return [];
 	const literal = Boolean(options?.literal);
@@ -348,6 +471,16 @@ export function generateFillSeries(
 	if (literal) return repeatSeeds();
 
 	const dir = reverse ? -1 : 1;
+	/** The numbers that follow `anchor` in steps of `delta`, as far as zero and no further. */
+	const downToZero = (anchor: number, delta: number): number[] => {
+		const out: number[] = [];
+		for (let i = 1; i <= count; i++) {
+			const n = anchor + delta * i;
+			if (n < 0) break;
+			out.push(n);
+		}
+		return out;
+	};
 
 	if (seedValues.length === 1) {
 		const raw = seedValues[0]!;
@@ -360,7 +493,13 @@ export function generateFillSeries(
 			return Array.from({ length: count }, (_, i) => formatIsoDay(day + dir * (i + 1)));
 		}
 
-		// 2. Pure integer (preserving zero-padding like "001" -> "002")
+		// 2. A date written another way. Read as a name and a number, `2026/11/30` went on to `2026/11/31`.
+		const written = writtenDates([trimmed], options?.dayFirst);
+		if (written) {
+			return Array.from({ length: count }, (_, i) => written.format(written.days[0]! + dir * (i + 1)));
+		}
+
+		// 3. Pure integer (preserving zero-padding like "001" -> "002")
 		const intMatch = PURE_INT_RE.exec(trimmed);
 		if (intMatch) {
 			const neg = intMatch[1] === "-";
@@ -368,17 +507,18 @@ export function generateFillSeries(
 			const base = Number(trimmed);
 			if (Number.isSafeInteger(base)) {
 				const padWidth = !neg && digits.length > 1 && digits.startsWith("0") ? digits.length : 0;
+				if (padWidth > 0) return downToZero(base, dir).map((n) => formatPaddedInt(n, padWidth));
 				return Array.from({ length: count }, (_, i) => formatPaddedInt(base + dir * (i + 1), padWidth));
 			}
 		}
 
-		// 3. Prefix + trailing integer (e.g. DEMO-101, TC-001, Item 1)
+		// 4. Prefix + trailing integer (e.g. DEMO-101, TC-001, Item 1)
 		const pref = parsePrefixedNumber(trimmed);
 		if (pref) {
-			return Array.from({ length: count }, (_, i) => `${pref.prefix}${formatPaddedInt(pref.num + dir * (i + 1), pref.padWidth)}`);
+			return downToZero(pref.num, dir).map((n) => `${pref.prefix}${formatPaddedInt(n, pref.padWidth)}`);
 		}
 
-		// 4. Plain text (or decimal without explicit step) repeats verbatim
+		// 5. Plain text (or decimal without explicit step) repeats verbatim
 		return repeatSeeds();
 	}
 
@@ -398,7 +538,20 @@ export function generateFillSeries(
 		return repeatSeeds();
 	}
 
-	// 2. All pure integers or decimals with constant arithmetic step
+	// 2. All dates written another way, the same way, with constant day delta
+	const written = writtenDates(trimmedSeeds, options?.dayFirst);
+	if (written) {
+		const step = written.days[1]! - written.days[0]!;
+		const constant = written.days.every((d, i) => i === 0 || d - written.days[i - 1]! === step);
+		if (constant) {
+			const anchor = reverse ? written.days[0]! : written.days[written.days.length - 1]!;
+			const delta = reverse ? -step : step;
+			return Array.from({ length: count }, (_, i) => written.format(anchor + delta * (i + 1)));
+		}
+		return repeatSeeds();
+	}
+
+	// 3. All pure integers or decimals with constant arithmetic step
 	if (trimmedSeeds.every((s) => PURE_FLOAT_RE.test(s))) {
 		const nums = trimmedSeeds.map(Number);
 		if (nums.every(Number.isFinite)) {
@@ -413,6 +566,7 @@ export function generateFillSeries(
 				const maxDec = allInts ? 0 : Math.max(...trimmedSeeds.map(decimalPlaces));
 				const anchor = reverse ? nums[0]! : nums[nums.length - 1]!;
 				const delta = reverse ? -step : step;
+				if (padWidth > 0) return downToZero(anchor, delta).map((n) => formatPaddedInt(n, padWidth));
 				return Array.from({ length: count }, (_, i) => {
 					const val = anchor + delta * (i + 1);
 					if (allInts && Number.isInteger(step)) return formatPaddedInt(Math.round(val), padWidth);
@@ -424,7 +578,7 @@ export function generateFillSeries(
 		return repeatSeeds();
 	}
 
-	// 3. All same prefix + trailing integer with constant step (e.g. ["DEMO-100", "DEMO-110"])
+	// 4. All same prefix + trailing integer with constant step (e.g. ["DEMO-100", "DEMO-110"])
 	const parsedPrefs = trimmedSeeds.map(parsePrefixedNumber);
 	if (parsedPrefs.every((p): p is { prefix: string; num: number; padWidth: number } => p !== null)) {
 		const prefix = parsedPrefs[0]!.prefix;
@@ -435,7 +589,7 @@ export function generateFillSeries(
 				const padWidth = Math.max(...parsedPrefs.map((p) => p.padWidth));
 				const anchor = reverse ? parsedPrefs[0]!.num : parsedPrefs[parsedPrefs.length - 1]!.num;
 				const delta = reverse ? -step : step;
-				return Array.from({ length: count }, (_, i) => `${prefix}${formatPaddedInt(anchor + delta * (i + 1), padWidth)}`);
+				return downToZero(anchor, delta).map((n) => `${prefix}${formatPaddedInt(n, padWidth)}`);
 			}
 		}
 		return repeatSeeds();
@@ -956,4 +1110,113 @@ export function cellEditGuard() {
 		stamp: (): number => foreign,
 		fresh: (stamp: number): boolean => stamp === foreign,
 	};
+}
+
+// --- Pasting, Filling & Checking: What Is Written and What Is Said ------------
+
+/**
+ * How many of a pasted grid's columns land in the table: those from the column the paste starts at to the last
+ * column shown. The rest are left out; a paste adds rows, never columns.
+ */
+export function pasteFit(gridCols: number, startVisCol: number, shownCols: number): { cols: number; leftOut: number } {
+	const cols = Math.max(0, Math.min(gridCols, shownCols - startVisCol));
+	return { cols, leftOut: Math.max(0, gridCols - cols) };
+}
+
+/** What is said after a paste: the cells that were pasted, and the copied columns that were not, when there are any. */
+export function pasteNotice(rows: number, cols: number, leftOut: number): string {
+	const pasted = `Pasted ${rows} × ${cols} cells (Ctrl+Z to undo).`;
+	if (leftOut <= 0) return pasted;
+	return leftOut === 1
+		? `${pasted} The last column copied was left out: there is no column for it after the last one shown.`
+		: `${pasted} The last ${leftOut} columns copied were left out: there are no columns for them after the last one shown.`;
+}
+
+/**
+ * What is said after a drag-fill: the cells that were written, and those left as they were because the series
+ * ended (`generateFillSeries` does not count a numbered name below zero). Empty when there is nothing to say.
+ */
+export function fillNotice(changed: number, leftAlone: number, literal: boolean): string {
+	const cells = (n: number) => `${n} ${n === 1 ? "cell" : "cells"}`;
+	const filled = changed > 0 ? `${literal ? "Copied" : "Filled"} ${cells(changed)} (Ctrl+Z to undo).` : "";
+	if (leftAlone <= 0) return filled;
+	const left = `${cells(leftAlone)} ${leftAlone === 1 ? "was" : "were"} left as ${leftAlone === 1 ? "it was" : "they were"}: a numbered name or a zero-padded number does not count below zero.`;
+	return filled ? `${filled} ${left}` : left;
+}
+
+/**
+ * Follows one column while columns are deleted or put in another order. A check of a column's values in code
+ * runs for a while, and its result was given the place the column had when the check began: with a column to its
+ * left deleted meanwhile, the result landed on the column next to it.
+ */
+export function trackedColumn(column: number) {
+	let at = column;
+	return {
+		/** Where the column is now; -1 once it has been deleted. */
+		at: (): number => at,
+		/** For every change of the columns: `remap` gives the new place of a column, or -1 for one that is gone. */
+		moved(remap: (column: number) => number): void {
+			if (at < 0) return;
+			const next = remap(at);
+			at = Number.isInteger(next) && next >= 0 ? next : -1;
+		},
+	};
+}
+
+// --- Keys and Focus When the Active Cell's Row Is Not Drawn -------------------
+
+/**
+ * Whether a key is one the table answers on a cell (the keys of the view's `onCellKey`; keep the two together):
+ * typing, Enter and F2, Delete and Backspace, the arrows with or without Shift, Alt+arrows, Page Up and Down,
+ * Home and End, and the menu key. A key pressed while the table itself has the focus is asked this, and one that
+ * passes goes to the active cell; any other (a modifier alone, Ctrl+C, Escape, Tab, F8) is left to whoever else
+ * answers it.
+ */
+export function keyActsOnCell(e: { key: string; ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean; shiftKey?: boolean }): boolean {
+	const ctrl = Boolean(e.ctrlKey || e.metaKey);
+	const alt = Boolean(e.altKey);
+	const shift = Boolean(e.shiftKey);
+	const key = e.key;
+	if (key === "ContextMenu" || (shift && key === "F10")) return true;
+	if (key === "Enter" || key === "F2") return true;
+	if (key === "ArrowLeft" || key === "ArrowRight" || key === "ArrowUp" || key === "ArrowDown") return !ctrl && !(alt && shift);
+	if (key === "PageUp" || key === "PageDown" || key === "Delete" || key === "Backspace") return !ctrl && !alt;
+	if (key === "Home" || key === "End") return !alt;
+	return key.length === 1 && !ctrl && !alt;
+}
+
+/**
+ * What becomes of the focus once the rows have been drawn again. The rows are drawn a window at a time, and a
+ * cell that had the focus is taken off the page when its row is scrolled far enough away; the browser then gives
+ * the focus to the page's body, and no key reached the table any more. So the table itself takes the focus
+ * ("table") and holds it for the cell (`held`), and the active cell gets it back ("cell") when its row is drawn
+ * again. Null leaves the focus where it is: nothing was lost, or the focus has since gone somewhere else.
+ */
+export function focusAfterRowsDrawn(s: {
+	/** The focus was in the rows before they were drawn again. */
+	wasInRows: boolean;
+	/** It is nowhere now: what had it is gone from the page. */
+	lost: boolean;
+	/** The table was already holding the focus for the cell. */
+	held: boolean;
+	/** The table itself has the focus now. */
+	onTable: boolean;
+	/** The active cell's row is among the rows drawn. */
+	cellDrawn: boolean;
+}): { focus: "table" | "cell" | null; held: boolean } {
+	const take = s.wasInRows && s.lost;
+	if (!take && !(s.held && s.onTable)) return { focus: null, held: false };
+	if (s.cellDrawn) return { focus: "cell", held: false };
+	return { focus: take ? "table" : null, held: true };
+}
+
+/**
+ * Where Shift+Tab goes from a cell, among the rows and columns as they are shown: the cell before it, and from a
+ * row's first cell the last cell of the row above. From the first cell of all there is nowhere to go, and it
+ * stays where it is, as in Excel and Sheets; the editor closed there with the focus given to nothing.
+ */
+export function cellBeforeInTabOrder(visRow: number, visCol: number, colCount: number): { visRow: number; visCol: number } {
+	if (visCol > 0) return { visRow, visCol: visCol - 1 };
+	if (visRow > 0 && colCount > 0) return { visRow: visRow - 1, visCol: colCount - 1 };
+	return { visRow, visCol };
 }

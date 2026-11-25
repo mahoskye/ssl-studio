@@ -1126,7 +1126,7 @@ describe("R8C P1 — quickRank memoization, quickPrefix 1-char prefix, layout sa
 		expect(qp).toContain("120");
 
 		const app = readSrc("../src/view/App.tsx");
-		expect(app).toContain("return () => clearTimeout(timer);");
+		expect(app).toContain("return keepForFolder(targetRoot, () =>");
 		expect(app).toContain("if (state.workspace?.root !== targetRoot) return");
 		expect(app).toContain("focusPanel((narrowPanels() && narrowHosted()) || state.leftView)");
 		expect(app).toContain("narrowOpenedLeft");
@@ -1268,11 +1268,10 @@ describe("R8C P1/P2 — shared helpers (workContext, workList, fileKind, editorD
 		// Without sourcePath: normalizes leading ../ against workspace docs
 		const refs1 = findCommentDocRefsInLines(
 			[
-				"/* See ../../docs/specs/due-dates.md#L0;",
-				"/* Also ../schema/database/HOLIDAYS.md#L12-L20;",
-				"/* Bad range docs/specs/due-dates.md#L0-L5;",
+				"-- See ../../docs/specs/due-dates.md#L0",
+				"-- Also ../schema/database/HOLIDAYS.md#L12-L20",
+				"-- Bad range docs/specs/due-dates.md#L0-L5",
 			],
-			"ssl",
 			docs,
 			"/ws",
 		);
@@ -1288,7 +1287,6 @@ describe("R8C P1/P2 — shared helpers (workContext, workList, fileKind, editorD
 				"-- ../../docs/specs/due-dates.md#L5",
 				"-- ../../../../../etc/passwd.md",
 			],
-			"sql",
 			docs,
 			"/ws",
 			{ sourcePath: "/ws/src/DueDates/Query.sql" },

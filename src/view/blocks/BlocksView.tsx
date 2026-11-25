@@ -19,7 +19,7 @@ import { session } from "../lsp/session";
 import { ask, choose, quickPick, type QuickPickOption } from "../dialogs";
 import { docs, isMarkdown } from "../project";
 import { canonical, documents, notify, openFile, setState, state } from "../state";
-import { buildTree, cardMove, cardOf, pathTo, procedureGroups, splitHeader, staleNotice, staleReason, swapLines, treeFromSyntax, type Node, type Span, type SymbolIn } from "./model";
+import { buildTree, cardMove, cardOf, editedLines, pathTo, procedureGroups, splitHeader, staleNotice, staleReason, swapLines, treeFromSyntax, type Node, type Span, type SymbolIn } from "./model";
 
 import { ticketRefsIn, type TicketSegment } from "../../shared/editorDocHelpers";
 export { ticketRefsIn, type TicketSegment };
@@ -86,9 +86,12 @@ export function BlocksView(props: { path: string; group: number }) {
 		return collapsedByPath.get(props.path)!;
 	};
 	const [collapseVersion, setCollapseVersion] = createSignal(0);
-	const isCollapsed = (n: Node) => (collapseVersion(), collapsed().has(n.key));
+	// A fold is kept by the block's place in the structure (`fold`, model.ts), not by its line: kept by line, the
+	// folds sat on other blocks as soon as a line was added or removed above them. A leaf has no fold to keep.
+	const isCollapsed = (n: Node) => (collapseVersion(), Boolean(n.fold && collapsed().has(n.fold)));
 	const toggle = (n: Node) => {
-		collapsed().has(n.key) ? collapsed().delete(n.key) : collapsed().add(n.key);
+		if (!n.fold) return;
+		collapsed().has(n.fold) ? collapsed().delete(n.fold) : collapsed().add(n.fold);
 		setCollapseVersion((v) => v + 1);
 	};
 
@@ -192,9 +195,9 @@ export function BlocksView(props: { path: string; group: number }) {
 					// The banner opens folded; long files open as a region outline.
 					if (first) {
 						const banner = root.children.find((c) => c.kind === "comment" && c.start === 1);
-						if (banner) collapsed().add(banner.key);
+						if (banner?.fold) collapsed().add(banner.fold);
 						if (model.getLineCount() > 300) {
-							const walk = (n: Node) => n.children.forEach((c) => (c.kind === "procedure" || c.kind === "comment" ? collapsed().add(c.key) : walk(c)));
+							const walk = (n: Node) => n.children.forEach((c) => (c.kind === "procedure" || c.kind === "comment" ? c.fold && collapsed().add(c.fold) : walk(c)));
 							walk(root);
 						}
 						setCollapseVersion((v) => v + 1);
@@ -500,17 +503,30 @@ export function BlocksView(props: { path: string; group: number }) {
 		model.pushEditOperations([], [{ range, text: replacement.replace(/\r?\n/g, eol) }], () => null);
 		if (closeUndo) model.pushStackElement();
 	};
+	/**
+	 * The range format that follows an edit made here (ADR 0002), over the lines the edit touched and no others.
+	 * The edit was pushed with its undo step left open, and this closes it: one undo takes back both.
+	 */
 	const formatLines = async (start: number, end: number) => {
 		const model = doc()?.model;
 		if (!model || model.isDisposed()) return;
 		try {
+			// Asked only of a server that is running. One that is starting would be waited for, with the undo step
+			// open all the while, and one that is stopped has no answer: the edit then stands as it was written.
+			if (state.lsp.state !== "running") return;
 			const edits = await session.formatRanges(model, [[start - 1, Math.min(end, model.getLineCount()) - 1]], model.getOptions());
 			if (!model.isDisposed() && edits.length) model.pushEditOperations([], edits, () => null);
 		} catch {
-			// The move stands unformatted; format on save will tidy it.
+			// The edit stands unformatted; format on save will tidy it.
 		} finally {
 			if (!model.isDisposed()) model.pushStackElement();
 		}
+	};
+	/** Formats the lines an edit made here left (`editedLines`, model.ts), then reads the tree again. */
+	const formatEdited = async (span: Span) => {
+		noteOwnEdit();
+		await formatLines(span.start, span.end);
+		editedHere();
 	};
 	const parentOf = (target: Node, from: Node | null = tree.root): Node | null => {
 		if (!from) return null;
@@ -575,8 +591,8 @@ export function BlocksView(props: { path: string; group: number }) {
 		if ((await choose(`Delete ${what}? Undo brings it back.`, ["Delete"], { danger: "Delete" })) !== "Delete") return;
 		if (model.isDisposed() || doc()?.model !== model) return;
 		if (model.getVersionId() !== beforeVer || !within(card)) return notify("The text changed while this was asked. Nothing was deleted: try again.");
-		replaceLines(card.start, card.end, null);
-		editedHere();
+		replaceLines(card.start, card.end, null, false);
+		await formatEdited(editedLines(card.start, null, model.getLineCount()));
 	};
 	/**
 	 * An in-place editor's text, set once as it opens: bound reactively, a tree
@@ -609,7 +625,7 @@ export function BlocksView(props: { path: string; group: number }) {
 		if (open && open !== key) return notify("Another edit is still open here. Confirm it, or press Escape to drop it, first.");
 		setEditing(key);
 	};
-	/** Replaces only the condition, as one undoable edit; keyword, spacing and `;` stay as written. */
+	/** Replaces only the condition, then formats the statement's own line: one undo takes back both. */
 	const commitCondition = (n: Node, value: string) => {
 		if (editing() !== conditionKey(n)) return;
 		const model = doc()?.model;
@@ -627,8 +643,7 @@ export function BlocksView(props: { path: string; group: number }) {
 		const from = h.startColumn + parts.before.length;
 		model.pushStackElement();
 		model.pushEditOperations([], [{ range: new monaco.Range(h.line, from, h.line, from + parts.condition.length), text: condition }], () => null);
-		model.pushStackElement();
-		editedHere();
+		void formatEdited({ start: h.line, end: h.line });
 	};
 	const commitEdit = (n: Node, text: string) => {
 		if (editing() !== n.key) return;
@@ -641,8 +656,10 @@ export function BlocksView(props: { path: string; group: number }) {
 		}
 		setEditing(null);
 		if (text !== lines(n).replace(/\r\n/g, "\n")) {
-			replaceLines(n.start, n.end, text);
-			editedHere();
+			// Code the language server could not read is kept exactly as it is typed: no format follows it.
+			replaceLines(n.start, n.end, text, n.kind === "raw");
+			if (n.kind === "raw") editedHere();
+			else void formatEdited(editedLines(n.start, text, model.getLineCount()));
 		}
 	};
 	const drop = (e: DragEvent, line: number) => {
@@ -654,11 +671,13 @@ export function BlocksView(props: { path: string; group: number }) {
 		if (!text) return;
 		const targetLine = Math.max(1, Math.min(line, model.getLineCount()));
 		const eol = model.getEOL();
+		const inserted = text.replace(/\r?\n/g, "\n").replace(/\n?$/, "\n");
 		model.pushStackElement();
-		model.pushEditOperations([], [{ range: new monaco.Range(targetLine, 1, targetLine, 1), text: text.replace(/\r?\n/g, "\n").replace(/\n?$/, "\n").replace(/\n/g, eol) }], () => null);
-		model.pushStackElement();
+		model.pushEditOperations([], [{ range: new monaco.Range(targetLine, 1, targetLine, 1), text: inserted.replace(/\n/g, eol) }], () => null);
+		// The lines put in are formatted where they stand. How deep they sit in the block they were dropped into is
+		// not theirs alone to say: a format of the procedure, or the save, settles that.
 		notify("Inserted. Format or save to settle its layout.");
-		editedHere();
+		void formatEdited(editedLines(targetLine, inserted, model.getLineCount()));
 	};
 	const dropZone = (line: () => number) => ({
 		onDragOver: (e: DragEvent) => (e.preventDefault(), setDropAt(line())),
@@ -1126,8 +1145,9 @@ export function BlocksView(props: { path: string; group: number }) {
 	const collapseAll = (all: boolean) => {
 		const walk = (n: Node) =>
 			n.children.forEach((c) => {
-				if (c.kind === "procedure" || c.kind === "block" || c.kind === "comment") all ? collapsed().add(c.key) : collapsed().delete(c.key);
-				if (c.kind === "region" && !all) collapsed().delete(c.key);
+				if (!c.fold) return;
+				if (c.kind === "procedure" || c.kind === "block" || c.kind === "comment") all ? collapsed().add(c.fold) : collapsed().delete(c.fold);
+				if (c.kind === "region" && !all) collapsed().delete(c.fold);
 				walk(c);
 			});
 		if (tree.root) walk(tree.root);

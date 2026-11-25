@@ -233,11 +233,18 @@ const outOf = (plan: Plan, id: string) => plan.edges.filter((e) => e.from === id
 const into = (plan: Plan, id: string) => plan.edges.filter((e) => e.to === id);
 const nodeOf = (plan: Plan, id: string) => plan.nodes.find((n) => n.id === id);
 
+/**
+ * The label for a decision's next way out: one none of its ways out has. The number was the count of labels in
+ * use plus one, which is taken as soon as a way out has been removed (yes, no, option 4: the next was "option 4"
+ * again), and two branches of one decision then read the same on the chart and in the test paths.
+ */
 function nextLabel(plan: Plan, id: string) {
-	const used = new Set(outOf(plan, id).map((e) => (typeof e.label === "string" ? e.label.toLowerCase() : undefined)));
+	const used = new Set(outOf(plan, id).map((e) => (typeof e.label === "string" ? e.label.trim().toLowerCase() : undefined)));
 	if (!used.has("yes")) return "yes";
 	if (!used.has("no")) return "no";
-	return `option ${used.size + 1}`;
+	let n = used.size + 1;
+	while (used.has(`option ${n}`)) n++;
+	return `option ${n}`;
 }
 
 function make(plan: Plan, kind: NodeKind, text: string, near?: PlanNode, ref?: string): PlanNode {
@@ -544,8 +551,14 @@ export function renameGroup(plan: Plan, groupId: string, nextName: string): Plan
 	return { ...plan, groups: plan.groups.map((g) => (g.id === groupId ? { ...g, name: wanted } : g)) };
 }
 
+/**
+ * A way on from one node to another. Both must be nodes of the plan: the chart also draws what the assistant only
+ * suggests, under ids the plan's text does not hold, and a wire dropped on one of those was written as an edge to
+ * a node that does not exist (the check then reported it, and accepting the suggestion did not mend it, since the
+ * accepted step takes a new id).
+ */
 export function connect(plan: Plan, from: string, to: string): Plan {
-	if (from === to || plan.edges.some((e) => e.from === from && e.to === to)) return plan;
+	if (from === to || !nodeOf(plan, from) || !nodeOf(plan, to) || plan.edges.some((e) => e.from === from && e.to === to)) return plan;
 	const label = nodeOf(plan, from)?.kind === "decision" ? nextLabel(plan, from) : undefined;
 	return { ...plan, edges: [...plan.edges, { from, to, ...(label ? { label } : {}) }] };
 }

@@ -11,6 +11,8 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { deflateRawSync, inflateRawSync } from "node:zlib";
+import { localDay } from "../shared/dates";
+import { imageType } from "../shared/fileKind";
 import { frontMatter, one } from "../shared/frontMatter";
 
 const ILLEGAL_XML_RE =
@@ -1787,7 +1789,7 @@ export function markdownToDocx(options: DocxBuildOptions): Uint8Array {
 	const includeHeaderFooter = options.headerFooter !== false;
 	const includeToc = options.toc === true;
 	const dateFromSubtitle = /\b(\d{4}-\d{2}-\d{2})\b/.exec(options.subtitle ?? "")?.[1] ?? "";
-	const generatedDate = metaLookup.get("date") || metaLookup.get("generated") || dateFromSubtitle || new Date().toISOString().slice(0, 10);
+	const generatedDate = metaLookup.get("date") || metaLookup.get("generated") || dateFromSubtitle || localDay();
 
 	let headerRelId = "";
 	let footerRelId = "";
@@ -1910,6 +1912,33 @@ function xmlAttr(tag: string, name: string): string {
 }
 
 /**
+ * The first tag that starts as `opener` says, up to its `>`, or "" when there is none. `opener` is the start of the
+ * tag and no more (`/<w:pStyle\b/i`). Written as one pattern, `/<w:pStyle\b[^>]*>/`, every start with no `>` after
+ * it was read to the end of the text before the next start was tried: a file of a few kilobytes made of such starts
+ * took the square of its length to read, and held up everything else the backend does.
+ */
+function firstTag(xml: string, opener: RegExp): string {
+	const at = xml.search(opener);
+	if (at < 0) return "";
+	const gt = xml.indexOf(">", at);
+	return gt < 0 ? "" : xml.slice(at, gt + 1);
+}
+
+/** Every tag that starts as `opener` says (a pattern with the `g` flag), each up to its `>`, in order, in one walk. */
+function tagsStarting(xml: string, opener: RegExp): string[] {
+	const out: string[] = [];
+	opener.lastIndex = 0;
+	for (let m = opener.exec(xml); m; m = opener.exec(xml)) {
+		const gt = xml.indexOf(">", m.index);
+		if (gt < 0) break;
+		out.push(xml.slice(m.index, gt + 1));
+		opener.lastIndex = gt + 1;
+	}
+	opener.lastIndex = 0;
+	return out;
+}
+
+/**
  * Balanced-tag top-level child scanner for WordprocessingML.
  * Matches only exact element names (so `<w:p>` never matches `<w:pPr>` and `<w:tbl>` never matches `<w:tblPr>`).
  */
@@ -1998,12 +2027,134 @@ function extractDirectElements(xml: string, tagNames: readonly string[]): { tag:
 	return out;
 }
 
+const TAG_OPEN = 0;
+const TAG_EMPTY = 1;
+const TAG_CLOSE = 2;
+const TAG_OTHER = 3;
+
+/**
+ * Where every tag of a piece of XML is, and which tag closes each opening tag, found in one walk. The two readers
+ * that go into what they find (a choice inside a choice, a link inside a tracked change) used to look for the end
+ * of an element and then read the same stretch again one level down, so text nested a few thousand deep cost the
+ * square of its length. They now ask this for the end of each element.
+ *
+ * A tag is read as `extractDirectElements` reads it: from `<` to the first `>`, a comment to its `-->`, and nothing
+ * more once a `<` has no `>` after it. Names are kept, and closing tags found, for the names `tracked` says and no
+ * others, so that a file of a million names of its own costs no more than its length.
+ */
+type TagIndex = {
+	count: number;
+	/** Where each tag starts (its `<`) and where it ends (past its `>`). */
+	start: Int32Array;
+	end: Int32Array;
+	/** TAG_OPEN, TAG_EMPTY (`<x/>`), TAG_CLOSE, or TAG_OTHER for a comment, `<?…>` and `<!…>`. */
+	kind: Uint8Array;
+	/** The name of each tag as a place in `names`, the same place for the same name; -1 for TAG_OTHER and for a name that is not tracked. */
+	name: Int32Array;
+	names: string[];
+	/** For an opening tag with a tracked name: the tag that closes it, counting the tags of its own name alone; -1 when none does. */
+	close: Int32Array;
+};
+
+function indexTags(xml: string, tracked: (tagName: string) => boolean): TagIndex {
+	let room = 0;
+	for (let at = xml.indexOf("<"); at >= 0; at = xml.indexOf("<", at + 1)) room++;
+	const start = new Int32Array(room);
+	const end = new Int32Array(room);
+	const kind = new Uint8Array(room);
+	const name = new Int32Array(room);
+	const close = new Int32Array(room).fill(-1);
+	const names: string[] = [];
+	const places = new Map<string, number>();
+	/** For each name, its opening tags that nothing has closed yet. */
+	const unclosed: number[][] = [];
+	const placeOf = (tagName: string) => {
+		let place = places.get(tagName);
+		if (place === undefined) {
+			if (!tracked(tagName)) return -1;
+			place = names.length;
+			places.set(tagName, place);
+			names.push(tagName);
+			unclosed.push([]);
+		}
+		return place;
+	};
+	let count = 0;
+	let pos = 0;
+	while (pos < xml.length) {
+		const lt = xml.indexOf("<", pos);
+		if (lt < 0) break;
+		if (xml.startsWith("<!--", lt)) {
+			const endComment = xml.indexOf("-->", lt + 4);
+			if (endComment < 0) break;
+			start[count] = lt;
+			end[count] = endComment + 3;
+			kind[count] = TAG_OTHER;
+			name[count] = -1;
+			count++;
+			pos = endComment + 3;
+			continue;
+		}
+		const gt = xml.indexOf(">", lt + 1);
+		if (gt < 0) break;
+		start[count] = lt;
+		end[count] = gt + 1;
+		const second = xml[lt + 1];
+		if (second === "?" || second === "!") {
+			kind[count] = TAG_OTHER;
+			name[count] = -1;
+		} else if (second === "/") {
+			const place = placeOf(xml.slice(lt + 2, gt).trim());
+			kind[count] = TAG_CLOSE;
+			name[count] = place;
+			const opener = place < 0 ? undefined : unclosed[place]!.pop();
+			if (opener !== undefined) close[opener] = count;
+		} else {
+			let nameEnd = lt + 1;
+			while (nameEnd < gt && !/[\s/>]/.test(xml[nameEnd]!)) nameEnd++;
+			const place = placeOf(xml.slice(lt + 1, nameEnd));
+			name[count] = place;
+			if (xml[gt - 1] === "/") {
+				kind[count] = TAG_EMPTY;
+			} else {
+				kind[count] = TAG_OPEN;
+				if (place >= 0) unclosed[place]!.push(count);
+			}
+		}
+		count++;
+		pos = gt + 1;
+	}
+	return { count, start, end, kind, name, names, close };
+}
+
+/** An element found by `nextElement`: its opening tag `at`, and the tags and the text inside it. */
+type ElementSpan = { at: number; firstTag: number; tagLimit: number; innerStart: number; innerEnd: number; next: number };
+
+/**
+ * The first element with one of the `wanted` names among the tags from `from` up to `limit`, where the text of
+ * that stretch ends at `textEnd`; null when there is none. Go on from its `next` for the one after it. What
+ * `extractDirectElements` finds in a piece of text, this finds in a stretch of the text the tags were read from:
+ * an element inside a wanted one is not found, and one that nothing closes within the stretch runs to its end.
+ */
+function nextElement(tags: TagIndex, from: number, limit: number, textEnd: number, wanted: ReadonlySet<string>): ElementSpan | null {
+	for (let at = from; at < limit; at++) {
+		const kind = tags.kind[at];
+		const place = tags.name[at]!;
+		if ((kind !== TAG_OPEN && kind !== TAG_EMPTY) || place < 0 || !wanted.has(tags.names[place]!)) continue;
+		const innerStart = tags.end[at]!;
+		if (kind === TAG_EMPTY) return { at, firstTag: at + 1, tagLimit: at + 1, innerStart, innerEnd: innerStart, next: at + 1 };
+		const close = tags.close[at]!;
+		if (close >= 0 && close < limit) return { at, firstTag: at + 1, tagLimit: close, innerStart, innerEnd: tags.start[close]!, next: close + 1 };
+		return { at, firstTag: at + 1, tagLimit: limit, innerStart, innerEnd: textEnd, next: limit };
+	}
+	return null;
+}
+
 type ParsedRel = { target: string; type: string };
 
 function parseRelationships(relsXml: string): Map<string, ParsedRel> {
 	const map = new Map<string, ParsedRel>();
-	for (const m of relsXml.matchAll(/<Relationship\b[^>]*\/?>/gi)) {
-		const tag = m[0];
+	for (const tag of tagsStarting(relsXml, /<Relationship\b/gi)) {
 		const id = xmlAttr(tag, "Id");
 		const target = xmlAttr(tag, "Target");
 		const type = xmlAttr(tag, "Type");
@@ -2013,14 +2164,87 @@ function parseRelationships(relsXml: string): Map<string, ParsedRel> {
 }
 
 function hasEnabledFlag(rPr: string, tag: string): boolean {
-	const re = new RegExp(`<w:${tag}(?:\\s+([^>]*))?\\s*/?>`, "i");
-	const m = re.exec(rPr);
+	// The start of the tag is found first and its `>` after it, as in `firstTag`: `<w:b>`, `<w:b/>`, or `<w:b` and a space.
+	const m = new RegExp(`<w:${tag}(?=\\s|/?>)`, "i").exec(rPr);
 	if (!m) return false;
-	const attrs = m[1] ?? "";
+	const gt = rPr.indexOf(">", m.index);
+	if (gt < 0) return false;
+	const attrs = rPr.slice(m.index + m[0].length, gt);
 	const val = xmlAttr(`<x ${attrs}>`, "w:val").toLowerCase();
 	if (val === "0" || val === "false" || val === "none") return false;
 	return true;
 }
+
+const RFONTS_START = /<w:rFonts\b/gi;
+const CODE_FONT = /Consolas|Courier|Menlo|Monaco|monospace/i;
+
+/** Whether a run's properties name a font that code is set in, in a `<w:rFonts …` tag (one cut short by the end of the text too). */
+function hasCodeFont(rPr: string): boolean {
+	RFONTS_START.lastIndex = 0;
+	for (let m = RFONTS_START.exec(rPr); m; m = RFONTS_START.exec(rPr)) {
+		const gt = rPr.indexOf(">", m.index);
+		if (CODE_FONT.test(rPr.slice(m.index, gt < 0 ? rPr.length : gt))) return true;
+		if (gt < 0) break;
+		RFONTS_START.lastIndex = gt + 1;
+	}
+	return false;
+}
+
+const RUN_TOKEN_START = /<(w:t|w:delText|w:footnoteReference|w:commentReference|w:br|w:tab)\b/iy;
+const T_CLOSE = /<\/w:t>/gi;
+const DELTEXT_CLOSE = /<\/w:delText>/gi;
+
+type RunToken = { kind: "text"; text: string } | { kind: "deleted"; text: string } | { kind: "footnote"; tag: string } | { kind: "comment"; tag: string } | { kind: "break" } | { kind: "tab" };
+
+/**
+ * What a run holds, in order: text (`<w:t>`), deleted text (`<w:delText>`), footnote and comment references,
+ * breaks and tabs. A `<w:t/>` that closes itself is not text, so it never takes what follows it up to the next
+ * closing tag. This was one pattern, which for every `<w:t>` with no `</w:t>` after it read to the end of the run
+ * to learn so: a run of a few thousand of them took tens of seconds. Here the next `>` and the fact that no
+ * closing tag is left are each found once.
+ */
+function runTokens(runBody: string): RunToken[] {
+	const tokens: RunToken[] = [];
+	let pos = 0;
+	let gt = -1;
+	let textCloses = true;
+	let deletedCloses = true;
+	for (;;) {
+		const lt = runBody.indexOf("<", pos);
+		if (lt < 0) break;
+		if (gt < lt) {
+			gt = runBody.indexOf(">", lt);
+			if (gt < 0) break;
+		}
+		RUN_TOKEN_START.lastIndex = lt;
+		const name = RUN_TOKEN_START.exec(runBody)?.[1]?.toLowerCase();
+		pos = lt + 1;
+		if (!name) continue;
+		if (name === "w:t" || name === "w:deltext") {
+			const deleted = name === "w:deltext";
+			if (runBody[gt - 1] === "/" || !(deleted ? deletedCloses : textCloses)) continue;
+			const closer = deleted ? DELTEXT_CLOSE : T_CLOSE;
+			closer.lastIndex = gt + 1;
+			const close = closer.exec(runBody);
+			if (!close) {
+				if (deleted) deletedCloses = false;
+				else textCloses = false;
+				continue;
+			}
+			tokens.push({ kind: deleted ? "deleted" : "text", text: runBody.slice(gt + 1, close.index) });
+			pos = close.index + close[0].length;
+		} else {
+			if (name === "w:br") tokens.push({ kind: "break" });
+			else if (name === "w:tab") tokens.push({ kind: "tab" });
+			else tokens.push({ kind: name === "w:footnotereference" ? "footnote" : "comment", tag: runBody.slice(lt, gt + 1) });
+			pos = gt + 1;
+		}
+	}
+	return tokens;
+}
+
+/** How the inside of a paragraph is read: within a deletion, with or without its note references, within the text of a link. */
+type InlineOptions = { inDel?: boolean; emitRefs?: boolean; inLink?: boolean };
 
 type StyledSegment = {
 	text: string;
@@ -2032,7 +2256,158 @@ type StyledSegment = {
 	raw?: boolean;
 };
 
-function formatSegments(segments: StyledSegment[], suppressBold = false): string {
+const isLetterOrDigit = (ch: string | undefined) => Boolean(ch && /[\p{L}\p{N}]/u.test(ch));
+
+/** What Markdown makes a link of where it stands bare starts with `http://`, `https://`, `ftp://` or `www.`, and runs up to a space or `<`. */
+const BARE_LINK_START = /(?:https?|ftp):\/\/|www\./gi;
+const BARE_LINK_END = /[\s<]/g;
+const MAIL_NAME = /[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@/y;
+/** Whether what stands at `at` could be a mail address: the part before its `@`, and the `@`. */
+const mailAt = (text: string, at: number) => {
+	MAIL_NAME.lastIndex = at;
+	return MAIL_NAME.test(text);
+};
+
+/**
+ * The text of a document, written so that Markdown reads it as that text. What a Word document says came through
+ * as it stood, and `*`, `[x](y)`, `<b>` or a backtick in it turned into emphasis, a link, HTML or code.
+ *
+ * A backslash goes before a sign only where the sign would be read as markup, so that prose stays as it is written:
+ * - always before `*`, a backtick, `[`, `]`, `~` and `$` (emphasis and lists, code, links and embeds, strikethrough, math);
+ * - before `_` unless it stands between two letters or digits (`SAMPLE_ID` is left alone, `_note_` is not);
+ * - before `<` when a letter, `/`, `!` or `?` follows, or what could be a mail address (a tag, a comment, a link in
+ *   angle brackets); `a < b` and `<5` are left alone;
+ * - before `=` beside another `=` or at either end of the text (`==` is a highlight; `pH = 7` is left alone);
+ * - before `#` when a letter follows and none stands before it (a tag), and after `&` (`&#42;` is a way of writing
+ *   `*`); `C#` and `#12` are left alone;
+ * - before a backslash that a sign or the end of the text follows, which would otherwise be read as an escape
+ *   itself (`C:\Temp` is left alone).
+ *
+ * An address written out (`https://…`, `www.…`) stays as it is while nothing in it or straight after it needs a
+ * backslash. Markdown makes a link of it and takes all up to the next space as part of it, a backslash too, so
+ * where one is needed the address is put in angle brackets with nothing in it touched, and `www.` gets a backslash
+ * before its dot and is text. Not in the text of a link (`inLink`), where an address is text like any other.
+ *
+ * What a sign means only at the start of a line is seen to by `escapeLineStarts`. An `&lt;` written out in a
+ * document is still shown as `<`: `\&` is not among the escapes the exporter here takes back out.
+ */
+function escapeMarkdownText(text: string, inLink = false): string {
+	/** Where a backslash goes: before the character at each of these places, in order. */
+	const signs: number[] = [];
+	for (const m of text.matchAll(/[\\`*_[\]<~$=#]/g)) {
+		const at = m.index;
+		const ch = m[0];
+		const before = text[at - 1];
+		const after = text[at + 1];
+		const sign =
+			ch === "\\"
+				? after === undefined || /[!-/:-@[-`{-~\r\n]/.test(after)
+				: ch === "_"
+					? !(isLetterOrDigit(before) && isLetterOrDigit(after))
+					: ch === "<"
+						? after !== undefined && (/[A-Za-z/!?]/.test(after) || mailAt(text, at + 1))
+						: ch === "="
+							? before === undefined || after === undefined || before === "=" || after === "="
+							: ch === "#"
+								? before === "&" || (after !== undefined && /[A-Za-z]/.test(after) && !isLetterOrDigit(before))
+								: true;
+		if (sign) signs.push(at);
+	}
+	if (!signs.length) return text;
+	/** The addresses to put in angle brackets, each from where it starts to where it ends, and the places that need a backslash because of them. */
+	const bracketed: [number, number][] = [];
+	const more: number[] = [];
+	if (!inLink) {
+		let sign = 0;
+		// Where the address being read ends, found once for all the starts that stand before it.
+		let to = -1;
+		BARE_LINK_START.lastIndex = 0;
+		for (let m = BARE_LINK_START.exec(text); m; m = BARE_LINK_START.exec(text)) {
+			const from = m.index;
+			if (to <= from) {
+				BARE_LINK_END.lastIndex = from;
+				to = BARE_LINK_END.exec(text)?.index ?? text.length;
+			}
+			// Is a backslash to go into this address, or straight after it?
+			while (sign < signs.length && signs[sign]! < from) sign++;
+			if (sign >= signs.length) break;
+			if (signs[sign]! > to) continue;
+			if (/^www/i.test(m[0])) {
+				// Before the dot of `www.`: it is text then, and the backslashes after it are read as such.
+				more.push(from + 3);
+				continue;
+			}
+			// In angle brackets: up to a `>`, a control character or a backslash, and without what ends a sentence or
+			// closes a bracket around the address. A backslash is text in there, but not to a table, which reads `\|`
+			// in a cell as a pipe, nor to the renderer where it looks for the end of emphasis and meets `\>`.
+			let end = from;
+			let unclosed = 0;
+			for (; end < to && text[end] !== ">" && text[end] !== "\\" && text.charCodeAt(end) > 0x1f; end++) unclosed += text[end] === "(" ? 1 : text[end] === ")" ? -1 : 0;
+			for (; ; end--) {
+				const last = text[end - 1]!;
+				if (last === ")" && unclosed < 0) unclosed++;
+				else if (!/[?!.,:;*_'"~]/.test(last)) break;
+			}
+			bracketed.push([from, end]);
+			// A backslash that stood before the address stands before its `<` now, and would take it for its own.
+			if (text[from - 1] === "\\") more.push(from - 1);
+			BARE_LINK_START.lastIndex = end;
+		}
+	}
+	let out = "";
+	let done = 0;
+	let sign = 0;
+	let other = 0;
+	/** Copies the text up to `to`, with its backslashes. */
+	const copyTo = (to: number) => {
+		for (;;) {
+			const nextSign = sign < signs.length ? signs[sign]! : to;
+			const nextOther = other < more.length ? more[other]! : to;
+			const at = Math.min(nextSign, nextOther);
+			if (at >= to) break;
+			out += `${text.slice(done, at)}\\`;
+			done = at;
+			if (at === nextSign) sign++;
+			else other++;
+		}
+		out += text.slice(done, to);
+		done = to;
+	};
+	for (const [from, to] of bracketed) {
+		copyTo(from);
+		out += `<${text.slice(from, to)}>`;
+		done = to;
+		while (sign < signs.length && signs[sign]! < to) sign++;
+		while (other < more.length && more[other]! < to) other++;
+	}
+	copyTo(text.length);
+	return out;
+}
+
+/** The text that `escapeMarkdownText` wrote with backslashes, without them. */
+const unescapeMarkdownText = (escaped: string) => escaped.replace(/\\([\\`*_[\]<~$=#.])/g, "$1");
+
+/**
+ * The same for what Markdown reads at the start of a line only, in text that `escapeMarkdownText` has been over:
+ * a heading (`# `), a quote (`>`), a list item (`- `, `+ `, `1. `, `1) `), a table row (`|`), and a line of nothing
+ * but `-`, `=`, `|` and `:` (a rule, the underline of a heading, the second row of a table, the fence of front
+ * matter). A paragraph that began "1. Scope" or "- none" in Word is a paragraph here too. Done twice it changes
+ * nothing more. `firstLine` is 1 for the text of a heading, whose first line stands after its `#` and starts nothing.
+ */
+function escapeLineStarts(text: string, firstLine = 0): string {
+	return text
+		.split("\n")
+		.map((line, index) => {
+			if (index < firstLine) return line;
+			if (/^[ \t]*(?::+[ \t]*)?[-=|][-=|: \t]*$/.test(line)) return line.replace(/[-=|]/, "\\$&");
+			return line.replace(/^([ \t]*)(?:(#{1,6}(?=[ \t]|$)|>|\||[-+](?=[ \t]|$))|(\d{1,9})([.)])(?=[ \t]|$))/, (_m, indent: string, sign: string | undefined, digits: string | undefined, dot: string | undefined) =>
+				sign !== undefined ? `${indent}\\${sign}` : `${indent}${digits}\\${dot}`,
+			);
+		})
+		.join("\n");
+}
+
+function formatSegments(segments: StyledSegment[], suppressBold = false, inLink = false): string {
 	// Merge adjacent text segments with identical styles (Word splits runs on rsid/spellcheck).
 	const merged: StyledSegment[] = [];
 	for (const seg of segments) {
@@ -2058,7 +2433,8 @@ function formatSegments(segments: StyledSegment[], suppressBold = false): string
 		.map((seg) => {
 			if (seg.raw) return seg.text;
 			const lead = /^\s*/.exec(seg.text)?.[0] ?? "";
-			const trail = /\s*$/.exec(seg.text)?.[0] ?? "";
+			// Not `/\s*$/`: that tries each space of a long run of them as a start, and a text of 100 KiB of spaces took seconds.
+			const trail = seg.text.slice(seg.text.trimEnd().length);
 			const core = seg.text.slice(lead.length, seg.text.length - trail.length);
 			if (!core) return seg.text;
 			let out = core;
@@ -2071,6 +2447,7 @@ function formatSegments(segments: StyledSegment[], suppressBold = false): string
 				const padded = out.startsWith("`") || out.endsWith("`") ? ` ${out} ` : out;
 				out = `${fence}${padded}${fence}`;
 			} else {
+				out = escapeMarkdownText(out, inLink);
 				const bold = seg.bold && !suppressBold;
 				if (bold && seg.italic) out = `***${out}***`;
 				else if (bold) out = `**${out}**`;
@@ -2083,98 +2460,60 @@ function formatSegments(segments: StyledSegment[], suppressBold = false): string
 		.join("");
 }
 
+const ALTERNATE_NAMES: ReadonlySet<string> = new Set(["AlternateContent", "Choice", "Fallback"]);
+
 /**
  * Resolves OOXML `<mc:AlternateContent>` blocks so that when `<mc:Choice>` is present,
  * ONLY `<mc:Choice>` is retained and `<mc:Fallback>` is skipped — preventing duplicated
  * shapes, drawings, equations, or text boxes. Falls back to `<mc:Fallback>` when no Choice exists.
+ * One walk over the tags, with the blocks it is inside kept in a list: a block in a block, however deep.
  */
 function resolveAlternateContent(xml: string): string {
 	if (!xml.includes("AlternateContent")) return xml;
-	let out = "";
-	let pos = 0;
-	while (pos < xml.length) {
-		const lt = xml.indexOf("<", pos);
-		if (lt < 0) {
-			out += xml.slice(pos);
-			break;
-		}
-		if (xml.startsWith("<!--", lt)) {
-			const ec = xml.indexOf("-->", lt + 4);
-			const end = ec < 0 ? xml.length : ec + 3;
-			out += xml.slice(pos, end);
-			pos = end;
+	const localName = (tagName: string) => (tagName.includes(":") ? tagName.slice(tagName.indexOf(":") + 1) : tagName);
+	const tags = indexTags(xml, (tagName) => ALTERNATE_NAMES.has(localName(tagName)));
+	const isAlternate = tags.names.map((tagName) => localName(tagName) === "AlternateContent");
+	const out: string[] = [];
+	// The stretches still to copy, the innermost last: each its tags from `tag` up to `limit` and its text from `pos` up to `end`.
+	const open = [{ tag: 0, limit: tags.count, pos: 0, end: xml.length }];
+	while (open.length) {
+		const span = open[open.length - 1]!;
+		let at = span.tag;
+		while (at < span.limit && !((tags.kind[at] === TAG_OPEN || tags.kind[at] === TAG_EMPTY) && tags.name[at]! >= 0 && isAlternate[tags.name[at]!])) at++;
+		if (at >= span.limit) {
+			out.push(xml.slice(span.pos, span.end));
+			open.pop();
 			continue;
 		}
-		if (xml[lt + 1] === "/" || xml[lt + 1] === "?" || xml[lt + 1] === "!") {
-			const gt = xml.indexOf(">", lt + 1);
-			const end = gt < 0 ? xml.length : gt + 1;
-			out += xml.slice(pos, end);
-			pos = end;
+		out.push(xml.slice(span.pos, tags.start[at]!));
+		if (tags.kind[at] === TAG_EMPTY) {
+			span.pos = tags.end[at]!;
+			span.tag = at + 1;
 			continue;
 		}
-		let nameEnd = lt + 1;
-		while (nameEnd < xml.length && !/[\s/>]/.test(xml[nameEnd]!)) nameEnd++;
-		const tagName = xml.slice(lt + 1, nameEnd);
-		const localName = tagName.includes(":") ? tagName.slice(tagName.indexOf(":") + 1) : tagName;
-		const gt = xml.indexOf(">", nameEnd);
-		if (gt < 0) {
-			out += xml.slice(pos);
-			break;
-		}
-		if (localName !== "AlternateContent") {
-			out += xml.slice(pos, gt + 1);
-			pos = gt + 1;
-			continue;
-		}
-		out += xml.slice(pos, lt);
-		if (xml[gt - 1] === "/") {
-			pos = gt + 1;
-			continue;
-		}
-		// Find balanced closing `</tagName>`
-		let depth = 1;
-		let scan = gt + 1;
-		let closeStart = -1;
-		let closeEnd = -1;
-		while (scan < xml.length && depth > 0) {
-			const nextLt = xml.indexOf("<", scan);
-			if (nextLt < 0) break;
-			if (xml.startsWith("<!--", nextLt)) {
-				const ec = xml.indexOf("-->", nextLt + 4);
-				scan = ec < 0 ? xml.length : ec + 3;
-				continue;
-			}
-			const nextGt = xml.indexOf(">", nextLt + 1);
-			if (nextGt < 0) break;
-			if (xml[nextLt + 1] === "/") {
-				const closeName = xml.slice(nextLt + 2, nextGt).trim();
-				if (closeName === tagName) {
-					depth--;
-					if (depth === 0) {
-						closeStart = nextLt;
-						closeEnd = nextGt + 1;
-						break;
-					}
-				}
-			} else if (xml[nextGt - 1] !== "/") {
-				let innerNameEnd = nextLt + 1;
-				while (innerNameEnd < nextGt && !/[\s/>]/.test(xml[innerNameEnd]!)) innerNameEnd++;
-				if (xml.slice(nextLt + 1, innerNameEnd) === tagName) depth++;
-			}
-			scan = nextGt + 1;
-		}
-		const inner = closeStart >= 0 ? xml.slice(gt + 1, closeStart) : xml.slice(gt + 1);
+		// The block ends at its own closing tag, or with the stretch it is in when nothing closes it there.
+		const close = tags.close[at]!;
+		const closed = close >= 0 && close < span.limit;
+		const innerLimit = closed ? close : span.limit;
+		const innerEnd = closed ? tags.start[close]! : span.end;
+		span.pos = closed ? tags.end[close]! : span.end;
+		span.tag = closed ? close + 1 : span.limit;
+		const tagName = tags.names[tags.name[at]!]!;
 		const prefix = tagName.includes(":") ? tagName.slice(0, tagName.indexOf(":") + 1) : "";
 		const choiceTag = `${prefix}Choice`;
-		const fallbackTag = `${prefix}Fallback`;
-		const branches = extractDirectElements(inner, [choiceTag, fallbackTag]);
-		const choice = branches.find((b) => b.tag === choiceTag);
-		const fallback = branches.find((b) => b.tag === fallbackTag);
-		const chosen = choice ? choice.inner : fallback ? fallback.inner : "";
-		out += resolveAlternateContent(chosen);
-		pos = closeEnd >= 0 ? closeEnd : xml.length;
+		const branches = new Set([choiceTag, `${prefix}Fallback`]);
+		// The first Choice, or without one the first Fallback.
+		let chosen: ElementSpan | null = null;
+		for (let branch = nextElement(tags, at + 1, innerLimit, innerEnd, branches); branch; branch = nextElement(tags, branch.next, innerLimit, innerEnd, branches)) {
+			if (tags.names[tags.name[branch.at]!] === choiceTag) {
+				chosen = branch;
+				break;
+			}
+			chosen ??= branch;
+		}
+		if (chosen) open.push({ tag: chosen.firstTag, limit: chosen.tagLimit, pos: chosen.innerStart, end: chosen.innerEnd });
 	}
-	return out;
+	return out.join("");
 }
 
 /** Strips balanced `<tagName>...</tagName>` occurrences (e.g. `<w:pPr>`) so metadata children never leak into inline text parsing. */
@@ -2257,16 +2596,16 @@ function parseStylesXml(stylesXml: string): Map<string, ParsedStyleDef> {
 		if (type && type !== "paragraph") continue;
 		const id = xmlAttr(el.openTag, "w:styleId");
 		if (!id) continue;
-		const nameTag = /<w:name\b[^>]*>/i.exec(el.inner)?.[0] ?? "";
-		const basedOnTag = /<w:basedOn\b[^>]*>/i.exec(el.inner)?.[0] ?? "";
+		const nameTag = firstTag(el.inner, /<w:name\b/i);
+		const basedOnTag = firstTag(el.inner, /<w:basedOn\b/i);
 		const pPr = extractDirectElements(el.inner, ["w:pPr"])[0]?.inner ?? "";
-		const outlineTag = /<w:outlineLvl\b[^>]*>/i.exec(pPr)?.[0] ?? "";
+		const outlineTag = firstTag(pPr, /<w:outlineLvl\b/i);
 		const rawOutline = outlineTag ? xmlAttr(outlineTag, "w:val") : "";
 		const parsedOutline = rawOutline !== "" ? Number(rawOutline) : Number.NaN;
 		const outlineLvl = Number.isInteger(parsedOutline) && parsedOutline >= 0 && parsedOutline <= 5 ? parsedOutline : undefined;
 		const numPr = extractDirectElements(pPr, ["w:numPr"])[0]?.inner ?? "";
-		const numIdTag = /<w:numId\b[^>]*>/i.exec(numPr)?.[0] ?? "";
-		const ilvlTag = /<w:ilvl\b[^>]*>/i.exec(numPr)?.[0] ?? "";
+		const numIdTag = firstTag(numPr, /<w:numId\b/i);
+		const ilvlTag = firstTag(numPr, /<w:ilvl\b/i);
 		const numId = numIdTag ? xmlAttr(numIdTag, "w:val") : undefined;
 		const ilvlRaw = ilvlTag ? xmlAttr(ilvlTag, "w:val") : "";
 		const parsedIlvl = ilvlRaw !== "" ? Math.floor(Number(ilvlRaw)) : Number.NaN;
@@ -2287,6 +2626,15 @@ type NumberingLevelDef = { ordered: boolean; start: number };
 
 const UNORDERED_NUM_FMTS = new Set(["bullet", "none"]);
 
+/** The deepest list level of a paragraph, from 0: a deeper one in a file is read as this. */
+const MAX_LIST_LEVEL = 8;
+
+/** What a paragraph is read for: runs, and the links and tracked changes that hold runs. */
+const INLINE_ELEMENTS: ReadonlySet<string> = new Set(["w:r", "w:hyperlink", "w:ins", "w:del", "w:commentRangeEnd"]);
+
+/** How deep links and tracked changes may stand in one another before a file is refused. */
+const MAX_INLINE_DEPTH = 100;
+
 function parseNumberingXml(numberingXml: string): Map<string, Map<number, NumberingLevelDef>> {
 	const abstractLevels = new Map<string, Map<number, NumberingLevelDef>>();
 	for (const abs of extractDirectElements(numberingXml, ["w:abstractNum"])) {
@@ -2295,10 +2643,12 @@ function parseNumberingXml(numberingXml: string): Map<string, Map<number, Number
 		const lvls = new Map<number, NumberingLevelDef>();
 		for (const lvl of extractDirectElements(abs.inner, ["w:lvl"])) {
 			const ilvl = Number(xmlAttr(lvl.openTag, "w:ilvl"));
-			if (!Number.isInteger(ilvl) || ilvl < 0) continue;
-			const fmtTag = /<w:numFmt\b[^>]*>/i.exec(lvl.inner)?.[0] ?? "";
+			// A paragraph asks for levels 0 to 8 and no other. Every level a file named used to be kept, and copied
+			// for each list: twenty thousand of each in a file under a megabyte ran the backend out of memory.
+			if (!Number.isInteger(ilvl) || ilvl < 0 || ilvl > MAX_LIST_LEVEL) continue;
+			const fmtTag = firstTag(lvl.inner, /<w:numFmt\b/i);
 			const fmt = fmtTag ? xmlAttr(fmtTag, "w:val").trim().toLowerCase() : "";
-			const startTag = /<w:start\b[^>]*>/i.exec(lvl.inner)?.[0] ?? "";
+			const startTag = firstTag(lvl.inner, /<w:start\b/i);
 			const startRaw = startTag ? Number(xmlAttr(startTag, "w:val")) : 1;
 			const start = Number.isInteger(startRaw) && startRaw >= 0 ? startRaw : 1;
 			lvls.set(ilvl, { ordered: Boolean(fmt) && !UNORDERED_NUM_FMTS.has(fmt), start });
@@ -2310,7 +2660,7 @@ function parseNumberingXml(numberingXml: string): Map<string, Map<number, Number
 	for (const num of extractDirectElements(numberingXml, ["w:num"])) {
 		const numId = xmlAttr(num.openTag, "w:numId");
 		if (!numId) continue;
-		const absRefTag = /<w:abstractNumId\b[^>]*>/i.exec(num.inner)?.[0] ?? "";
+		const absRefTag = firstTag(num.inner, /<w:abstractNumId\b/i);
 		const absId = absRefTag ? xmlAttr(absRefTag, "w:val") : "";
 		const base = absId ? abstractLevels.get(absId) : undefined;
 		const merged = new Map<number, NumberingLevelDef>();
@@ -2319,14 +2669,14 @@ function parseNumberingXml(numberingXml: string): Map<string, Map<number, Number
 		}
 		for (const ov of extractDirectElements(num.inner, ["w:lvlOverride"])) {
 			const ilvl = Number(xmlAttr(ov.openTag, "w:ilvl"));
-			if (!Number.isInteger(ilvl) || ilvl < 0) continue;
-			const startOvTag = /<w:startOverride\b[^>]*>/i.exec(ov.inner)?.[0] ?? "";
+			if (!Number.isInteger(ilvl) || ilvl < 0 || ilvl > MAX_LIST_LEVEL) continue;
+			const startOvTag = firstTag(ov.inner, /<w:startOverride\b/i);
 			const startOvRaw = startOvTag ? Number(xmlAttr(startOvTag, "w:val")) : Number.NaN;
 			const innerLvl = extractDirectElements(ov.inner, ["w:lvl"])[0];
 			if (innerLvl) {
-				const fmtTag = /<w:numFmt\b[^>]*>/i.exec(innerLvl.inner)?.[0] ?? "";
+				const fmtTag = firstTag(innerLvl.inner, /<w:numFmt\b/i);
 				const fmt = fmtTag ? xmlAttr(fmtTag, "w:val").trim().toLowerCase() : "";
-				const startTag = /<w:start\b[^>]*>/i.exec(innerLvl.inner)?.[0] ?? "";
+				const startTag = firstTag(innerLvl.inner, /<w:start\b/i);
 				const startRaw = startTag ? Number(xmlAttr(startTag, "w:val")) : 1;
 				const start = Number.isInteger(startOvRaw) ? startOvRaw : Number.isInteger(startRaw) && startRaw >= 0 ? startRaw : 1;
 				merged.set(ilvl, { ordered: Boolean(fmt) && !UNORDERED_NUM_FMTS.has(fmt), start });
@@ -2340,9 +2690,28 @@ function parseNumberingXml(numberingXml: string): Map<string, Map<number, Number
 	return numMap;
 }
 
+/**
+ * What stands between the first `<w:body>` and the last `</w:body>`, or all of the XML where it has no such pair.
+ * One pattern did this, and for each `<w:body>` of a file with no closing tag read on to the end and back.
+ */
+function bodyOf(xml: string): string {
+	const at = xml.search(/<w:body\b/i);
+	const gt = at < 0 ? -1 : xml.indexOf(">", at);
+	if (gt < 0) return xml;
+	let close = -1;
+	for (const m of xml.matchAll(/<\/w:body>/gi)) close = m.index;
+	return close > gt ? xml.slice(gt + 1, close) : xml;
+}
+
+/**
+ * The `w:id` of a footnote or comment, as it goes into `[^id]`. Word writes a number. Anything else that is not a
+ * letter, a digit, `_` or `-` becomes `-`, so that an id cannot close the brackets it is written in.
+ */
+const noteId = (tag: string) => xmlAttr(tag, "w:id").replace(/[^\w-]+/g, "-");
+
 function wrapAnnotatedMarkdown(text: string, prefix: string, suffix: string): string {
 	const lead = /^\s*/.exec(text)?.[0] ?? "";
-	const trail = /\s*$/.exec(text)?.[0] ?? "";
+	const trail = text.slice(text.trimEnd().length);
 	const core = text.slice(lead.length, text.length - trail.length);
 	if (!core) return text;
 	return `${lead}${prefix}${core}${suffix}${trail}`;
@@ -2388,43 +2757,67 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 	const numberingEntry = byLower.get("word/numbering.xml");
 	const numberingMap = numberingEntry ? parseNumberingXml(dec.decode(numberingEntry.data)) : new Map<string, Map<number, NumberingLevelDef>>();
 
+	// What a style comes to through the styles it is based on is kept for every style on the way, once it is known.
+	// Each paragraph used to walk its style's whole chain again: a chain of a few thousand styles under as many
+	// paragraphs took seconds.
+	const headingLevelByStyle = new Map<string, number>();
 	const resolveStyleHeadingLevel = (styleVal: string): number => {
 		if (!styleVal) return 0;
 		const visited = new Set<string>();
+		let level = 0;
 		let cur: string | undefined = styleVal.toLowerCase();
 		while (cur && !visited.has(cur)) {
+			const known = headingLevelByStyle.get(cur);
+			if (known !== undefined) {
+				level = known;
+				break;
+			}
 			visited.add(cur);
 			const def = stylesMap.get(cur);
 			if (!def) break;
-			if (def.outlineLvl !== undefined) return def.outlineLvl + 1;
-			if (/^title$/i.test(def.name)) return 1;
 			const nm = /^heading\s*([1-6])$/i.exec(def.name);
-			if (nm) return Number(nm[1]);
+			level = def.outlineLvl !== undefined ? def.outlineLvl + 1 : /^title$/i.test(def.name) ? 1 : nm ? Number(nm[1]) : 0;
+			if (level) break;
 			cur = def.basedOn ? def.basedOn.toLowerCase() : undefined;
 		}
+		for (const id of visited) headingLevelByStyle.set(id, level);
+		if (level) return level;
 		if (/^title$/i.test(styleVal)) return 1;
 		const hm = /^heading\s*([1-6])$/i.exec(styleVal);
 		if (hm) return Number(hm[1]);
 		return 0;
 	};
 
+	const numPrByStyle = new Map<string, { numId?: string; ilvl?: number }>();
 	const resolveStyleNumPr = (styleVal: string): { numId?: string; ilvl?: number } => {
 		if (!styleVal) return {};
 		const visited = new Set<string>();
+		let numPr: { numId?: string; ilvl?: number } = {};
 		let cur: string | undefined = styleVal.toLowerCase();
 		while (cur && !visited.has(cur)) {
+			const known = numPrByStyle.get(cur);
+			if (known) {
+				numPr = known;
+				break;
+			}
 			visited.add(cur);
 			const def = stylesMap.get(cur);
 			if (!def) break;
-			if (def.numId) return { numId: def.numId, ilvl: def.ilvl };
+			if (def.numId) {
+				numPr = { numId: def.numId, ilvl: def.ilvl };
+				break;
+			}
 			cur = def.basedOn ? def.basedOn.toLowerCase() : undefined;
 		}
-		return {};
+		for (const id of visited) numPrByStyle.set(id, numPr);
+		return numPr;
 	};
 
 	const extractedImages = new Map<string, Uint8Array>();
 	const extractedByZipPath = new Map<string, string>();
 	const usedImgNames = new Set<string>();
+	/** The names of embedded files that are not pictures the app shows: left where they are, and said in a warning. */
+	const leftOutMedia: string[] = [];
 
 	const resolveImageRel = (rId: string, activeRels: Map<string, ParsedRel>): string | null => {
 		const rel = activeRels.get(rId) ?? docRels.get(rId);
@@ -2439,8 +2832,17 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 			if (hit) {
 				const zipKey = hit.name.toLowerCase();
 				const existing = extractedByZipPath.get(zipKey);
-				if (existing) return existing;
-				const base = basename(hit.name) || "image.png";
+				if (existing !== undefined) return existing || null;
+				// The name is written as the importer will write the file's, so that nothing in it can end the place
+				// kept for it in the text. Only a picture the app shows is taken out: the file was written under
+				// whatever name the document gave it, and `x.html` or an `.svg` with a script in it came to lie in the
+				// attachments folder.
+				const base = (basename(hit.name) || "image.png").replace(/[^A-Za-z0-9._-]+/g, "-");
+				if (!imageType(base)) {
+					leftOutMedia.push(base);
+					extractedByZipPath.set(zipKey, "");
+					return null;
+				}
 				const ext = extname(base);
 				const stem = ext ? base.slice(0, -ext.length) : base;
 				let imgName = base;
@@ -2460,24 +2862,24 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 	let hadTrackChanges = false;
 	const footnoteDefs = new Map<string, string>();
 	const commentDefs = new Map<string, string>();
-	const referencedFootnotes: string[] = [];
-	const referencedComments: string[] = [];
+	// In the order first met. Sets, where lists were searched once for every reference.
+	const referencedFootnotes = new Set<string>();
+	const referencedComments = new Set<string>();
 	const emittedCommentRefs = new Set<string>();
 
-	const bodyMatch = /<w:body\b[^>]*>([\s\S]*)<\/w:body>/i.exec(docXml);
-	const bodyXml = bodyMatch ? bodyMatch[1]! : docXml;
+	const bodyXml = bodyOf(docXml);
 
 	// Track which comment IDs have explicit `<w:commentReference>` runs so `<w:commentRangeEnd>` doesn't double-emit them.
 	const explicitCommentRefs = new Set<string>();
-	for (const cm of bodyXml.matchAll(/<w:commentReference\b[^>]*>/gi)) {
-		const id = xmlAttr(cm[0], "w:id");
+	for (const tag of tagsStarting(bodyXml, /<w:commentReference\b/gi)) {
+		const id = noteId(tag);
 		if (id) explicitCommentRefs.add(id);
 	}
 
 	const parseRun = (
 		runInner: string,
 		activeRels: Map<string, ParsedRel>,
-		opts: { inDel?: boolean; emitRefs?: boolean } = {},
+		opts: InlineOptions = {},
 	): StyledSegment[] => {
 		const segs: StyledSegment[] = [];
 		const rPrEl = extractDirectElements(runInner, ["w:rPr"])[0];
@@ -2486,14 +2888,13 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 		const italic = hasEnabledFlag(rPr, "i");
 		const strike = hasEnabledFlag(rPr, "strike");
 		const highlight = hasEnabledFlag(rPr, "highlight");
-		const codeFont = /<w:rFonts\b[^>]*(?:Consolas|Courier|Menlo|Monaco|monospace)/i.test(rPr);
+		const codeFont = hasCodeFont(rPr);
 
 		const runBody = stripDirectElement(runInner, "w:rPr");
 
 		// Embedded DrawingML (`<a:blip r:embed="..."/>`) and legacy VML (`<v:imagedata r:id="..."/>`) images.
 		const emittedImgIds = new Set<string>();
-		for (const imgTag of runBody.matchAll(/<a:blip\b[^>]*>|<v:imagedata\b[^>]*>/gi)) {
-			const tag = imgTag[0];
+		for (const tag of tagsStarting(runBody, /<a:blip\b|<v:imagedata\b/gi)) {
 			const rId = /^<v:imagedata\b/i.test(tag)
 				? xmlAttr(tag, "r:id") || xmlAttr(tag, "o:relid")
 				: xmlAttr(tag, "r:embed") || xmlAttr(tag, "r:link");
@@ -2505,42 +2906,37 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 			}
 		}
 
-		// Extract text (`<w:t>`), deleted text (`<w:delText>`), footnote/comment refs, breaks, and tabs in exact order.
-		// Exclude self-closing `<w:t/>` and `<w:delText/>` so they never swallow subsequent XML up to the next closing tag.
-		const tokenRe =
-			/<w:t\b[^>]*(?<!\/)>([\s\S]*?)<\/w:t>|<w:delText\b[^>]*(?<!\/)>([\s\S]*?)<\/w:delText>|<w:footnoteReference\b[^>]*\/?>|<w:commentReference\b[^>]*\/?>|<w:br\b[^>]*\/?>|<w:tab\b[^>]*\/?>/gi;
-		let m: RegExpExecArray | null;
-		while ((m = tokenRe.exec(runBody)) !== null) {
-			const whole = m[0];
-			if (/^<w:br\b/i.test(whole)) {
+		// Text, deleted text, footnote/comment refs, breaks, and tabs in exact order.
+		for (const token of runTokens(runBody)) {
+			if (token.kind === "break") {
 				segs.push({ text: "\n", bold: false, italic: false, strike: false, code: false, highlight: false, raw: true });
-			} else if (/^<w:tab\b/i.test(whole)) {
+			} else if (token.kind === "tab") {
 				segs.push({ text: "\t", bold: false, italic: false, strike: false, code: false, highlight: false, raw: true });
-			} else if (/^<w:footnoteReference\b/i.test(whole)) {
+			} else if (token.kind === "footnote") {
 				if (opts.emitRefs !== false) {
-					const id = xmlAttr(whole, "w:id");
+					const id = noteId(token.tag);
 					if (id) {
-						if (!referencedFootnotes.includes(id)) referencedFootnotes.push(id);
+						referencedFootnotes.add(id);
 						segs.push({ text: `[^${id}]`, bold: false, italic: false, strike: false, code: false, highlight: false, raw: true });
 					}
 				}
-			} else if (/^<w:commentReference\b/i.test(whole)) {
+			} else if (token.kind === "comment") {
 				if (opts.emitRefs !== false) {
-					const id = xmlAttr(whole, "w:id");
+					const id = noteId(token.tag);
 					if (id && commentDefs.has(id) && !emittedCommentRefs.has(id)) {
 						emittedCommentRefs.add(id);
-						if (!referencedComments.includes(id)) referencedComments.push(id);
+						referencedComments.add(id);
 						segs.push({ text: `[^comment-${id}]`, bold: false, italic: false, strike: false, code: false, highlight: false, raw: true });
 					}
 				}
-			} else if (m[2] !== undefined) {
-				const txt = xmlUnesc(m[2]);
+			} else if (token.kind === "deleted") {
+				const txt = xmlUnesc(token.text);
 				if (txt) {
 					hadTrackChanges = true;
 					segs.push({ text: txt, bold, italic, strike: opts.inDel ? false : true, code: codeFont, highlight });
 				}
 			} else {
-				const txt = xmlUnesc(m[1] ?? "");
+				const txt = xmlUnesc(token.text);
 				if (txt) segs.push({ text: txt, bold, italic, strike, code: codeFont, highlight });
 			}
 		}
@@ -2551,29 +2947,50 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 		xml: string,
 		activeRels: Map<string, ParsedRel>,
 		suppressBold: boolean,
-		opts: { inDel?: boolean; emitRefs?: boolean } = {},
+		opts: InlineOptions = {},
 	): StyledSegment[] => {
+		const tags = indexTags(xml, (tagName) => INLINE_ELEMENTS.has(tagName));
+		return parseInlineSpan(xml, tags, { firstTag: 0, tagLimit: tags.count, innerEnd: xml.length }, 0, activeRels, suppressBold, opts);
+	};
+
+	/** The runs, links and tracked changes in one stretch of a paragraph's XML: all of it, or what one link or tracked change holds. */
+	const parseInlineSpan = (
+		xml: string,
+		tags: TagIndex,
+		span: Pick<ElementSpan, "firstTag" | "tagLimit" | "innerEnd">,
+		depth: number,
+		activeRels: Map<string, ParsedRel>,
+		suppressBold: boolean,
+		opts: InlineOptions,
+	): StyledSegment[] => {
+		// Word puts a link in a tracked change and little more. Text nested without end is not a document, and is said
+		// to be none before it uses up the stack.
+		if (depth > MAX_INLINE_DEPTH) {
+			throw new Error(`${fileName} cannot be read here: links and tracked changes in it are nested more than ${MAX_INLINE_DEPTH} deep.`);
+		}
 		const segments: StyledSegment[] = [];
-		const children = extractDirectElements(xml, ["w:r", "w:hyperlink", "w:ins", "w:del", "w:commentRangeEnd"]);
-		for (const child of children) {
+		for (let found = nextElement(tags, span.firstTag, span.tagLimit, span.innerEnd, INLINE_ELEMENTS); found; found = nextElement(tags, found.next, span.tagLimit, span.innerEnd, INLINE_ELEMENTS)) {
+			const child = { tag: tags.names[tags.name[found.at]!]!, openTag: xml.slice(tags.start[found.at]!, tags.end[found.at]!) };
+			const inside = found;
+			const parseInside = (insideOpts: InlineOptions) => parseInlineSpan(xml, tags, inside, depth + 1, activeRels, suppressBold, insideOpts);
 			if (child.tag === "w:r") {
-				segments.push(...parseRun(child.inner, activeRels, opts));
+				for (const seg of parseRun(xml.slice(found.innerStart, found.innerEnd), activeRels, opts)) segments.push(seg);
 			} else if (child.tag === "w:hyperlink") {
 				const rId = xmlAttr(child.openTag, "r:id");
 				const rawUrl = rId ? (activeRels.get(rId)?.target ?? docRels.get(rId)?.target ?? "") : "";
 				const safeUrl = rawUrl ? safeDocxLinkUrl(rawUrl) : null;
-				const innerSegs = parseInlineChildren(child.inner, activeRels, suppressBold, opts);
-				const label = formatSegments(innerSegs, suppressBold).trim();
+				const innerSegs = parseInside({ ...opts, inLink: true });
+				const label = formatSegments(innerSegs, suppressBold, true).trim();
 				if (safeUrl && label) {
 					const formatted =
-						label === safeUrl && /^(?:https?:\/\/|mailto:)/i.test(safeUrl) ? `<${safeUrl}>` : `[${label}](${safeUrl})`;
+						unescapeMarkdownText(label) === safeUrl && /^(?:https?:\/\/|mailto:)/i.test(safeUrl) ? `<${safeUrl}>` : `[${label}](${safeUrl})`;
 					segments.push({ text: formatted, bold: false, italic: false, strike: false, code: false, highlight: false, raw: true });
 				} else if (label) {
 					segments.push({ text: label, bold: false, italic: false, strike: false, code: false, highlight: false, raw: true });
 				}
 			} else if (child.tag === "w:ins") {
-				const innerSegs = parseInlineChildren(child.inner, activeRels, suppressBold, opts);
-				const formatted = formatSegments(innerSegs, suppressBold);
+				const innerSegs = parseInside(opts);
+				const formatted = formatSegments(innerSegs, suppressBold, opts.inLink);
 				if (formatted.trim()) {
 					hadTrackChanges = true;
 					segments.push({
@@ -2587,8 +3004,8 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 					});
 				}
 			} else if (child.tag === "w:del") {
-				const innerSegs = parseInlineChildren(child.inner, activeRels, suppressBold, { ...opts, inDel: true });
-				const formatted = formatSegments(innerSegs, suppressBold);
+				const innerSegs = parseInside({ ...opts, inDel: true });
+				const formatted = formatSegments(innerSegs, suppressBold, opts.inLink);
 				if (formatted.trim()) {
 					hadTrackChanges = true;
 					segments.push({
@@ -2602,10 +3019,10 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 					});
 				}
 			} else if (child.tag === "w:commentRangeEnd" && opts.emitRefs !== false) {
-				const id = xmlAttr(child.openTag, "w:id");
+				const id = noteId(child.openTag);
 				if (id && commentDefs.has(id) && !explicitCommentRefs.has(id) && !emittedCommentRefs.has(id)) {
 					emittedCommentRefs.add(id);
-					if (!referencedComments.includes(id)) referencedComments.push(id);
+					referencedComments.add(id);
 					segments.push({ text: `[^comment-${id}]`, bold: false, italic: false, strike: false, code: false, highlight: false, raw: true });
 				}
 			}
@@ -2618,7 +3035,7 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 	const parseSimpleParagraphText = (pInner: string, activeRels: Map<string, ParsedRel>): string => {
 		const cleanInner = stripDirectElement(pInner, "w:pPr");
 		const segs = parseInlineChildren(cleanInner, activeRels, false, { emitRefs: false });
-		return formatSegments(segs, false).trim();
+		return escapeLineStarts(formatSegments(segs, false).trim());
 	};
 
 	const footnotesEntry = byLower.get("word/footnotes.xml");
@@ -2629,7 +3046,7 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 		for (const fnEl of extractDirectElements(fnXml, ["w:footnote"])) {
 			const fnType = xmlAttr(fnEl.openTag, "w:type").toLowerCase();
 			if (fnType === "separator" || fnType === "continuationseparator" || fnType === "continuationnotice") continue;
-			const id = xmlAttr(fnEl.openTag, "w:id");
+			const id = noteId(fnEl.openTag);
 			if (!id) continue;
 			const ps = extractDirectElements(fnEl.inner, ["w:p"])
 				.map((p) => parseSimpleParagraphText(p.inner, fnRels))
@@ -2645,7 +3062,7 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 		const cmRels = cmRelsEntry ? parseRelationships(dec.decode(cmRelsEntry.data)) : docRels;
 		const cmXml = resolveAlternateContent(dec.decode(commentsEntry.data));
 		for (const cmEl of extractDirectElements(cmXml, ["w:comment"])) {
-			const id = xmlAttr(cmEl.openTag, "w:id");
+			const id = noteId(cmEl.openTag);
 			if (!id) continue;
 			const author = xmlAttr(cmEl.openTag, "w:author").trim();
 			const rawDate = xmlAttr(cmEl.openTag, "w:date").trim();
@@ -2655,16 +3072,21 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 				.filter(Boolean);
 			const body = ps.join(" ").trim();
 			if (!body) continue;
-			const who = [author, shortDate].filter(Boolean).join(", ");
+			const who = escapeMarkdownText([author, shortDate].filter(Boolean).join(", ").replace(/\s+/g, " "));
 			commentDefs.set(id, `[QA Comment${who ? ` — ${who}` : ""}]: ${body}`);
 		}
 	}
 
-	// Track active ordered list counters keyed by `${numId}:${ilvl}` so ordered lists emit `1. `, `2. `, ...
-	const orderedCounters = new Map<string, number>();
+	// Track active ordered list counters by level and then by numId, so ordered lists emit `1. `, `2. `, ...
+	// By level, because the counters of the deeper levels are dropped at each list paragraph: as one map keyed by
+	// `${numId}:${ilvl}` every key was read for that each time, and a few thousand lists took seconds.
+	const orderedCounters = Array.from({ length: MAX_LIST_LEVEL + 1 }, () => new Map<string, number>());
+	const dropOrderedCounters = (fromLevel: number) => {
+		for (let lvl = fromLevel; lvl <= MAX_LIST_LEVEL; lvl++) orderedCounters[lvl]!.clear();
+	};
 	let lastListNumId: string | null = null;
 	const resetOrderedCounters = () => {
-		orderedCounters.clear();
+		dropOrderedCounters(0);
 		lastListNumId = null;
 	};
 
@@ -2674,11 +3096,11 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 		suppressBoldCell = false,
 	): { text: string; isList: boolean } => {
 		const pPr = extractDirectElements(pInner, ["w:pPr"])[0]?.inner ?? "";
-		const directOutlineTag = /<w:outlineLvl\b[^>]*>/i.exec(pPr)?.[0] ?? "";
+		const directOutlineTag = firstTag(pPr, /<w:outlineLvl\b/i);
 		const directOutlineRaw = directOutlineTag ? xmlAttr(directOutlineTag, "w:val") : "";
 		const directOutlineNum = directOutlineRaw !== "" ? Number(directOutlineRaw) : Number.NaN;
-		const styleMatch = /<w:pStyle\b[^>]*>/i.exec(pPr);
-		const styleVal = styleMatch ? xmlAttr(styleMatch[0], "w:val") : "";
+		const styleTag = firstTag(pPr, /<w:pStyle\b/i);
+		const styleVal = styleTag ? xmlAttr(styleTag, "w:val") : "";
 		let headingLevel = 0;
 		if (Number.isInteger(directOutlineNum) && directOutlineNum >= 0 && directOutlineNum <= 5) {
 			headingLevel = directOutlineNum + 1;
@@ -2688,65 +3110,71 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 
 		const numPrEl = extractDirectElements(pPr, ["w:numPr"])[0];
 		const styleNum = !numPrEl && styleVal ? resolveStyleNumPr(styleVal) : {};
-		const numIdMatch = numPrEl ? /<w:numId\b[^>]*>/i.exec(numPrEl.inner) : null;
-		const ilvlMatch = numPrEl ? /<w:ilvl\b[^>]*>/i.exec(numPrEl.inner) : null;
-		const numId = (numIdMatch ? xmlAttr(numIdMatch[0], "w:val") : undefined) ?? styleNum.numId;
+		const numIdTag = numPrEl ? firstTag(numPrEl.inner, /<w:numId\b/i) : "";
+		const ilvlTag = numPrEl ? firstTag(numPrEl.inner, /<w:ilvl\b/i) : "";
+		const numId = (numIdTag ? xmlAttr(numIdTag, "w:val") : undefined) ?? styleNum.numId;
 		const hasNumPr = Boolean((numPrEl && numId !== "0") || (styleNum.numId && styleNum.numId !== "0"));
-		const rawIlvl = ilvlMatch ? Number(xmlAttr(ilvlMatch[0], "w:val")) : styleNum.ilvl;
-		const ilvl = rawIlvl !== undefined && Number.isFinite(rawIlvl) ? Math.min(8, Math.max(0, Math.floor(rawIlvl))) : 0;
+		const rawIlvl = ilvlTag ? Number(xmlAttr(ilvlTag, "w:val")) : styleNum.ilvl;
+		const ilvl = rawIlvl !== undefined && Number.isFinite(rawIlvl) ? Math.min(MAX_LIST_LEVEL, Math.max(0, Math.floor(rawIlvl))) : 0;
 
 		const contentXml = stripDirectElement(pInner, "w:pPr");
 		const segments = parseInlineChildren(contentXml, docRels, headingLevel > 0 || suppressBoldCell);
-		const text = formatSegments(segments, headingLevel > 0 || suppressBoldCell).trim();
+		const formatted = formatSegments(segments, headingLevel > 0 || suppressBoldCell).trim();
+		// In a table cell a line is not a line of the document: nothing in it starts a heading or a list.
+		const text = inTableCell ? formatted : escapeLineStarts(formatted, headingLevel > 0 ? 1 : 0);
 		if (!text) return { text: "", isList: false };
 
 		if (headingLevel > 0 && !inTableCell) {
 			resetOrderedCounters();
-			return { text: `${"#".repeat(headingLevel)} ${text}`, isList: false };
+			// `#` at the end of a heading's line closes the heading and is not shown: one that the text ends with is text.
+			const lineEnd = text.includes("\n") ? text.indexOf("\n") : text.length;
+			let closing = lineEnd;
+			while (closing > 0 && (text[closing - 1] === " " || text[closing - 1] === "\t")) closing--;
+			const hashesEnd = closing;
+			while (closing > 0 && text[closing - 1] === "#") closing--;
+			const closes = closing < hashesEnd && (closing === 0 || text[closing - 1] === " " || text[closing - 1] === "\t");
+			const title = closes ? `${text.slice(0, closing)}\\${text.slice(closing)}` : text;
+			return { text: `${"#".repeat(headingLevel)} ${title}`, isList: false };
 		}
 		if (hasNumPr && !inTableCell) {
 			const lvlDef = numId ? numberingMap.get(numId)?.get(ilvl) : undefined;
 			if (lvlDef?.ordered && numId) {
 				if (ilvl === 0 && lastListNumId !== numId) {
-					orderedCounters.clear();
+					dropOrderedCounters(0);
 					lastListNumId = numId;
 				} else if (lastListNumId === null) {
 					lastListNumId = numId;
 				}
 				// Reset any deeper sub-level counters when returning to a shallower level.
-				for (const k of [...orderedCounters.keys()]) {
-					const lvl = Number(k.slice(k.lastIndexOf(":") + 1));
-					if (lvl > ilvl) orderedCounters.delete(k);
-				}
-				const cKey = `${numId}:${ilvl}`;
-				const nextNum = orderedCounters.has(cKey) ? orderedCounters.get(cKey)! + 1 : lvlDef.start;
-				orderedCounters.set(cKey, nextNum);
+				dropOrderedCounters(ilvl + 1);
+				const counters = orderedCounters[ilvl]!;
+				const nextNum = counters.has(numId) ? counters.get(numId)! + 1 : lvlDef.start;
+				counters.set(numId, nextNum);
 				return { text: `${"  ".repeat(ilvl)}${nextNum}. ${text}`, isList: true };
 			}
 			if (ilvl === 0) {
 				resetOrderedCounters();
 			} else {
-				for (const k of [...orderedCounters.keys()]) {
-					const lvl = Number(k.slice(k.lastIndexOf(":") + 1));
-					if (lvl >= ilvl) orderedCounters.delete(k);
-				}
+				dropOrderedCounters(ilvl);
 			}
 			return { text: `${"  ".repeat(ilvl)}- ${text}`, isList: true };
 		}
 		if (!inTableCell) {
 			resetOrderedCounters();
-			if (text.startsWith("• ")) return { text: `- ${text.slice(2)}`, isList: true };
+			if (text.startsWith("• ")) return { text: `- ${escapeLineStarts(text.slice(2))}`, isList: true };
 			if (text.startsWith("☑ ")) return { text: `- [x] ${text.slice(2)}`, isList: true };
 			if (text.startsWith("☐ ")) return { text: `- [ ] ${text.slice(2)}`, isList: true };
 		}
 		return { text, isList: false };
 	};
 
+	// A pipe ends the cell unless an odd number of backslashes stands before it. One backslash before it was taken for
+	// "escaped already", so the text `a\|b`, written `a\\|b` (a backslash, then a pipe), split the cell in two.
 	const escapeTableCell = (cell: string) =>
 		cell
 			.replace(/\r\n?/g, "\n")
 			.replace(/\n+/g, "<br>")
-			.replace(/(?<!\\)\|/g, "\\|")
+			.replace(/(\\*)\|/g, (whole, slashes: string) => (slashes.length % 2 ? whole : `${slashes}\\|`))
 			.trim();
 
 	const parseTable = (tblInner: string): string => {
@@ -2766,7 +3194,8 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 			if (cells.length) rows.push(cells);
 		});
 		if (!rows.length) return "";
-		const width = Math.max(...rows.map((r) => r.length));
+		// Not `Math.max(...)`: a table of some hundred thousand rows is more arguments than a call takes.
+		const width = rows.reduce((most, r) => Math.max(most, r.length), 0);
 		const pad = (cells: string[]) => {
 			const copy = cells.slice();
 			while (copy.length < width) copy.push("");
@@ -2801,12 +3230,8 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 	}
 
 	// Append footnote definitions (from `word/footnotes.xml`) and QA review comment footnotes (from `word/comments.xml`).
-	for (const id of footnoteDefs.keys()) {
-		if (!referencedFootnotes.includes(id)) referencedFootnotes.push(id);
-	}
-	for (const id of commentDefs.keys()) {
-		if (!referencedComments.includes(id)) referencedComments.push(id);
-	}
+	for (const id of footnoteDefs.keys()) referencedFootnotes.add(id);
+	for (const id of commentDefs.keys()) referencedComments.add(id);
 	const footerNotes: string[] = [];
 	for (const id of referencedFootnotes) {
 		const def = footnoteDefs.get(id);
@@ -2818,7 +3243,7 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 	}
 	if (footerNotes.length) {
 		if (mdLines.length) mdLines.push("");
-		mdLines.push(...footerNotes);
+		for (const note of footerNotes) mdLines.push(note);
 	}
 
 	const warnings: string[] = [];
@@ -2827,6 +3252,10 @@ export function parseDocxToMarkdown(bytes: Uint8Array, fileName = "This file"): 
 	}
 	if (commentDefs.size > 0) {
 		warnings.push(`Imported ${commentDefs.size} Word QA review comment(s) as footnotes.`);
+	}
+	if (leftOutMedia.length > 0) {
+		const more = leftOutMedia.length > 5 ? ` and ${leftOutMedia.length - 5} more` : "";
+		warnings.push(`Left out ${leftOutMedia.length} embedded file(s) that are not pictures SSL Studio shows: ${leftOutMedia.slice(0, 5).join(", ")}${more}.`);
 	}
 
 	const images = [...extractedImages.entries()].map(([name, imgBytes]) => ({ name, bytes: imgBytes }));

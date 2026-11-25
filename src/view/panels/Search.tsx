@@ -16,7 +16,7 @@ import { choose, quickPick } from "../dialogs";
 import { activePath, canonical, documents, fileChangedOnDisk, isUntitled, notify, openFile, save, saveAll, setState, state } from "../state";
 import { baseName, isInside, relativeTo } from "../../shared/paths";
 import { parseCsv } from "../../shared/csv";
-import { createFileFilter } from "../../shared/fileGlob";
+import { createFileFilter, folderPattern } from "../../shared/fileGlob";
 import { frontMatter, HEADING, many, one, plainMarkdown } from "../../shared/frontMatter";
 import { overlapsProtectedSpan, planLineBreadcrumb, protectedMarkdownSpans, replaceSafeInText, type TextSpan } from "../../shared/menuBar";
 import { DOC_FOLDERS, isCatalog, toneOf } from "../../shared/projectDocs";
@@ -61,9 +61,8 @@ const [exclude, setExclude] = createSignal("");
 
 /** Shows the Search panel scoped to a specific folder (relative to workspace root). */
 export function findInFolder(relFolder: string) {
-	const cleaned = relFolder.replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
 	setTicketScopeKey(null);
-	setInclude(cleaned ? `${cleaned}/**` : "");
+	setInclude(folderPattern(relFolder));
 	setChoosing(true);
 	showPanel("search");
 }
@@ -385,6 +384,39 @@ function csvBreadcrumbForLine(text: string, lineNumber: number, matchCol: number
 	return "";
 }
 
+// The project's folders as patterns, said as any folder to search in is (folderPattern): a folder's name is not a
+// pattern, and one that opens with a dot keeps it. "" where the folder is the workspace's own.
+const docsGlob = () => folderPattern(state.project?.docs ?? "docs");
+const plansGlob = () => folderPattern(state.project?.plans ?? "design");
+const schemaGlob = () => folderPattern(state.project?.schema ?? "schema");
+/**
+ * What a search leaves out to look in code only: the Code scope's own words. The other panels that search the code
+ * (a document's "Find in code", a schema name's uses) ask for it here, so that the search they start is the Code
+ * scope and its chip lights; each used to write the list for itself, and the lists had come apart.
+ */
+export const codeExcludeGlob = () =>
+	[
+		docsGlob() || `${DOC_FOLDERS.tickets}/**, ${DOC_FOLDERS.specs}/**, ${DOC_FOLDERS.knowledge}/**, ${DOC_FOLDERS.registries}/**`,
+		plansGlob(),
+		schemaGlob(),
+		"README.md",
+		"AGENTS.md",
+		"**/INDEX.md",
+	]
+		.filter(Boolean)
+		.join(", ");
+const docsIncludeGlob = () =>
+	[
+		docsGlob() || `${DOC_FOLDERS.tickets}/**, ${DOC_FOLDERS.specs}/**, ${DOC_FOLDERS.knowledge}/**, ${DOC_FOLDERS.registries}/**`,
+		plansGlob(),
+		schemaGlob(),
+		"*.md",
+	]
+		.filter(Boolean)
+		.join(", ");
+/** What a search looks in to look in the project's documents only, or every Markdown file where the documents are the workspace's own folder. */
+export const docsFolderGlob = () => docsGlob() || "**/*.md";
+
 export function Search() {
 	let input!: HTMLInputElement;
 	let historyIdx = -1;
@@ -410,30 +442,6 @@ export function Search() {
 		() => backend.files().catch(() => [] as string[]),
 	);
 
-	const cleanDir = (dir?: string) => (dir ?? "").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
-	const docsRel = () => cleanDir(state.project?.docs ?? "docs");
-	const plansRel = () => cleanDir(state.project?.plans ?? "design");
-	const schemaRel = () => cleanDir(state.project?.schema ?? "schema");
-	const codeExcludeGlob = () =>
-		[
-			docsRel() ? `${docsRel()}/**` : `${DOC_FOLDERS.tickets}/**, ${DOC_FOLDERS.specs}/**, ${DOC_FOLDERS.knowledge}/**, ${DOC_FOLDERS.registries}/**`,
-			plansRel() ? `${plansRel()}/**` : "",
-			schemaRel() ? `${schemaRel()}/**` : "",
-			"README.md",
-			"AGENTS.md",
-			"**/INDEX.md",
-		]
-			.filter(Boolean)
-			.join(", ");
-	const docsIncludeGlob = () =>
-		[
-			docsRel() ? `${docsRel()}/**` : `${DOC_FOLDERS.tickets}/**, ${DOC_FOLDERS.specs}/**, ${DOC_FOLDERS.knowledge}/**, ${DOC_FOLDERS.registries}/**`,
-			plansRel() ? `${plansRel()}/**` : "",
-			schemaRel() ? `${schemaRel()}/**` : "",
-			"*.md",
-		]
-			.filter(Boolean)
-			.join(", ");
 	const scopeActive = (inc: string, exc = "") =>
 		!ticketScopeKey() && (choosing() ? include().trim() === inc && exclude().trim() === exc : !inc && !exc);
 	const inCodeScope = () => scopeActive("", codeExcludeGlob());

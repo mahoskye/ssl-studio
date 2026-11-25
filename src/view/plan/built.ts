@@ -137,7 +137,13 @@ export function settleBuilt(plan: Plan, run: BuildRun): Plan {
 	return { ...plan, built: { ...built, units: built.units.map((u) => ({ ...u, nodes: u.nodes.filter((n) => ids.has(n)) })), nodes } };
 }
 
-export const recordTests = (plan: Plan, script: string): Plan => ({ ...plan, built: { ...(builtOf(plan) ?? { units: [], nodes: {} }), tests: { script, hash: testsHash(plan) } } });
+/**
+ * Records the test script in the plan as it is now, against the plan the script was written from. That is not
+ * always the plan it is recorded in: the agent takes its time and the review stays open, and the chart can be
+ * changed meanwhile. Hashed at the moment of accepting, tests written for the earlier chart were recorded as
+ * being of the later one, and nothing said that they were out of date.
+ */
+export const recordTests = (plan: Plan, script: string, writtenFrom: Plan = plan): Plan => ({ ...plan, built: { ...(builtOf(plan) ?? { units: [], nodes: {} }), tests: { script, hash: testsHash(writtenFrom) } } });
 
 /** The procedures that carry a node. */
 export const unitsOfNode = (plan: Plan, id: string): BuiltUnit[] => (builtOf(plan)?.units ?? []).filter((u) => u.nodes.includes(id));

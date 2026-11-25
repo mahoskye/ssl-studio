@@ -81,11 +81,18 @@ function stripInlineComment(raw: string): string {
 const TEMPLATE_HEADER_RE = /^\s*<!--\s*template\b[\s\S]*?-->\s*$/i;
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Quotes a YAML scalar value when it contains characters that would corrupt unquoted YAML (`#`, `: `, `[...]`, quotes, leading/trailing spaces). */
+/**
+ * A value between double quotes, as JSON writes a string, with the two separator characters JSON leaves as they
+ * are (U+2028, U+2029) written as escapes. They end a line for a regular expression's dot and for older YAML
+ * readers: left bare in a value, the line no longer read as `key: value` and the key was gone on the next read.
+ */
+const jsonQuoted = (value: string) => JSON.stringify(value).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+
+/** Quotes a YAML scalar value when it contains characters that would corrupt unquoted YAML (`#`, `: `, `[...]`, quotes, leading/trailing spaces, a line or paragraph separator). */
 export function quoteYamlScalar(value: string): string {
 	const v = value.trim();
 	if (!v) return '""';
-	if (/^[#[\]{},!&*?|>'\"%@`-]|:\s|:$|\s#|[\r\n"]/.test(v)) return JSON.stringify(v);
+	if (/^[#[\]{},!&*?|>'\"%@`-]|:\s|:$|\s#|[\r\n"\u2028\u2029]/.test(v)) return jsonQuoted(v);
 	return v;
 }
 
@@ -106,12 +113,13 @@ export function frontMatter(text: string): FrontMatter {
 	let listKey = "";
 	for (const line of lines.slice(start + 1, end)) {
 		if (!line.trim() || line.trim().startsWith("#")) continue;
-		const item = /^\s*-\s+(.*)$/.exec(line);
+		// `[^\r\n]` and not a dot: a dot stops at U+2028 and U+2029, which are characters of a value here, not line ends.
+		const item = /^\s*-\s+([^\r\n]*)$/.exec(line);
 		if (item && listKey) {
 			(values[listKey] as string[]).push(unquote(stripInlineComment(item[1]!)));
 			continue;
 		}
-		const pair = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line);
+		const pair = /^([A-Za-z0-9_-]+)\s*:\s*([^\r\n]*)$/.exec(line);
 		if (!pair) continue;
 		const key = pair[1]!.toLowerCase();
 		const value = stripInlineComment(pair[2]!);
@@ -261,7 +269,7 @@ function readFrontMatterListValues(text: string, key: string): string[] {
 	return many(val);
 }
 
-const quoteListItem = (v: string) => (/[:#[\]{},&*?|>!'"%@`\r\n]|^-|^\s|\s$/.test(v) ? JSON.stringify(v) : v);
+const quoteListItem = (v: string) => (/[:#[\]{},&*?|>!'"%@`\r\n\u2028\u2029]|^-|^\s|\s$/.test(v) ? jsonQuoted(v) : v);
 
 /**
  * How far a key's value runs: the index of its last line, the key's own line
@@ -396,6 +404,15 @@ export function withFrontMatter(text: string, key: string, value: string): strin
 }
 
 /**
+ * Why a writer here gave null for `field` of `text`, as the end of a sentence about the document ("Could not
+ * update Due-dates.md: its status: is written over several lines. ..."). A writer refuses a value the document
+ * lays out over several lines, and a block whose opening `---` is never closed.
+ */
+export function frontMatterRefusal(text: string, field: string): string {
+	return frontMatter(text).lines ? `its ${field}: is written over several lines. Change it in the text.` : "its front matter is not closed (no closing ---). Close it in the text.";
+}
+
+/**
  * Adds `item` to a front matter list key (e.g. `specs: [a, b]`, `plans: [...]`, `related: [...]`).
  * Supports BOTH inline arrays (`key: [a, b]`) AND multi-line YAML bullet lists (`key:\n  - a`),
  * preserving the author's list style. If `item` is already present (case-insensitive), returns `text` unchanged.
@@ -482,7 +499,7 @@ export function removeFromFrontMatterList(text: string, key: string, item: strin
 		if (!kept.length) return `${text.slice(0, lines[at]!.start)}${text.slice(lines[listEnd]!.lineEnd)}`;
 		const toRemove: { start: number; end: number }[] = [];
 		for (let j = at + 1; j <= listEnd; j++) {
-			const m = /^\s*-\s+(.*)$/.exec(lines[j]!.text);
+			const m = /^\s*-\s+([^\r\n]*)$/.exec(lines[j]!.text);
 			if (m && unquote(stripInlineComment(m[1]!)).toLowerCase() === target) {
 				toRemove.push({ start: lines[j]!.start, end: lines[j]!.lineEnd });
 			}
@@ -543,7 +560,7 @@ export function replaceInFrontMatterList(text: string, key: string, oldItem: str
 		// finds the item itself, and dropping its line for that would lose it.
 		const alreadyHasNew = vals.some((v) => v.toLowerCase() === next.toLowerCase() && v.toLowerCase() !== target);
 		for (let j = at + 1; j <= listEnd; j++) {
-			const m = /^(\s*-\s+)(.*)$/.exec(lines[j]!.text);
+			const m = /^(\s*-\s+)([^\r\n]*)$/.exec(lines[j]!.text);
 			if (m && unquote(stripInlineComment(m[2]!)).toLowerCase() === target) {
 				if (alreadyHasNew) {
 					const nextLineEnd = j + 1 < lines.length ? lines[j + 1]!.start : text.length;
@@ -688,6 +705,18 @@ export function frontMatterInnerSpan(text: string): { start: number; end: number
 	// Strip the single trailing line break immediately preceding the closing fence.
 	const inner = raw.replace(/\r?\n$/, "").replace(/\r\n/g, "\n");
 	return { start, end, inner, eol };
+}
+
+/**
+ * The first line of a front matter's inner text that would end the block where it stands: three dashes or three
+ * dots on a line of their own, as `frontMatter` reads the closing fence. Null when all of the text would stay
+ * between the two fences. Written in, such a line closes the block there, and every line after it becomes the
+ * document's body.
+ */
+export function innerLineEndingFrontMatter(inner: string): { line: number; text: string } | null {
+	const lines = inner.split(/\r?\n/);
+	const at = lines.findIndex((line) => /^(---|\.\.\.)\s*$/.test(line));
+	return at < 0 ? null : { line: at + 1, text: lines[at]!.trim() };
 }
 
 /**

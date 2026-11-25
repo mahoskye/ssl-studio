@@ -44,6 +44,64 @@ export function zoomAt(view: View, point: Point, factor: number, min: number, ma
 	return { scale, x: point.x - (point.x - view.x) * k, y: point.y - (point.y - view.y) * k };
 }
 
+/** What a wheel event says of itself: how far, on which axis, in which unit, and whether it is a pinch (Ctrl is held). */
+export type Wheel = { deltaX: number; deltaY: number; deltaMode: number; ctrlKey?: boolean };
+
+/**
+ * One notch of a mouse wheel, in pixels, and what it zooms by: the step the wheel has always had here. Webviews
+ * differ in what they report for a notch, from about 40 pixels (WebKit) to 100 or more (Chromium). This is the
+ * least of them, and one event never zooms by more than a notch, so a notch is the same step in each.
+ */
+const WHEEL_NOTCH_PX = 40;
+const WHEEL_NOTCH = 1.1;
+/** A wheel that counts in lines or in pages, in pixels: a notch is three lines, and a page is more than a notch. */
+const WHEEL_LINE_PX = 16;
+const WHEEL_PAGE_PX = 800;
+
+/**
+ * The factor a wheel event zooms by; 1 is no zoom. Up zooms in, down zooms out, and by as much as the wheel
+ * turned: a notch of a mouse wheel is 10 %, and a trackpad, which sends many small events for one movement of the
+ * fingers, adds up to the same for the same distance. One event zooms by a notch at the most, however far it says
+ * it went. A pinch (the browser sends it as a wheel event with Ctrl held, in hundredths of the change of scale)
+ * follows the fingers. A movement that is more sideways than up or down is not a zoom at all.
+ *
+ * Every event used to zoom by 10 % whatever its size, so a trackpad shot through the whole range at a touch, and
+ * one that only went sideways (deltaY 0) counted as "not up" and zoomed out.
+ */
+export function wheelZoom(wheel: Wheel): number {
+	const unit = wheel.deltaMode === 1 ? WHEEL_LINE_PX : wheel.deltaMode === 2 ? WHEEL_PAGE_PX : 1;
+	const dy = wheel.deltaY * unit;
+	if (!Number.isFinite(dy) || !dy || Math.abs(wheel.deltaX * unit) > Math.abs(dy)) return 1;
+	const notch = Math.log(WHEEL_NOTCH);
+	const turned = wheel.ctrlKey ? dy / 100 : (dy / WHEEL_NOTCH_PX) * notch;
+	return Math.exp(-clamp(turned, -notch, notch));
+}
+
+/** A click as the pointer made it: its count (`detail`: 2 for the click that makes a double-click), when, and where. */
+export type Click = { detail: number; at: number; x: number; y: number };
+
+/** How soon after a click, in milliseconds, and how near it, in pixels, a click is its second when the count does not say. */
+const SECOND_CLICK_MS = 400;
+const SECOND_CLICK_PX = 5;
+
+/**
+ * Whether a click is the second click of a double-click that began on a node: `onNode` is the click before it,
+ * when that one was on a node. The window system's own count says so; where a webview starts the count again
+ * because what is under the pointer is no longer what was clicked, a click that follows at once in the same place
+ * says so too.
+ *
+ * A click on a node may lay the picture out again, so the second click of a double-click lands wherever the
+ * node's place has come to be taken: on another node, or on none. Taken as a click of its own it focused that
+ * other node, and the double-click opened nothing unless the layout happened not to move. The second click
+ * therefore belongs to the node the first one was on, wherever it lands. The first is not held back to wait for
+ * it: a click shows its focus at once.
+ */
+export function secondClick(click: Click, onNode: Click | null): boolean {
+	if (!onNode) return false;
+	if (click.detail === 2) return true;
+	return click.detail < 2 && click.at - onNode.at <= SECOND_CLICK_MS && Math.hypot(click.x - onNode.x, click.y - onNode.y) <= SECOND_CLICK_PX;
+}
+
 /** Pans, as little as it takes, so a rectangle of the content is in sight. A rectangle larger than the view shows its start. */
 export function reveal(view: View, rect: Rect, box: Size, margin = 24): View {
 	const shift = (start: number, length: number, offset: number, room: number) => {

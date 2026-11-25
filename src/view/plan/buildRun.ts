@@ -3,10 +3,10 @@
 // Nothing is written while it runs: results collect in a pending change set, kept in
 // `.ssl-studio/plans/`, so closing the app loses nothing, paid work included.
 import { snapshot } from "solid-js";
-import { backend } from "../backend";
+import { backend, fileExists } from "../backend";
 import { agent, currentModel, interrupt, start } from "../agent/store";
 import { fenced } from "../agent/tidy";
-import { ask as askUser } from "../dialogs";
+import { ask as askUser, choose } from "../dialogs";
 import { openReview, type Check } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { measure } from "../editor/textmate";
@@ -18,7 +18,7 @@ import { applyText, canonical, documents, notify, openFile, setState, state } fr
 import { joinPath, relativeTo } from "../../shared/paths";
 import { TEMPLATES } from "../../shared/houseStyle";
 import { planHash, planHashMatches, specHash } from "./assist";
-import { assembleScript, bannerFor, judgeUnit, MAX_ATTEMPTS, modelIsLocal, newRun, nextUnit, overBudget, patternsFrom, procedureSpans, procedureText, questionIn, readSpecFile, requeueRunning, requiredCalls, retryPrompt, reviewPrompt, runFileName, scriptOf, unbuiltNodes, unitPrompt, type BuildRun, type BuildUnit, type Edge } from "./build";
+import { assembleScript, bannerFor, cutShort, DEFAULT_TOKEN_BUDGET, judgeUnit, MAX_ATTEMPTS, modelIsLocal, newRun, nextCostBudget, nextStep, overBudget, patternsFrom, procedureSpans, procedureText, questionIn, raiseBudget, readCostBudget, readSpecFile, requeueRunning, requiredCalls, retryPrompt, reviewPrompt, runFileName, scriptOf, scriptProblem, spentUp, unbuiltNodes, unitPrompt, unwritableUnit, type BuildRun, type BuildUnit, type Edge } from "./build";
 import { builtOf, changeText, classifyUnits, recordBuilt, settleBuilt } from "./built";
 import { driftFor } from "./drift";
 import type { Plan } from "./model";
@@ -208,7 +208,11 @@ async function buildUnit(path: string, root: string, plan: Plan, spec: string, r
 			delete unit.draft;
 			return publish(path, run, root);
 		}
-		if (overBudget(run)) break;
+		// Out of budget with tries still to come: it waits, and is not stuck (`cutShort`).
+		if (cutShort(run, attempt)) {
+			unit.status = "pending";
+			return publish(path, run, root);
+		}
 		prompt = retryPrompt(base, code, problems);
 	}
 	unit.status = "stuck";
@@ -260,6 +264,15 @@ export function startBuild(path: string) {
 		if (!planHashMatches(specHash(specText), plan)) return notify("The plan has changed since its plan doc was approved. Write the plan doc again first.");
 		const { units, map } = readSpecFile(specText);
 		if (!units.length && !builtOf(plan)) return notify("The spec lists nothing to build.");
+		// Before opencode is started or anything is asked: a script this build may not write (`scriptProblem`). A run
+		// already begun holds the scripts it was begun with, so correcting the plan doc does not reach it.
+		const cannotWrite = (units: Parameters<typeof unwritableUnit>[0], begun = false) => {
+			const refused = unwritableUnit(units, plan);
+			if (refused) notify(`The build cannot write ${refused.script}, where ${refused.unit} is to go: ${refused.why}. ${begun ? "Discard this build, and correct" : "Correct"} the plan doc or the plan's target scripts.`, "error");
+			return Boolean(refused);
+		};
+		const stored = latestAssistOf(path).run;
+		if (stored && planHashMatches(stored.planHash, plan) ? cannotWrite(stored.units, true) : cannotWrite(units)) return;
 		// Whether the model costs money is read from opencode's list of models, and on a fresh launch nothing has asked
 		// for that list yet: it was empty here, the chosen model was not found in it, and a model not found counted as
 		// local, so a build on a paid model began with no cost budget. opencode is started first, as the first turn
@@ -282,6 +295,24 @@ export function startBuild(path: string) {
 			cost = Number(answer);
 			if (!Number.isFinite(cost) || cost <= 0) return notify("Give the budget as a number above zero.");
 		}
+		// A run that stopped at its budget is carried on only when it is given more (`spentUp`), and that is asked
+		// for here, each time, since it spends money: a cost is a number to give; more tokens, a yes or a no.
+		const carried = carriesOn(before) ? before : null;
+		const short = carried && spentUp(carried);
+		let moreTokens = false;
+		if (carried && short?.cost && cost === undefined) {
+			const answer = await askUser(`The build has spent ${carried.cost.toFixed(2)}, and its budget was ${carried.budget.cost}. Stop it at what cost now?`, String(nextCostBudget(carried)));
+			if (snapshot(state).workspace?.root !== root || answer === null) return;
+			const raised = readCostBudget(answer, carried.cost);
+			if (raised === null) return notify(`Give the new budget as a number above the ${carried.cost.toFixed(2)} already spent.`);
+			cost = raised;
+		}
+		if (carried && short?.tokens) {
+			const CARRY_ON = "Carry on";
+			const answer = await choose(`The build has used ${carried.tokens.toLocaleString()} tokens, and its budget was ${carried.budget.tokens.toLocaleString()}. Carry on for up to ${DEFAULT_TOKEN_BUDGET.toLocaleString()} more?`, [CARRY_ON]);
+			if (snapshot(state).workspace?.root !== root || answer !== CARRY_ON) return;
+			moreTokens = true;
+		}
 		// Read after the question, not before it: what was changed in the run while the question was open is in it.
 		const held = latestAssistOf(path).run;
 		let run: BuildRun;
@@ -290,11 +321,13 @@ export function startBuild(path: string) {
 			// A run from before layout was left out of the hash holds the older kind. It is of this plan, so it takes
 			// the kind that moving a node does not change.
 			run.planHash = hash;
-			if (cost !== undefined) run.budget.cost = cost;
+			raiseBudget(run, { cost, tokens: moreTokens });
 			requeueRunning(run);
 		} else {
 			run = newRun({ hash, model }, units, map, cost === undefined ? {} : { cost });
 			classifyUnits(run, plan, driftFor((documents.get(canonical(path)) ?? documents.get(path))?.model.uri.toString()).moved);
+			// What is already built is built where it is now, which the plan's own record says: the same rule holds there.
+			if (cannotWrite(run.units)) return;
 		}
 		building.set(path, run);
 		ended = () => {
@@ -318,6 +351,8 @@ export function startBuild(path: string) {
 		if (snapshot(state).workspace?.root !== root) return;
 		const spec = specText.split("\n## Units")[0]!.trim();
 		publish(path, run, root);
+		/** Whether this call has built anything: the second opinion is on what was built, and is asked again only for more. */
+		let builtNow = false;
 		for (;;) {
 			if (snapshot(state).workspace?.root !== root) {
 				stopping.delete(path);
@@ -327,18 +362,16 @@ export function startBuild(path: string) {
 				run.status = "stopped";
 				break;
 			}
-			if (overBudget(run)) {
-				run.status = "budget";
-				notify("The build reached its budget and has stopped. Carrying on spends more.");
+			const next = nextStep(run);
+			if ("ends" in next) {
+				run.status = next.ends;
+				if (next.ends === "budget") notify("The build reached its budget and has stopped. Carrying on spends more.");
 				break;
 			}
-			const unit = nextUnit(run);
-			if (!unit) {
-				run.status = "built";
-				break;
-			}
+			const unit = next.unit;
 			try {
 				await buildUnit(path, root, plan, spec, run, unit, callable, ["ssl-new-procedure"]);
+				builtNow = true;
 			} catch (e: any) {
 				// A unit is marked as being built before its first turn. When building it threw (the language server
 				// gone, a script that could not be read), it stayed marked for the rest of the session: nothing took
@@ -356,7 +389,9 @@ export function startBuild(path: string) {
 			stopping.delete(path);
 			return;
 		}
-		if (run.status === "built") {
+		// "Carry on building" is offered on a run that has finished too. With nothing left to build it built nothing,
+		// and still asked for the second opinion it already had: a turn of the model, and its cost, for each click.
+		if (run.status === "built" && (builtNow || !run.review)) {
 			updateAssist(path, { progress: "Asking for a second opinion…" });
 			await secondOpinion(path, root, plan, spec, run);
 		}
@@ -447,6 +482,10 @@ export async function reviewBuild(path: string) {
 	const run = plain(current);
 	const script = scriptsToReview(run, plan)[0];
 	if (!script) return notify("Nothing is waiting for review.");
+	// Accepting writes the file, or rewrites it in the editor. A build begun before its scripts were checked, or
+	// whose plan has had its target scripts changed since, can still name one it may not write.
+	const why = scriptProblem(script);
+	if (why) return notify(`The build cannot write ${script}: ${why}. Correct the plan's target scripts, or discard this build and write the plan doc again.`, "error");
 	const existing = await readScript(script, root);
 	if (snapshot(state).workspace?.root !== root) return;
 	const passed = run.units.filter((u) => u.status === "passed" && scriptOf(u, plan) === script);
@@ -483,10 +522,7 @@ export async function reviewBuild(path: string) {
 			const openNow = documents.has(canonical(full)) || documents.has(full);
 			const existsNow =
 				openNow ||
-				(await backend.read(full).then(
-					() => true,
-					() => false,
-				));
+				(await fileExists(full));
 			if (snapshot(state).workspace?.root !== root) return;
 			if (!existsNow) {
 				await backend.write(full, final);

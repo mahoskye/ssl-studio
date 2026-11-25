@@ -24,10 +24,13 @@ export type CommentDocRef = {
 };
 
 /**
- * Extracts character spans of comment text per line for SSL (`/* ... ;`, `/* ... *\/`, `// ...`)
- * and SQL (`-- ...`, `/* ... *\/`), ignoring comment openers inside quoted string literals.
+ * Extracts character spans of comment text per line of SQL (`-- ...`, `/* ... *\/`), ignoring comment openers
+ * inside quoted string literals.
+ *
+ * SQL only. Where a comment is in SSL is the grammar's to say (`sslCommentSpans`, ADR 0003): this used to take a
+ * language and read SSL for itself (`//`, an end at `*\/`, a backslash before a quote), which is not how SSL reads.
  */
-export function extractCommentSpans(lines: readonly string[], lang: "ssl" | "sql"): CommentSpan[][] {
+export function extractCommentSpans(lines: readonly string[]): CommentSpan[][] {
 	const out: CommentSpan[][] = [];
 	let inBlock = false;
 
@@ -46,11 +49,6 @@ export function extractCommentSpans(lines: readonly string[], lang: "ssl" | "sql
 						inBlock = false;
 						break;
 					}
-					if (lang === "ssl" && line[i] === ";") {
-						i++;
-						inBlock = false;
-						break;
-					}
 					i++;
 				}
 				if (i > start) spans.push({ from: start, to: i });
@@ -61,12 +59,8 @@ export function extractCommentSpans(lines: readonly string[], lang: "ssl" | "sql
 			const next = line[i + 1];
 
 			if (quote) {
-				if (ch === "\\" && lang === "ssl" && i + 1 < n) {
-					i += 2;
-					continue;
-				}
 				if (ch === quote) {
-					if (lang === "sql" && next === quote) {
+					if (next === quote) {
 						i += 2;
 						continue;
 					}
@@ -82,11 +76,7 @@ export function extractCommentSpans(lines: readonly string[], lang: "ssl" | "sql
 				continue;
 			}
 
-			if (lang === "sql" && ch === "-" && next === "-") {
-				spans.push({ from: i, to: n });
-				break;
-			}
-			if (lang === "ssl" && ch === "/" && next === "/") {
+			if (ch === "-" && next === "-") {
 				spans.push({ from: i, to: n });
 				break;
 			}
@@ -100,11 +90,6 @@ export function extractCommentSpans(lines: readonly string[], lang: "ssl" | "sql
 						inBlock = false;
 						break;
 					}
-					if (lang === "ssl" && line[i] === ";") {
-						i++;
-						inBlock = false;
-						break;
-					}
 					i++;
 				}
 				spans.push({ from: start, to: i });
@@ -115,6 +100,40 @@ export function extractCommentSpans(lines: readonly string[], lang: "ssl" | "sql
 		out.push(spans);
 	}
 	return out;
+}
+
+/**
+ * Whether what is written at a place in a text would be inside a comment. `spansOf` gives each line's comments:
+ * for SSL the grammar's, which highlighting reads, and never a reading of SSL made here (ADR 0003).
+ *
+ * It is asked of the text up to that place with a letter put there: the letter is in a comment exactly when what is
+ * written there would be. Asked of the line as it stands, the place just after a comment's end counted as inside
+ * it, and so did the place just before its start.
+ */
+export function writtenInComment(
+	linesBefore: readonly string[],
+	lineText: string,
+	offset: number,
+	spansOf: (lines: readonly string[]) => CommentSpan[][] | null,
+): boolean {
+	const upTo = [...linesBefore, `${lineText.slice(0, offset)}x`];
+	const spans = spansOf(upTo)?.[upTo.length - 1];
+	return Boolean(spans?.some((s) => offset >= s.from && offset < s.to));
+}
+
+/**
+ * What a file dropped on SSL or SQL leaves there: its path alone inside a comment, where it is a note already, and a
+ * comment of its own in code.
+ *
+ * A comment in SSL runs from its opening mark to the first semicolon and ends there. It was written closed by a
+ * semicolon and then by the mark that closes a comment in SQL, and that mark was left behind as code. Null where
+ * the path has in it what ends a comment: written there, the comment would end inside the path and the rest of
+ * the path would be code.
+ */
+export function droppedFileNote(rel: string, lang: "ssl" | "sql", insideComment: boolean): string | null {
+	if (rel.includes(lang === "ssl" ? ";" : "*/")) return null;
+	if (insideComment) return rel;
+	return lang === "ssl" ? `/* See ${rel};` : `/* See ${rel} */`;
 }
 
 const DOC_PATH_RE =
@@ -195,19 +214,58 @@ function parseDocFragment(frag: string | undefined): { targetLine?: number; targ
 }
 
 /**
+ * The document references in comments that are given as spans, for a language whose comments are not read here:
+ * for SSL the spans are the grammar's (`sslCommentSpans`). Each span is read as the text of one comment, and what
+ * is found in it is put back at its place in the line.
+ */
+export function findCommentDocRefsInSpans(
+	lines: readonly string[],
+	spansByLine: readonly (readonly CommentSpan[])[],
+	files: readonly DocFile[],
+	root?: string | null,
+): CommentDocRef[] {
+	const synthetic: string[] = [];
+	const meta: { line: number; spanFrom: number }[] = [];
+	for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+		const spans = spansByLine[lineIdx];
+		if (!spans?.length) continue;
+		const lineText = lines[lineIdx]!;
+		for (const span of spans) {
+			const slice = lineText.slice(span.from, span.to);
+			if (!slice.trim()) continue;
+			synthetic.push(`-- ${slice}`);
+			meta.push({ line: lineIdx + 1, spanFrom: span.from });
+		}
+	}
+	if (!synthetic.length) return [];
+	const raw = findCommentDocRefsInLines(synthetic, files, root);
+	const out: CommentDocRef[] = [];
+	for (const r of raw) {
+		const m = meta[r.line - 1];
+		if (!m || r.from < 3) continue;
+		out.push({
+			...r,
+			line: m.line,
+			from: m.spanFrom + (r.from - 3),
+			to: m.spanFrom + (r.to - 3),
+		});
+	}
+	return out;
+}
+
+/**
  * Finds clickable workspace doc paths (`docs/...md`, `design/...plan.json`, `schema/...md`)
- * and `[[wikilink]]` tokens inside SSL or SQL comments.
+ * and `[[wikilink]]` tokens inside the comments of SQL lines.
  */
 export function findCommentDocRefsInLines(
 	lines: readonly string[],
-	lang: "ssl" | "sql",
 	files: readonly DocFile[],
 	root?: string | null,
 	precomputed?: { nameIndex?: DocNameIndex; pathMap?: ReadonlyMap<string, DocFile>; sourcePath?: string },
 ): CommentDocRef[] {
 	const existing = files.filter((f) => f.exists);
 	if (!existing.length || !lines.length) return [];
-	const spansByLine = extractCommentSpans(lines, lang);
+	const spansByLine = extractCommentSpans(lines);
 	const nameIndex = precomputed?.nameIndex ?? buildDocNameIndex(existing, root);
 	const pathMap = precomputed?.pathMap ?? buildDocPathLookup(existing, root);
 	const results: CommentDocRef[] = [];

@@ -905,10 +905,30 @@ const PICTURE = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
 export const isPictureName = (name: string) => PICTURE.test(name);
 
 /**
+ * The folders a picture written without a folder is looked for in, in order, when it is not beside the document:
+ * the configured attachments folder, the document's own attachments, assets and images, the docs folder's, and
+ * the project's assets and images. The page that shows the picture (`resolveImageTarget` in the view) and
+ * `bareNameTarget` below both read the order from here: each once held its own copy of it, and a rename is
+ * followed rightly only while the two agree. `docDir` is null for a document that is not in the project, which
+ * has no folders of its own.
+ */
+export function pictureFolders(docDir: string | null, where: { root: string; docs?: string | null; attachments?: string | null }): string[] {
+	const docsDir = resolvePath(where.root, where.docs || "docs");
+	const docsRoot = isInside(where.root, docsDir) ? docsDir : resolvePath(where.root, "docs");
+	const configured = where.attachments?.trim() ? resolvePath(where.root, where.attachments.trim()) : null;
+	return [
+		...(configured && isInside(where.root, configured) ? [configured] : []),
+		...(docDir === null ? [] : ["attachments", "assets", "images"].map((folder) => resolvePath(docDir, folder))),
+		...["attachments", "assets", "images"].map((folder) => resolvePath(docsRoot, folder)),
+		resolvePath(where.root, "assets"),
+		resolvePath(where.root, "images"),
+	];
+}
+
+/**
  * The file a bare name (`shot.png`, with no folder) in an embed or a link by name leads to from the document
- * that holds it, as the page finds it (the order is the one of `resolveImageTarget` in the view): the file of
- * that name beside the document; then, for a picture, the attachment folders (the configured one, the
- * document's own attachments, assets and images, the docs folder's, the project's assets and images) and at
+ * that holds it, as the page finds it (`resolveImageTarget` in the view): the file of that name beside the
+ * document; then, for a picture, the attachment folders (`pictureFolders`) and at
  * last the file of that name nearest the document; for any other file, the one at the project's top. Null
  * where no file answers. Two tickets may each keep an `attachments/shot.png`: which of them a name means
  * depends on the document it is written in, so a rename of the one must not be followed in the other.
@@ -925,17 +945,7 @@ export function bareNameTarget(
 	const beside = within(docDir);
 	if (beside) return beside;
 	if (!PICTURE.test(name)) return within(where.root);
-	const docsDir = resolvePath(where.root, where.docs || "docs");
-	const docsRoot = isInside(where.root, docsDir) ? docsDir : resolvePath(where.root, "docs");
-	const configured = where.attachments?.trim() ? resolvePath(where.root, where.attachments.trim()) : null;
-	const folders = [
-		...(configured && isInside(where.root, configured) ? [configured] : []),
-		...["attachments", "assets", "images"].map((folder) => resolvePath(docDir, folder)),
-		...["attachments", "assets", "images"].map((folder) => resolvePath(docsRoot, folder)),
-		resolvePath(where.root, "assets"),
-		resolvePath(where.root, "images"),
-	];
-	for (const folder of folders) {
+	for (const folder of pictureFolders(docDir, where)) {
 		const hit = within(folder);
 		if (hit) return hit;
 	}

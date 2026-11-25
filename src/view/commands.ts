@@ -15,7 +15,7 @@ import { generateMermaidErDiagram, parseCreateTables, type SqlTableDef } from ".
 import { workspaceTags } from "../shared/tags";
 import { docsGoverningFile } from "../shared/workContext";
 import { runMonacoMarkdownAction } from "./editor/markdownKeys";
-import { backend, inApp } from "./backend";
+import { backend, fileExists, inApp } from "./backend";
 import { monaco } from "./editor/monaco";
 import { session } from "./lsp/session";
 import { symbols } from "./panels/Objects";
@@ -660,10 +660,7 @@ async function newPlanCommand() {
 	const path = joinPath(startRoot, ...planDir, `${safeStem}.plan.json`);
 	if (await heldFromBefore(path)) return;
 	if (state.workspace?.root !== startRoot) return;
-	const exists = await backend.read(path).then(
-		() => true,
-		() => false,
-	);
+	const exists = await fileExists(path);
 	if (state.workspace?.root !== startRoot) return;
 	if (!exists) {
 		// A plan started from a ticket, or from a document that is for one, is for that ticket.
@@ -759,10 +756,8 @@ async function findReferencesInDocs() {
 		query = baseName(path).replace(/\.[^.]+$/, "");
 	}
 	if (!query) return notify("Open a file or select a symbol to search in Docs.");
-	const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
-	const include = docsRel && docsRel !== "." ? `${docsRel}/**` : "**/*.md";
-	const { searchFor } = await import("./panels/Search");
-	searchFor(query, { include });
+	const { docsFolderGlob, searchFor } = await import("./panels/Search");
+	searchFor(query, { include: docsFolderGlob() });
 }
 
 /** Copies a Markdown code citation `[file#L10-L25](path#L10-L25)` (and optional fenced code excerpt) relative to the last active Markdown doc or workspace root. */
@@ -1390,10 +1385,7 @@ async function importMermaidPlanCommand() {
 	const planDir = folderParts(state.project?.plans ?? "design");
 	const safeStem = title.replace(/\.plan\.json$/i, "").replace(/[\\/:*?"<>|]+/g, "-").trim() || "imported-plan";
 	const dest = joinPath(wsRoot, ...planDir, `${safeStem}.plan.json`);
-	const exists = await backend.read(dest).then(
-		() => true,
-		() => false,
-	);
+	const exists = await fileExists(dest);
 	if (exists) {
 		const OVERWRITE = "Overwrite existing plan";
 		const answer = await choose(`${relativeTo(wsRoot, dest)} already exists. Overwrite it?`, [OVERWRITE], { danger: OVERWRITE });

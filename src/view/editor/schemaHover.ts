@@ -43,7 +43,7 @@ const refUri = (target: string | RefTarget) => {
 	return monaco.Uri.from({ scheme: REF_SCHEME, path: "/", query: JSON.stringify(payload) });
 };
 
-import { extractCommentSpans, findCommentDocRefsInLines, type CommentDocRef, type CommentSpan } from "../../shared/editorDocHelpers";
+import { extractCommentSpans, findCommentDocRefsInLines, findCommentDocRefsInSpans, type CommentDocRef, type CommentSpan } from "../../shared/editorDocHelpers";
 export { extractCommentSpans, findCommentDocRefsInLines, type CommentDocRef, type CommentSpan };
 
 const SQL_RESERVED_KEYWORDS = new Set([
@@ -149,7 +149,7 @@ function isSslDeclarationTarget(lineText: string, matchStart: number): boolean {
  */
 function commentSpansFor(lines: readonly string[], lang: "ssl" | "sql"): CommentSpan[][] {
 	if (lang === "ssl") return sslCommentSpans(lines) ?? lines.map(() => []);
-	return extractCommentSpans(lines, "sql");
+	return extractCommentSpans(lines);
 }
 
 function findCommentDocRefsFor(
@@ -159,35 +159,8 @@ function findCommentDocRefsFor(
 	root?: string | null,
 	precomputedSpans?: CommentSpan[][],
 ): CommentDocRef[] {
-	if (lang === "sql" && !precomputedSpans) return findCommentDocRefsInLines(lines, "sql", files, root);
-	const spansByLine = precomputedSpans ?? commentSpansFor(lines, lang);
-	const synthetic: string[] = [];
-	const meta: { line: number; spanFrom: number }[] = [];
-	for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-		const spans = spansByLine[lineIdx];
-		if (!spans?.length) continue;
-		const lineText = lines[lineIdx]!;
-		for (const span of spans) {
-			const slice = lineText.slice(span.from, span.to);
-			if (!slice.trim()) continue;
-			synthetic.push(`-- ${slice}`);
-			meta.push({ line: lineIdx + 1, spanFrom: span.from });
-		}
-	}
-	if (!synthetic.length) return [];
-	const raw = findCommentDocRefsInLines(synthetic, "sql", files, root);
-	const out: CommentDocRef[] = [];
-	for (const r of raw) {
-		const m = meta[r.line - 1];
-		if (!m || r.from < 3) continue;
-		out.push({
-			...r,
-			line: m.line,
-			from: m.spanFrom + (r.from - 3),
-			to: m.spanFrom + (r.to - 3),
-		});
-	}
-	return out;
+	if (lang === "sql" && !precomputedSpans) return findCommentDocRefsInLines(lines, files, root);
+	return findCommentDocRefsInSpans(lines, precomputedSpans ?? commentSpansFor(lines, lang), files, root);
 }
 
 function findCommentDocRefAt(

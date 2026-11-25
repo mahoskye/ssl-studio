@@ -132,7 +132,8 @@ const quoted = (value: string) => {
 export const frontValue = quoted;
 
 export const ticketTemplate = (ticket: { key: string; title: string; source?: string; related?: readonly string[]; blocks?: readonly string[]; blockedBy?: readonly string[]; status?: string; type?: string; parent?: string; description?: string }) => `${fence([
-	["ticket", ticket.key],
+	// Quoted like the title when it holds what YAML reads as something else: a key such as #12 was a comment, and the ticket had none.
+	["ticket", quoted(ticket.key)],
 	["title", quoted(ticket.title)],
 	["type", ticket.type ? quoted(ticket.type) : undefined],
 	["source", ticket.source?.trim() ? quoted(ticket.source) : undefined],
@@ -158,7 +159,7 @@ ${ticket.description?.trim() || PROMPTS.ticket}
 
 export const specTemplate = (spec: { title: string; ticket?: string }) => `${fence([
 	["title", quoted(spec.title)],
-	["ticket", spec.ticket || undefined],
+	["ticket", spec.ticket ? quoted(spec.ticket) : undefined],
 	["status", "draft"],
 ])}
 # ${spec.title}
@@ -182,7 +183,7 @@ export const decisionTemplate = (decision: { title: string; date: string; ticket
 	["title", quoted(decision.title)],
 	["status", "proposed"],
 	["date", decision.date],
-	["ticket", decision.ticket || undefined],
+	["ticket", decision.ticket ? quoted(decision.ticket) : undefined],
 ])}
 # ${decision.title}
 
@@ -203,7 +204,7 @@ export const questionTemplate = (question: { title: string; date: string; ticket
 	["title", quoted(question.title)],
 	["status", "open"],
 	["asked", question.date],
-	["ticket", question.ticket || undefined],
+	["ticket", question.ticket ? quoted(question.ticket) : undefined],
 ])}
 # ${question.title}
 

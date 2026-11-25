@@ -244,6 +244,28 @@ export function rawRowText(text: string, table: Table, row: number): string | nu
 }
 
 /**
+ * The edit of the text that writes `value` to column `column` of a row whose cells are `cells`: that cell's part of
+ * the text and nothing else (ADR 0002). Null when the table would show nothing different. A row with fewer cells
+ * than the header shows the missing ones as empty, so emptying one, or committing it as it is, is no edit; it
+ * padded the row with delimiters and left the file changed with nothing to see for it. A value to show in such a
+ * cell gives the row the cells between. The only cell of a row is written `""` when it is emptied, so that the row
+ * is not read as a blank line.
+ */
+export function cellChangeEdit(
+	cells: readonly Cell[],
+	column: number,
+	value: string,
+	delimiter: Table["delimiter"] = ",",
+): { start: number; end: number; text: string } | null {
+	const cell = cells[column];
+	if ((cell?.text ?? "") === value) return null;
+	if (cell) return { start: cell.start, end: cell.end, text: value === "" && cells.length <= 1 ? '""' : csvCell(value, delimiter) };
+	const last = cells[cells.length - 1];
+	if (!last || column < 0) return null;
+	return { start: last.end, end: last.end, text: delimiter.repeat(column - cells.length + 1) + csvCell(value, delimiter) };
+}
+
+/**
  * Where to insert a new line directly above or below `row`, as a single text
  * insertion at `offset`. Preserves the file's line ending style.
  */
@@ -396,10 +418,14 @@ export function deleteCsvColumn(text: string, table: Table, colIdx: number): str
 }
 
 /**
- * Rewrites data rows in `rowOrder` (`rowOrder[newIdx] = oldRowIdx`), preserving
- * header, line endings, and every row's exact raw source text verbatim (ADR 0002).
+ * The one edit of `text` that puts the data rows in `rowOrder` (`rowOrder[newIdx] = oldRowIdx`): it runs from the
+ * first row that changes place to the last, and touches nothing outside them (ADR 0002). Each row's own text goes
+ * where another row's was, written as it is. What stands between two rows stays where it stands: the line end,
+ * and any blank lines, which are no rows, so a blank line is on the same line of the file after as before. The
+ * rows were written out anew from the first to the last with one line end between them, which took every blank
+ * line among them out of the file. Null when `rowOrder` is not an order of the rows, or changes nothing.
  */
-export function sortCsvRows(text: string, table: Table, rowOrder: readonly number[]): string | null {
+export function sortCsvRowsEdit(text: string, table: Table, rowOrder: readonly number[]): { start: number; end: number; text: string } | null {
 	const count = table.rows.length;
 	if (count < 2 || rowOrder.length !== count) return null;
 	const seen = new Set<number>();
@@ -407,14 +433,44 @@ export function sortCsvRows(text: string, table: Table, rowOrder: readonly numbe
 		if (!Number.isInteger(r) || r < 0 || r >= count || seen.has(r)) return null;
 		seen.add(r);
 	}
-	if (rowOrder.every((r, idx) => r === idx)) return null;
-	const rawRows = table.rows.map((_, idx) => rawRowText(text, table, idx) ?? "");
-	const firstRow = table.rows[0]!;
-	const lastRow = table.rows[count - 1]!;
-	const nl = text.includes("\r\n") ? "\r\n" : "\n";
-	const start = firstRow[0]!.start;
-	const end = lastRow[lastRow.length - 1]!.end;
-	return text.slice(0, start) + rowOrder.map((idx) => rawRows[idx]!).join(nl) + text.slice(end);
+	let first = 0;
+	while (first < count && rowOrder[first] === first) first++;
+	if (first === count) return null;
+	let last = count - 1;
+	while (rowOrder[last] === last) last--;
+	const endOf = (row: number) => {
+		const cells = table.rows[row]!;
+		return cells[cells.length - 1]!.end;
+	};
+	let out = "";
+	for (let place = first; place <= last; place++) {
+		out += rawRowText(text, table, rowOrder[place]!) ?? "";
+		if (place < last) out += text.slice(endOf(place), table.rows[place + 1]![0]!.start);
+	}
+	return { start: table.rows[first]![0]!.start, end: endOf(last), text: out };
+}
+
+/**
+ * Rewrites data rows in `rowOrder` (`rowOrder[newIdx] = oldRowIdx`), preserving
+ * header, line endings, blank lines, and every row's exact raw source text verbatim (ADR 0002).
+ */
+export function sortCsvRows(text: string, table: Table, rowOrder: readonly number[]): string | null {
+	const edit = sortCsvRowsEdit(text, table, rowOrder);
+	return edit ? text.slice(0, edit.start) + edit.text + text.slice(edit.end) : null;
+}
+
+/**
+ * The one edit of `text` that moves data row `fromRow` to `toRow`: it runs from the one to the other, the rows
+ * between them each moving one place, and touches nothing outside them (see `sortCsvRowsEdit`). Null when the
+ * rows are out of bounds or the same.
+ */
+export function moveCsvRowEdit(text: string, table: CsvTable, fromRow: number, toRow: number): { start: number; end: number; text: string } | null {
+	const count = table.rows.length;
+	if (!Number.isInteger(fromRow) || !Number.isInteger(toRow) || fromRow < 0 || fromRow >= count || toRow < 0 || toRow >= count) return null;
+	const rowOrder = Array.from({ length: count }, (_, idx) => idx);
+	const [moved] = rowOrder.splice(fromRow, 1);
+	rowOrder.splice(toRow, 0, moved!);
+	return sortCsvRowsEdit(text, table, rowOrder);
 }
 
 /**
@@ -423,23 +479,8 @@ export function sortCsvRows(text: string, table: Table, rowOrder: readonly numbe
  * indices are out of bounds or identical.
  */
 export function moveCsvRow(text: string, table: CsvTable, fromRow: number, toRow: number): string {
-	const count = table.rows.length;
-	if (
-		count < 2 ||
-		!Number.isInteger(fromRow) ||
-		!Number.isInteger(toRow) ||
-		fromRow < 0 ||
-		fromRow >= count ||
-		toRow < 0 ||
-		toRow >= count ||
-		fromRow === toRow
-	) {
-		return text;
-	}
-	const rowOrder = Array.from({ length: count }, (_, idx) => idx);
-	const [moved] = rowOrder.splice(fromRow, 1);
-	rowOrder.splice(toRow, 0, moved!);
-	return sortCsvRows(text, table, rowOrder) ?? text;
+	const edit = moveCsvRowEdit(text, table, fromRow, toRow);
+	return edit ? text.slice(0, edit.start) + edit.text + text.slice(edit.end) : text;
 }
 
 /**
@@ -472,10 +513,21 @@ export function convertCsvDelimiter(text: string, table: CsvTable, nextDelimiter
 	return out;
 }
 
+/**
+ * A block of cells as text for the clipboard: a tab between cells, a line end between rows, and a cell that holds
+ * either written in quotes. `parseClipboardGrid` reads a block of more than one cell back as the same cells. A
+ * last row that is one empty cell is an empty line, and is given its line end as Excel gives every row one:
+ * without it the text ended in the line end before that row, which is read as Excel's own last one and taken off,
+ * so the cells `a` and `` copied and pasted came back as `a` alone.
+ */
+export function cellsToClipboardText(rows: readonly (readonly string[])[]): string {
+	const text = rows.map((row) => row.map((v) => csvCell(v, "\t")).join("\t")).join("\n");
+	return rows.length > 1 && text.endsWith("\n") ? `${text}\n` : text;
+}
+
 /** Exports tabular headers and rows as tab-separated text for pasting into Excel or Sheets. */
 export function tableToTsv(headers: readonly string[], rows: readonly (readonly string[])[]): string {
-	const fmt = (row: readonly string[]) => row.map((v) => csvCell(v, "\t")).join("\t");
-	return [fmt(headers), ...rows.map(fmt)].join("\n");
+	return cellsToClipboardText([headers, ...rows]);
 }
 
 /** Exports tabular headers and rows as a clean GitHub-Flavored Markdown pipe table. */

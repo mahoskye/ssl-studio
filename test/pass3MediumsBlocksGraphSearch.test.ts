@@ -405,7 +405,7 @@ describe("Blocks — a change that cannot be made says why (finding 3)", () => {
 		expect(wrap).toContain("replaceLines(card.start, card.end, `/* region ${name};\\n${body}\\n/* endregion;`, false);");
 		const remove = between(src, "const remove = async (n: Node) => {", "const opened = (");
 		expect(remove).toContain('n.kind === "procedure" && parent ? cardOf(parent, n)');
-		expect(remove).toContain("replaceLines(card.start, card.end, null);");
+		expect(remove).toContain("replaceLines(card.start, card.end, null, false);");
 	});
 });
 

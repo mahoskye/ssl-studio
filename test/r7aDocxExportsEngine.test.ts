@@ -316,7 +316,8 @@ describe("R7A.1 — DOCX security, crash resistance, XML 1.0 validity & fidelity
 
 		const parsed = parseDocxToMarkdown(zip);
 		// Self-closing <w:t/> didn't swallow <w:br/> or next <w:t>, and invalid entities didn't crash
-		expect(parsed.markdown).toContain("AfterEmpty &#x110000; &#xD800; A");
+		// The `#` after `&` carries a backslash: written out, `&#x41;` would be read by Markdown as a letter (pass 3, low 19).
+		expect(parsed.markdown).toContain("AfterEmpty &\\#x110000; &\\#xD800; A");
 		expect(parsed.markdown).not.toContain("<w:br/>");
 
 		// w:ilvl clamped to 8 (16 spaces)
@@ -872,10 +873,12 @@ describe("R7A.5 — codeCitations, docTables, tasks, ticketImport/projectDocs, c
 		expect(fromJson.tickets.map((t) => t.source)).toEqual([undefined, undefined, "https://example.test/3"]);
 	});
 
-	test("catalog.ts withCatalog replaces old entries with escaped brackets when closing marker is missing", () => {
+	test("catalog.ts withCatalog writes one list when closing marker is missing, and keeps an old entry it cannot tell from a person's line below it", () => {
 		const broken = `# Docs\n\n${CATALOG_START}\n\n- [With \\[brackets\\]](a.md): open.\n\nMy own notes.\n`;
 		const fixed = withCatalog(broken, [{ path: "b.md", title: "New" }]);
-		expect(fixed).not.toContain("With \\[brackets\\]");
+		// Once taken out as "the old list"; a bullet that links to a document is also what a person writes (pass 3, low 5).
+		expect(fixed.split(CATALOG_START).length).toBe(2);
+		expect(fixed.indexOf("With \\[brackets\\]")).toBeGreaterThan(fixed.indexOf("<!-- /catalog -->"));
 		expect(fixed).toContain("- [New](b.md)");
 		expect(fixed).toContain("My own notes.");
 	});

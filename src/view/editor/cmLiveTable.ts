@@ -33,7 +33,7 @@ import {
 } from "../../shared/markdownTables";
 import { baseName, isInside, relativeTo, resolvePath } from "../../shared/paths";
 import type { RowMenuEntry } from "../../shared/contextMenu";
-import { backend, inApp } from "../backend";
+import { backend, fileExists, inApp } from "../backend";
 import { notify, setState, state as appState } from "../state";
 import { createTextareaCompleter, type TextareaCompleter } from "./cmCompletion";
 import {
@@ -346,7 +346,7 @@ export class TableWidget extends WidgetType {
 					return;
 				}
 				try {
-					const exists = await backend.read(dest).then(() => true, () => false);
+					const exists = await fileExists(dest);
 					if (exists) {
 						const OVERWRITE = "Overwrite file";
 						if (

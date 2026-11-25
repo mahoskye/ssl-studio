@@ -54,7 +54,8 @@ export type SqlSchemaDrift = {
 	dropped: string[];
 };
 
-const isIdentChar = (ch: string | undefined) => Boolean(ch && /[A-Za-z0-9_$#]/.test(ch));
+/** Whether a character can stand in a bare name (see `IDENT_PART`). */
+const isIdentChar = (ch: string | undefined) => Boolean(ch && /[\p{L}\p{M}\p{Nd}_$#]/u.test(ch));
 
 /** Returns the closing delimiter for an Oracle Q-quoted string (`q'[...]'`, `q'(...)'`, `q'!...!'`). */
 function oracleQCloseDelim(open: string): string {
@@ -307,13 +308,23 @@ function findStatementStart(maskedSql: string, pos: number): number {
 
 const cleanIdent = (raw: string) => raw.trim().replace(/^[[`"]|[\]`"]$/g, "");
 
-const IDENT_PART = String.raw`(?:\[[^\]]+\]|"[^"]+"|` + "`[^`]+`" + String.raw`|[A-Za-z_][\w$#]*)`;
+/**
+ * One part of a name: in brackets, double quotes or backticks, or bare. A bare name is what SQL Server and Oracle
+ * take without quotes: a letter or `_`, then letters, digits, `_`, `$` and `#`, where a letter is a letter of any
+ * script and not one of the 26 alone. Read as those 26, `CREATE TABLE Prüfung (Größe INT)` ended its name at the
+ * first letter outside them, and the table and its columns were left out without a word. `\p{L}` is a letter only
+ * to a pattern with the `u` flag: every pattern built from this has it.
+ *
+ * Still not read bare: a name that starts with `#` or `@` (a temporary object, a variable: neither is schema), and
+ * `@` inside a name, which SQL Server allows and Oracle reads as a table at a database link (`EMP@LINK`).
+ */
+const IDENT_PART = String.raw`(?:\[[^\]]+\]|"[^"]+"|` + "`[^`]+`" + String.raw`|[\p{L}_][\p{L}\p{M}\p{Nd}_$#]*)`;
 const QUALIFIED_NAME = String.raw`(?:${IDENT_PART}\s*\.\s*){0,2}${IDENT_PART}`;
 
 /** Formats 1-, 2-, or 3-part SQL names (`[db].[dbo].[My.Table]` -> `{ name: "dbo.My.Table", bareName: "My.Table" }`). */
 function normalizeObjectName(raw: string): { name: string; bareName: string } {
 	// Tokenize by IDENT_PART so dots inside bracketed/quoted names (`[dbo].[My.Special.Table]`) stay intact.
-	const partRe = new RegExp(IDENT_PART, "g");
+	const partRe = new RegExp(IDENT_PART, "gu");
 	const parts = [...raw.matchAll(partRe)].map((m) => cleanIdent(m[0]!)).filter(Boolean);
 	if (!parts.length) return { name: "", bareName: "" };
 	const bareName = parts[parts.length - 1]!;
@@ -387,12 +398,12 @@ export function extractSqlObjects(sql: string, options: { includeIndexes?: boole
 
 	const createRe = new RegExp(
 		`\\bCREATE\\s+(?:${modifiers}\\s+)*(${kinds})\\s+(?:CONCURRENTLY\\s+)?(?:IF\\s+NOT\\s+EXISTS\\s+)?(${QUALIFIED_NAME})`,
-		"gi",
+		"giu",
 	);
 	for (const m of cleaned.matchAll(createRe)) addMatch(m[1]!, m[2]!, "create", m.index ?? 0);
 
 	if (options.includeAlter) {
-		const alterRe = new RegExp(`\\bALTER\\s+(?:${modifiers}\\s+)*(${kinds})\\s+(?:IF\\s+EXISTS\\s+)?(${QUALIFIED_NAME})`, "gi");
+		const alterRe = new RegExp(`\\bALTER\\s+(?:${modifiers}\\s+)*(${kinds})\\s+(?:IF\\s+EXISTS\\s+)?(${QUALIFIED_NAME})`, "giu");
 		for (const m of cleaned.matchAll(alterRe)) addMatch(m[1]!, m[2]!, "alter", m.index ?? 0);
 	}
 	return out;
@@ -491,12 +502,12 @@ function parseColumnClause(rawClause: string): SqlColumnDef | null {
 	if (
 		new RegExp(
 			`^(?:(?:FULLTEXT|SPATIAL)\\s+)?(?:INDEX|KEY)\\s+(?:${IDENT_PART}\\s+)+(?:CLUSTERED|NONCLUSTERED|COLUMNSTORE|USING\\s+[A-Za-z_][\\w$]*|HASH|BTREE)\\b`,
-			"i",
+			"iu",
 		).test(line)
 	) {
 		return null;
 	}
-	const maybeTblIdx = new RegExp(`^(?:(?:FULLTEXT|SPATIAL)\\s+)?(?:INDEX|KEY)\\s+(${IDENT_PART})\\s*\\(([^)]*)\\)`, "i").exec(line);
+	const maybeTblIdx = new RegExp(`^(?:(?:FULLTEXT|SPATIAL)\\s+)?(?:INDEX|KEY)\\s+(${IDENT_PART})\\s*\\(([^)]*)\\)`, "iu").exec(line);
 	if (maybeTblIdx) {
 		const word = cleanIdent(maybeTblIdx[1]!).toLowerCase();
 		const parenInner = maybeTblIdx[2]!.trim();
@@ -505,7 +516,7 @@ function parseColumnClause(rawClause: string): SqlColumnDef | null {
 	}
 
 	// Bare SQLite typeless column (`G`)
-	const bareMatch = new RegExp(`^(${IDENT_PART})$`).exec(line);
+	const bareMatch = new RegExp(`^(${IDENT_PART})$`, "u").exec(line);
 	if (bareMatch) {
 		const bare = cleanIdent(bareMatch[1]!);
 		if (!bare || COL_CONSTRAINT_START_RE.test(bare)) return null;
@@ -513,7 +524,7 @@ function parseColumnClause(rawClause: string): SqlColumnDef | null {
 	}
 
 	// Column name + remainder
-	const nameMatch = new RegExp(`^(${IDENT_PART})\\s+([\\s\\S]+)$`).exec(line);
+	const nameMatch = new RegExp(`^(${IDENT_PART})\\s+([\\s\\S]+)$`, "u").exec(line);
 	if (!nameMatch) return null;
 	const colName = cleanIdent(nameMatch[1]!);
 	if (!colName || (!/^[\["`]/.test(nameMatch[1]!) && /^(?:DEFAULT|ON|USING|WITH)$/i.test(colName))) return null;
@@ -565,7 +576,7 @@ function parseColumnClause(rawClause: string): SqlColumnDef | null {
 	// `TIMESTAMP(6) WITH LOCAL TIME ZONE`, Oracle `CHAR`/`BYTE` length semantics, MySQL `UNSIGNED`, and PG arrays `TEXT[]`.
 	const typeRe = new RegExp(
 		`^((?:NATIONAL\\s+)?(?:${IDENT_PART}\\s*\\.\\s*)?${IDENT_PART}(?:\\s+(?:CHARACTER|CHAR|VARCHAR|VARYING|PRECISION|RAW|OBJECT|INT|INTEGER)){0,2}(?:\\s*\\([^)]*\\))?(?:\\s+(?:WITH(?:OUT)?\\s+(?:LOCAL\\s+)?TIME\\s+ZONE|(?:CHAR|BYTE)\\b|UNSIGNED\\b|ZEROFILL\\b|ARRAY\\b))*(?:\\s*\\[\\s*\\d*\\s*\\])*)(?=\\s|$)([\\s\\S]*)$`,
-		"i",
+		"iu",
 	);
 	const typeMatch = typeRe.exec(rest);
 	if (!typeMatch) return null;
@@ -718,7 +729,7 @@ function parseTableForeignKeys(rawClause: string): SqlForeignKeyDef[] {
 	const line = rawClause.replace(/\s+/g, " ").trim();
 	const fkRe = new RegExp(
 		`^(?:CONSTRAINT\\s+${IDENT_PART}\\s+)?FOREIGN\\s+KEY\\s*\\(([^)]+)\\)\\s+REFERENCES\\s+(${QUALIFIED_NAME})(?:\\s*\\(([^)]+)\\))?`,
-		"i",
+		"iu",
 	);
 	const m = fkRe.exec(line);
 	if (!m) return [];
@@ -757,7 +768,7 @@ function parseInlineForeignKey(col: SqlColumnDef): SqlForeignKeyDef | null {
 	if (!col.constraints) return null;
 	const masked = maskSingleQuoted(col.constraints);
 	if (!/\bREFERENCES\b/i.test(masked)) return null;
-	const refRe = new RegExp(`\\bREFERENCES\\s+(${QUALIFIED_NAME})(?:\\s*\\(([^)]+)\\))?`, "i");
+	const refRe = new RegExp(`\\bREFERENCES\\s+(${QUALIFIED_NAME})(?:\\s*\\(([^)]+)\\))?`, "iu");
 	const m = refRe.exec(masked);
 	if (!m) return null;
 	const { bareName, name } = normalizeObjectName(m[1]!);
@@ -779,13 +790,13 @@ function parseTablePrimaryKeyCols(rawClause: string): string[] {
 	const line = rawClause.replace(/\s+/g, " ").trim();
 	const pkRe = new RegExp(
 		`^(?:CONSTRAINT\\s+${IDENT_PART}\\s+)?PRIMARY\\s+KEY\\s*(?:CLUSTERED|NONCLUSTERED)?\\s*\\(([^)]+)\\)`,
-		"i",
+		"iu",
 	);
 	const m = pkRe.exec(line);
 	if (!m) return [];
 	return splitTopLevelCommas(m[1]!)
 		.map((part) => {
-			const ident = new RegExp(`^\\s*(${IDENT_PART})`).exec(part);
+			const ident = new RegExp(`^\\s*(${IDENT_PART})`, "u").exec(part);
 			return ident ? cleanIdent(ident[1]!) : "";
 		})
 		.filter(Boolean);
@@ -907,7 +918,7 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 		const trimmed = rawItem.replace(/\s+/g, " ").trim();
 		if (!trimmed) return;
 		// PostgreSQL `ALTER COLUMN col SET NOT NULL` / `DROP NOT NULL`
-		const pgNull = new RegExp(`^(${IDENT_PART})\\s+(SET|DROP)\\s+NOT\\s+NULL\\b`, "i").exec(trimmed);
+		const pgNull = new RegExp(`^(${IDENT_PART})\\s+(SET|DROP)\\s+NOT\\s+NULL\\b`, "iu").exec(trimmed);
 		if (pgNull) {
 			const colName = cleanIdent(pgNull[1]!).toLowerCase();
 			const existing = target.columns.find((c) => c.name.toLowerCase() === colName);
@@ -923,7 +934,7 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 			return;
 		}
 		// PostgreSQL `ALTER COLUMN col SET DEFAULT <expr>` / `DROP DEFAULT`
-		const pgSetDefault = new RegExp(`^(${IDENT_PART})\\s+SET\\s+DEFAULT\\s+([\\s\\S]+)$`, "i").exec(trimmed);
+		const pgSetDefault = new RegExp(`^(${IDENT_PART})\\s+SET\\s+DEFAULT\\s+([\\s\\S]+)$`, "iu").exec(trimmed);
 		if (pgSetDefault) {
 			const colName = cleanIdent(pgSetDefault[1]!).toLowerCase();
 			const existing = target.columns.find((c) => c.name.toLowerCase() === colName);
@@ -934,7 +945,7 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 			}
 			return;
 		}
-		const pgDropDefault = new RegExp(`^(${IDENT_PART})\\s+DROP\\s+DEFAULT\\b`, "i").exec(trimmed);
+		const pgDropDefault = new RegExp(`^(${IDENT_PART})\\s+DROP\\s+DEFAULT\\b`, "iu").exec(trimmed);
 		if (pgDropDefault) {
 			const colName = cleanIdent(pgDropDefault[1]!).toLowerCase();
 			const existing = target.columns.find((c) => c.name.toLowerCase() === colName);
@@ -947,13 +958,13 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 		if (
 			new RegExp(
 				`^(${IDENT_PART})\\s+(?:SET\\s+(?:STATISTICS|STORAGE|COMPRESSION|\\()|RESET\\s*\\(|DROP\\s+(?:EXPRESSION|IDENTITY)|ADD\\s+GENERATED|RESTART\\b)`,
-				"i",
+				"iu",
 			).test(trimmed)
 		) {
 			return;
 		}
 		// Oracle constraint-only MODIFY (`MODIFY (COL NOT NULL)` / `MODIFY COL NULL` / `MODIFY COL DEFAULT 0`)
-		const constraintOnly = new RegExp(`^(${IDENT_PART})\\s+((?:NOT\\s+)?NULL\\b[\\s\\S]*|DEFAULT\\b[\\s\\S]*)$`, "i").exec(trimmed);
+		const constraintOnly = new RegExp(`^(${IDENT_PART})\\s+((?:NOT\\s+)?NULL\\b[\\s\\S]*|DEFAULT\\b[\\s\\S]*)$`, "iu").exec(trimmed);
 		if (constraintOnly) {
 			const colName = cleanIdent(constraintOnly[1]!).toLowerCase();
 			const existing = target.columns.find((c) => c.name.toLowerCase() === colName);
@@ -980,7 +991,7 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 			return;
 		}
 		// Normalize PostgreSQL `col [SET DATA] TYPE newType [USING expr]` -> `col newType`
-		const pgTypeRe = new RegExp(`^(${IDENT_PART})\\s+(?:SET\\s+DATA\\s+)?TYPE\\s+`, "i");
+		const pgTypeRe = new RegExp(`^(${IDENT_PART})\\s+(?:SET\\s+DATA\\s+)?TYPE\\s+`, "iu");
 		const isPgType = pgTypeRe.test(trimmed);
 		let normalized = isPgType ? trimmed.replace(pgTypeRe, "$1 ") : trimmed;
 		if (isPgType) {
@@ -1023,7 +1034,7 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 			.replace(/^(?:DROP\s+)?(?:COLUMN\s+)?(?:IF\s+EXISTS\s+)?/i, "")
 			.trim();
 		if (/^(?:CONSTRAINT|PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|INDEX|CHECK|TRIGGER)\b/i.test(stripped)) return;
-		const identMatch = new RegExp(`^(${IDENT_PART})`).exec(stripped);
+		const identMatch = new RegExp(`^(${IDENT_PART})`, "u").exec(stripped);
 		if (!identMatch) return;
 		const dropKey = cleanIdent(identMatch[1]!).toLowerCase();
 		const idx = target.columns.findIndex((c) => c.name.toLowerCase() === dropKey);
@@ -1072,24 +1083,24 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 
 	const createTableRe = new RegExp(
 		`\\bCREATE\\s+(?:(?:OR\\s+REPLACE|GLOBAL\\s+TEMPORARY|PRIVATE\\s+TEMPORARY|LOCAL\\s+TEMPORARY|TEMPORARY|TEMP|UNLOGGED)\\s+)*TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${QUALIFIED_NAME})\\s*\\(`,
-		"gi",
+		"giu",
 	);
 	const dropTableRe = new RegExp(`\\bDROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?`, "gi");
 	const dropIndexRe = new RegExp(
 		`\\bDROP\\s+INDEX\\s+(?:CONCURRENTLY\\s+)?(?:IF\\s+EXISTS\\s+)?(${QUALIFIED_NAME})(?:\\s+ON\\s+(${QUALIFIED_NAME}))?`,
-		"gi",
+		"giu",
 	);
 	const alterRe = new RegExp(
 		`\\bALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?(?:ONLY\\s+)?(${QUALIFIED_NAME})\\s+(?:WITH\\s+(?:NO)?CHECK\\s+)?(ADD|DROP|ALTER|MODIFY|RENAME)\\b`,
-		"gi",
+		"giu",
 	);
 	const commentColRe = new RegExp(
 		`\\bCOMMENT\\s+ON\\s+COLUMN\\s+((?:${IDENT_PART}\\s*\\.\\s*){1,3}${IDENT_PART})\\s+IS\\s+(?:[qQ]?')`,
-		"gi",
+		"giu",
 	);
 	const indexRe = new RegExp(
 		`\\bCREATE\\s+(?:(UNIQUE)\\s+)?(?:(?:CLUSTERED|NONCLUSTERED|COLUMNSTORE|BITMAP|FULLTEXT|SPATIAL)\\s+)*INDEX\\s+(?:CONCURRENTLY\\s+)?(?:IF\\s+NOT\\s+EXISTS\\s+)?(${QUALIFIED_NAME})\\s+ON\\s+(?:ONLY\\s+)?(${QUALIFIED_NAME})(?:\\s+USING\\s+[A-Za-z_][\\w$]*)?\\s*\\(`,
-		"gi",
+		"giu",
 	);
 
 	type DdlEvent =
@@ -1170,7 +1181,7 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 			const m = ev.match;
 			const stmtBefore = masked.slice(findStatementStart(masked, ev.index), ev.index).trimStart();
 			if (/^(?:GRANT|REVOKE|DENY)\b/i.test(stmtBefore)) continue;
-			const partRe = new RegExp(IDENT_PART, "g");
+			const partRe = new RegExp(IDENT_PART, "gu");
 			const ixParts = [...m[1]!.matchAll(partRe)].map((p) => cleanIdent(p[0]!)).filter(Boolean);
 			const ixBare = (ixParts[ixParts.length - 1] ?? "").toLowerCase();
 			if (!ixBare) continue;
@@ -1209,7 +1220,7 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 					if (/[()]/.test(noDir) && !/^[\["`]/.test(noDir)) {
 						return noDir.replace(/\s+/g, " ");
 					}
-					const ident = new RegExp(`^(${IDENT_PART})`).exec(noDir);
+					const ident = new RegExp(`^(${IDENT_PART})`, "u").exec(noDir);
 					return ident ? cleanIdent(ident[1]!) : noDir;
 				})
 				.filter(Boolean);
@@ -1219,7 +1230,7 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 
 		if (ev.kind === "comment") {
 			const m = ev.match;
-			const partRe = new RegExp(IDENT_PART, "g");
+			const partRe = new RegExp(IDENT_PART, "gu");
 			const parts = [...m[1]!.matchAll(partRe)].map((p) => cleanIdent(p[0]!)).filter(Boolean);
 			if (parts.length < 2) continue;
 			const colName = parts[parts.length - 1]!;
@@ -1253,7 +1264,7 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 			const colKw = /^COLUMN\b\s*/i.exec(masked.slice(pos));
 			if (!colKw) continue;
 			const rawSpec = extractAlterBody(cleaned, masked, pos + colKw[0].length);
-			const renMatch = new RegExp(`^(${IDENT_PART})\\s+TO\\s+(${IDENT_PART})`, "i").exec(rawSpec);
+			const renMatch = new RegExp(`^(${IDENT_PART})\\s+TO\\s+(${IDENT_PART})`, "iu").exec(rawSpec);
 			if (!renMatch) continue;
 			const oldName = cleanIdent(renMatch[1]!);
 			const newName = cleanIdent(renMatch[2]!);
@@ -2408,7 +2419,8 @@ export function schemaMarkdownToSql(
 	const tableNames: string[] = [];
 	for (const docTbl of docTables) {
 		const rawName = (docTbl.tableName || options?.fallbackTableName || "").trim();
-		const tableName = rawName.replace(/\s+/g, "_").replace(/[^A-Za-z0-9_.$]/g, "");
+		// Letters of any script stay, as in `IDENT_PART`: `Prüfung` was written as `Prfung`, under a foreign key that still named `Prüfung`.
+		const tableName = rawName.replace(/\s+/g, "_").replace(/[^\p{L}\p{M}\p{Nd}_.$]/gu, "");
 		if (!tableName) continue;
 		tableNames.push(tableName);
 		const rows = [...docTbl.columns.values()].map((col) => ({
@@ -2957,7 +2969,7 @@ function extractSslEmbeddedSql(text: string): string {
 function extractCteNames(cleanedSql: string): Set<string> {
 	const ctes = new Set<string>();
 	const withRe = /\bWITH\s+(?:RECURSIVE\s+)?/gi;
-	const cteItemRe = new RegExp(`^\\s*(${IDENT_PART})\\s*(?:\\([^)]*\\)\\s*)?AS\\s*(?:(?:NOT\\s+)?MATERIALIZED\\s+)?\\(`, "i");
+	const cteItemRe = new RegExp(`^\\s*(${IDENT_PART})\\s*(?:\\([^)]*\\)\\s*)?AS\\s*(?:(?:NOT\\s+)?MATERIALIZED\\s+)?\\(`, "iu");
 	for (const m of cleanedSql.matchAll(withRe)) {
 		let pos = (m.index ?? 0) + m[0].length;
 		while (pos < cleanedSql.length) {
@@ -2993,13 +3005,13 @@ function consumeOptionalAliasAndHint(sql: string, startPos: number): { end: numb
 	};
 	skipWs();
 	let alias: string | undefined;
-	const asRe = new RegExp(`^AS\\s+(${IDENT_PART})`, "i");
+	const asRe = new RegExp(`^AS\\s+(${IDENT_PART})`, "iu");
 	const asMatch = asRe.exec(sql.slice(pos));
 	if (asMatch) {
 		alias = cleanIdent(asMatch[1]!);
 		pos += asMatch[0].length;
 	} else {
-		const bareRe = new RegExp(`^(${IDENT_PART})`);
+		const bareRe = new RegExp(`^(${IDENT_PART})`, "u");
 		const bareMatch = bareRe.exec(sql.slice(pos));
 		if (bareMatch) {
 			const candidate = cleanIdent(bareMatch[1]!);
@@ -3183,9 +3195,9 @@ function statementFromAliases(cleaned: string, startPos: number): Set<string> {
 
 	const aliases = new Set<string>();
 	const realTables = new Set<string>();
-	const fromJoinRe = new RegExp(`\\b(FROM|JOIN)\\s+(?:ONLY\\s+)?(${QUALIFIED_NAME})`, "gi");
-	const qualAtStartRe = new RegExp(`^(?:ONLY\\s+)?(${QUALIFIED_NAME})`, "i");
-	const partRe = new RegExp(IDENT_PART, "g");
+	const fromJoinRe = new RegExp(`\\b(FROM|JOIN)\\s+(?:ONLY\\s+)?(${QUALIFIED_NAME})`, "giu");
+	const qualAtStartRe = new RegExp(`^(?:ONLY\\s+)?(${QUALIFIED_NAME})`, "iu");
+	const partRe = new RegExp(IDENT_PART, "gu");
 	const recordName = (raw: string) => {
 		const parts = [...raw.matchAll(partRe)].map((p) => cleanIdent(p[0]!)).filter(Boolean);
 		if (parts.length) realTables.add(parts[parts.length - 1]!.toLowerCase());
@@ -3251,8 +3263,8 @@ export function extractQueriedTablesFromSql(text: string): { object: string; lin
 	};
 
 	const byLower = new Map<string, { object: string; line: number; offset: number }>();
-	const partRe = new RegExp(IDENT_PART, "g");
-	const qualAtStartRe = new RegExp(`^(?:ONLY\\s+)?(${QUALIFIED_NAME})`, "i");
+	const partRe = new RegExp(IDENT_PART, "gu");
+	const qualAtStartRe = new RegExp(`^(?:ONLY\\s+)?(${QUALIFIED_NAME})`, "iu");
 
 	const pushTable = (rawName: string, offset: number, afterSlice: string, beforeSlice: string, skipTvf: boolean) => {
 		if (beforeSlice.endsWith("?") || afterSlice.startsWith("?")) return;
@@ -3311,7 +3323,7 @@ export function extractQueriedTablesFromSql(text: string): { object: string; lin
 			`|(UPDATE)\\s+${TOP_OPT}(?:ONLY\\s+)?(${QUALIFIED_NAME})` +
 			`|(DELETE)\\s+${TOP_OPT}(?!FROM\\b)(?:ONLY\\s+)?(${QUALIFIED_NAME})` +
 		`)`,
-		"gi",
+		"giu",
 	);
 
 	for (const m of cleaned.matchAll(clauseRe)) {

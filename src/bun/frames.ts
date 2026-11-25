@@ -20,6 +20,24 @@ function parseContentLength(header: string): number | null {
 	return length;
 }
 
+const LENGTH_NAME = "content-length:";
+
+/**
+ * Where the next `Content-Length:` header starts at or after `from`, in any case, or -1. Right after a hyphen it
+ * is the end of a longer name (`X-Content-Length:`), which is another header and no length.
+ */
+function nextLengthHeader(buffer: Buffer, from: number): number {
+	const last = LENGTH_NAME.length - 1;
+	// The name ends in a colon however it is spelled, so each colon is a place to look, and is looked at once.
+	for (let colon = buffer.indexOf(0x3a, from + last); colon >= 0; colon = buffer.indexOf(0x3a, colon + 1)) {
+		const start = colon - last;
+		if ((buffer[colon - 1]! | 0x20) !== 0x68) continue;
+		if (start > 0 && buffer[start - 1] === 0x2d) continue;
+		if (buffer.toString("latin1", start, colon + 1).toLowerCase() === LENGTH_NAME) return start;
+	}
+	return -1;
+}
+
 /** Feeds chunks in, calls `onMessage` with each complete message body. */
 export function createFrameReader(onMessage: (body: string) => void) {
 	let buffer = Buffer.alloc(0);
@@ -38,27 +56,44 @@ export function createFrameReader(onMessage: (body: string) => void) {
 		}
 	};
 
+	/**
+	 * Drops bytes that are not a frame, up to the next place a frame can start: a `Content-Length:` header at or
+	 * after `from`. With none in sight only a tail is kept, in which one may have begun, and false is returned:
+	 * there is nothing to read until more arrives. Dropping only through the end of the bad headers is not enough:
+	 * the body they announced is still to come, it ends without a line break, and the next frame's header then
+	 * reads as `{...}Content-Length: 8`, which is no header either. Every message after one bad header was lost.
+	 */
+	const resync = (from: number): boolean => {
+		const next = nextLengthHeader(buffer, from);
+		if (next >= 0) {
+			advance(next);
+			return true;
+		}
+		// One byte more than the name can lack: the byte before it says whether it is a name of its own.
+		advance(Math.max(0, buffer.length - LENGTH_NAME.length));
+		return false;
+	};
+
 	return (chunk: Uint8Array) => {
 		if (chunk.byteLength === 0) return;
 		buffer = buffer.length === 0 ? Buffer.from(chunk) : Buffer.concat([buffer, chunk]);
 		while (true) {
 			const headerEnd = buffer.indexOf("\r\n\r\n");
 			if (headerEnd < 0) {
-				if (buffer.length > MAX_HEADER_BYTES) {
-					// Preserve only the last 3 bytes in case "\r\n\r\n" straddles the boundary.
-					buffer = Buffer.from(buffer.subarray(buffer.length - 3));
-				}
+				if (buffer.length <= MAX_HEADER_BYTES) return;
+				// Too much for headers and no end to them: only a header that starts in the last of it can still be one.
+				resync(buffer.length - MAX_HEADER_BYTES);
 				return;
 			}
 			if (headerEnd > MAX_HEADER_BYTES) {
-				// Oversized header block: discard through terminator and resync.
-				advance(headerEnd + 4);
+				// Too long to be headers, but a frame's own may be the end of it, after bytes that were not a frame.
+				if (!resync(headerEnd - MAX_HEADER_BYTES)) return;
 				continue;
 			}
 			const length = parseContentLength(buffer.subarray(0, headerEnd).toString("latin1"));
 			if (length === null) {
-				// Not a valid header we understand (or oversized Content-Length): drop it rather than stall/OOM.
-				advance(headerEnd + 4);
+				// Not headers we understand, or a length too large to hold: read on from the next place a frame can start.
+				if (!resync(1)) return;
 				continue;
 			}
 			const start = headerEnd + 4;

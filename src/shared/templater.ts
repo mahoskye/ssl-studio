@@ -728,6 +728,11 @@ export function mergeTemplates(workspace: readonly MarkdownTemplate[], defaults:
 /**
  * Built-in default templates for STARLIMS / business-analyst / developer documentation.
  * Any user can customize these by copying them to `docs/templates/<id>.md`.
+ *
+ * A ticket's key goes into front matter through `tp.yaml(...)`, the rule the front-matter writers quote by, as a
+ * title does through `tp.file.yamlTitle`. Written bare, a key such as `#12` was read as a comment and the
+ * document had no ticket, `[QA] 7` was read as a list, and `A: B` was not YAML at all. With no ticket the line
+ * reads `ticket: ""`.
  */
 export const DEFAULT_TEMPLATES: readonly MarkdownTemplate[] = [
 	{
@@ -740,7 +745,7 @@ export const DEFAULT_TEMPLATES: readonly MarkdownTemplate[] = [
 		source: "builtin",
 		content: `---
 <%* let key ??= tp.system.prompt("Ticket key (e.g. LIMS-123)", "LIMS-100") -%>
-ticket: <% key %>
+ticket: <% tp.yaml(key) %>
 title: <% tp.file.yamlTitle %>
 type: <% tp.system.suggester(["Feature", "Change request", "Bug fix", "Investigation"], ["feature", "change", "bug", "investigation"], "Ticket type") %>
 status: open
@@ -782,7 +787,7 @@ related: []
 		source: "builtin",
 		content: `---
 title: <% tp.file.yamlTitle %>
-ticket: <% tp.system.prompt("Ticket key (leave empty if none)", tp.project.ticket) %>
+ticket: <% tp.yaml(tp.system.prompt("Ticket key (leave empty if none)", tp.project.ticket)) %>
 status: draft
 created: <% tp.date.now("YYYY-MM-DD") %>
 ---
@@ -836,7 +841,7 @@ created: <% tp.date.now("YYYY-MM-DD") %>
 		source: "builtin",
 		content: `---
 title: <% tp.file.yamlTitle %>
-ticket: <% tp.system.prompt("Ticket key (leave empty if none)", tp.project.ticket) %>
+ticket: <% tp.yaml(tp.system.prompt("Ticket key (leave empty if none)", tp.project.ticket)) %>
 status: draft
 created: <% tp.date.now("YYYY-MM-DD") %>
 ---
@@ -879,7 +884,7 @@ Companion plan doc for \`<% tp.project.plans %>/<% tp.file.title %>.plan.json\`:
 title: <% tp.file.yamlTitle %>
 date: <% tp.date.now("YYYY-MM-DD") %>
 status: draft
-ticket: <% tp.project.ticket %>
+ticket: <% tp.yaml(tp.project.ticket) %>
 ---
 
 # <% tp.file.title %>
@@ -916,7 +921,7 @@ ticket: <% tp.project.ticket %>
 		content: `---
 title: <% tp.file.yamlTitle %>
 type: test-run
-ticket: <% tp.project.ticket %>
+ticket: <% tp.yaml(tp.project.ticket) %>
 phase: <% tp.system.suggester(["OQ — Operational Qualification", "IQ — Installation Qualification", "PQ — Performance Qualification"], ["OQ", "IQ", "PQ"], "Validation phase") %>
 environment: <% tp.system.suggester(["QA", "UAT", "DEV", "PROD"], ["QA", "UAT", "DEV", "PROD"], "Target environment") %>
 git-sha: <% tp.system.prompt("Git commit SHA under test", "") %>
@@ -996,7 +1001,7 @@ with: <% tp.yaml(tp.system.prompt("External system or instrument", "Instrument")
 direction: <% tp.system.suggester(["Inbound (into STARLIMS)", "Outbound (from STARLIMS)", "Bidirectional"], ["in", "out", "both"], "Message direction") %>
 version: 1
 status: draft
-ticket: <% tp.project.ticket %>
+ticket: <% tp.yaml(tp.project.ticket) %>
 ---
 
 # <% tp.file.title %>
@@ -1026,7 +1031,7 @@ Where the agreed specification is kept, and who answers for it on each side.
 title: <% tp.file.yamlTitle %>
 status: proposed
 date: <% tp.date.now("YYYY-MM-DD") %>
-ticket: <% tp.project.ticket %>
+ticket: <% tp.yaml(tp.project.ticket) %>
 ---
 
 # <% tp.file.title %>
@@ -1062,7 +1067,7 @@ ticket: <% tp.project.ticket %>
 title: <% tp.file.yamlTitle %>
 status: open
 asked: <% tp.date.now("YYYY-MM-DD") %>
-ticket: <% tp.system.prompt("Ticket key (leave empty if none)", tp.project.ticket) %>
+ticket: <% tp.yaml(tp.system.prompt("Ticket key (leave empty if none)", tp.project.ticket)) %>
 ---
 
 # <% tp.file.title %>
@@ -1084,7 +1089,7 @@ ticket: <% tp.system.prompt("Ticket key (leave empty if none)", tp.project.ticke
 		source: "builtin",
 		content: `---
 title: <% tp.file.yamlTitle %>
-ticket: <% tp.project.ticket %>
+ticket: <% tp.yaml(tp.project.ticket) %>
 status: open
 date: <% tp.date.now("YYYY-MM-DD") %>
 ---
@@ -1118,7 +1123,7 @@ date: <% tp.date.now("YYYY-MM-DD") %>
 		content: `---
 title: <% tp.file.yamlTitle %>
 date: <% tp.date.now("YYYY-MM-DD") %>
-ticket: <% tp.project.ticket %>
+ticket: <% tp.yaml(tp.project.ticket) %>
 ---
 
 # <% tp.file.title %> — <% tp.date.now("MMM DD, YYYY") %>

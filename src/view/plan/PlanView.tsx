@@ -9,12 +9,12 @@ import { createEffect, createMemo, createSignal, createUniqueId, flush, For, onC
 import { baseName, dirName, joinPath, relativeTo } from "../../shared/paths";
 import { isCatalog, registryTitle, ticketKey, toneOf } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
-import { backend } from "../backend";
+import { backend, fileExists } from "../backend";
 import { ask, quickPick, type QuickPickOption } from "../dialogs";
 import { editors } from "../editor/EditorGroup";
 import { monaco } from "../editor/monaco";
 import { cycleRegionColor, regionColor } from "../editor/regions";
-import { canvasMeasure, centredOn, clamp, clearLabels, clearOf, fitView, legibleScale, mapArea, nearest, outOfSight, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point, type Rect } from "../graph/canvas";
+import { canvasMeasure, centredOn, clamp, clearLabels, clearOf, fitView, legibleScale, mapArea, nearest, outOfSight, recall, remember, reveal, roundedPath, wheelZoom, zoomAt, type Measure, type Point, type Rect } from "../graph/canvas";
 import { Finder } from "../graph/Finder";
 import { Minimap, type MapBox } from "../graph/Minimap";
 import { pictureName, savePicture } from "../graph/picture";
@@ -26,7 +26,7 @@ import { showPanel } from "../panels/registry";
 import { chooseFromMenu, type RowMenuEntry } from "../panels/RowMenu";
 import { docs, isMarkdown } from "../project";
 import { activePath, applyText, canonical, documents, notify, openedForALook, openFile, planMode, setPlanMode, setState, state } from "../state";
-import { PlanTextView, type TextTestBuilderRequest } from "./PlanTextView";
+import { PlanTextView } from "./PlanTextView";
 import {
 	alignPlanNodes,
 	batchOffsetPlanNodes,
@@ -35,11 +35,12 @@ import {
 	buildStageAgentDraft,
 	buildStepAgentDraft,
 	buildTestsAgentDraft,
-	copyPlanSelection,
+	copySteps,
+	hasCopiedSteps,
 	lineToKeep,
 	marqueeMoved,
 	marqueeNodeIds,
-	pastePlanSelection,
+	pasteSteps,
 	planHashMatches,
 	planToMermaid,
 	previewPlan,
@@ -47,7 +48,6 @@ import {
 	toggleSelection,
 	type AlignAction,
 	type NodeRect,
-	type PlanClipboard,
 } from "./assist";
 import { nodeStatuses } from "./build";
 import { startBuild } from "./buildRun";
@@ -69,6 +69,7 @@ import {
 	labelPoint,
 	LINE,
 	MARK_WORDS,
+	nodeUnder,
 	offsetFor,
 	placeEdgeLabel,
 	rerouteMovedEdge,
@@ -128,7 +129,7 @@ import {
 	type PlanOffset,
 	type RouteOffsets,
 } from "./model";
-import { registerPlanBridge, requestPlanPaletteTab, type ScheduledBuildScope } from "./planBridge";
+import { builderRequests, registerPlanBridge, requestPlanPaletteTab, type ScheduledBuildScope } from "./planBridge";
 import "./planCanvas.css";
 import { assistOf, specPath, specState } from "./run";
 import { writeTests } from "./testScript";
@@ -188,7 +189,8 @@ type NodeDrag = {
 
 /** Registered step-finder focus callbacks per editor group so Ctrl+F focuses whichever Plan Chart or Text view is active. */
 const planFinders = new Map<number, () => void>();
-let planClipboard: PlanClipboard | null = null;
+/** Said when a wire or a shape is dropped on a node the assistant only suggests: there is nothing in the plan to connect to yet. */
+const SUGGESTED_ONLY = "A suggested step is not in the plan yet: accept it in the Assistant first.";
 
 /** Focuses the active Plan view's step Finder (works in both Chart and Text modes; returns false in Source or non-plan views). */
 export function focusActivePlanFinder(): boolean {
@@ -508,8 +510,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	const [linking, setLinking] = createSignal<string | null>(null);
 	const [walked, setWalked] = createSignal<string[] | null>(null);
 	const [activePathIndex, setActivePathIndexSignal] = createSignal<number | null>(null);
-	const [builderRequest, setBuilderRequest] = createSignal<TextTestBuilderRequest | null>(null);
-	let builderReqSeq = 0;
+	const builder = builderRequests();
 	let focusFinder: (() => void) | undefined;
 	createEffect(
 		() => props.group,
@@ -616,14 +617,11 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		return { x: (clientX - rect.left - v.x) / v.scale, y: (clientY - rect.top - v.y) / v.scale };
 	};
 
-	const hitNodeAt = (pt: Point, excludeId?: string): string | null => {
-		const l = layout();
-		if (!l) return null;
-		for (const b of l.boxes) {
-			if (!b.node || b.id === excludeId) continue;
-			if (pt.x >= b.x - 6 && pt.x <= b.x + b.width + 6 && pt.y >= b.y - 6 && pt.y <= b.y + b.height + 6) return b.id;
-		}
-		return null;
+	const hitNodeAt = (pt: Point, excludeId?: string) => nodeUnder(layout()?.boxes ?? [], pt, excludeId);
+	/** The node a drag may land on at a point: one that is in the plan. A suggested node is not lit as a target. */
+	const dropNodeAt = (pt: Point, excludeId?: string): string | null => {
+		const over = hitNodeAt(pt, excludeId);
+		return over && !over.suggested ? over.id : null;
 	};
 
 	const hitEdgeAt = (pt: Point): Line | null => {
@@ -1088,7 +1086,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	/** Switch from Chart/Palette straight into the spacious Text view with the interactive Test Builder open. */
 	const openTextTestBuilder = (opts?: { nodeId?: string; journeyIndex?: number; testId?: string }) => {
 		setPlanMode(props.path, "text", props.group);
-		setBuilderRequest({ ...opts, seq: ++builderReqSeq });
+		builder.ask(opts);
 	};
 
 	/** Spotlight a node on the canvas (or Text outline) without changing selection or disturbing the Palette inspector. */
@@ -1290,10 +1288,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			const pairedExists =
 				documents.has(canonical(pairedSpec)) ||
 				Boolean(pairedDoc) ||
-				(await backend.read(pairedSpec).then(
-					() => true,
-					() => false,
-				));
+				(await fileExists(pairedSpec));
 			if (pairedExists) {
 				pushCand(pairedSpec, `Plan doc: ${pairedDoc ? docDisplayName(pairedDoc) : baseName(pairedSpec)}`, {
 					icon: "file",
@@ -1525,19 +1520,18 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const p = plan();
 		const ids = activeSelectedIds();
 		if (!p || !ids.size) return;
-		const clip = copyPlanSelection(p, ids);
+		const clip = copySteps(p, ids, props.path);
 		if (!clip) {
 			notify("Select one or more steps to copy.");
 			return;
 		}
-		planClipboard = clip;
 		notify(`Copied ${clip.nodes.length} ${clip.nodes.length === 1 ? "step" : "steps"}.`);
 	};
 	const pasteSelection = () => {
 		const p = plan();
-		if (!p || !planClipboard) return;
-		const res = pastePlanSelection(p, planClipboard, direction());
-		if (!res.pastedIds.length) return;
+		if (!p) return;
+		const res = pasteSteps(p, props.path, direction());
+		if (!res?.pastedIds.length) return;
 		const printed = printPlan(res.plan);
 		applyText(props.path, printed);
 		setSelectedIds(new Set(res.pastedIds));
@@ -1955,7 +1949,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			const pt = clientToCanvas(ev.clientX, ev.clientY);
 			cur = { ...cur, curCanvas: pt, dragged: true };
 			setWireDrag(cur);
-			setDropNodeId(hitNodeAt(pt, cur.fromId));
+			setDropNodeId(dropNodeAt(pt, cur.fromId));
 		};
 		const onUp = (ev: MouseEvent) => {
 			cleanup();
@@ -1964,9 +1958,13 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			if (cur.dragged) {
 				const target = hitNodeAt(clientToCanvas(ev.clientX, ev.clientY), cur.fromId);
 				const p = plan();
-				if (target && p) {
-					apply(connect(p, cur.fromId, target), cur.fromId);
-					setEdge({ from: cur.fromId, to: target });
+				// A suggested node takes no wire: it is not in the plan, and the edge was written to an id that no node
+				// has. Accepting it here, as part of the drop, would take a proposal into the plan that was never read;
+				// it is accepted in the Assistant, like every other, and the drop says so.
+				if (target?.suggested) notify(SUGGESTED_ONLY);
+				else if (target && p) {
+					apply(connect(p, cur.fromId, target.id), cur.fromId);
+					setEdge({ from: cur.fromId, to: target.id });
 				}
 			} else {
 				// Clean single click on '+' port -> quick-add next step or branch!
@@ -2434,10 +2432,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			specFile !== props.path &&
 			(documents.has(canonical(specFile)) ||
 				docs().some((d) => d.exists && canonical(d.path) === canonical(specFile)) ||
-				(await backend.read(specFile).then(
-					() => true,
-					() => false,
-				)));
+				(await fileExists(specFile)));
 		const docItems: RowMenuEntry[] = [
 			...(ticketDoc ? [OPEN_TICKET] : []),
 			...(hasSpec ? [OPEN_SPEC] : []),
@@ -2445,7 +2440,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const items: RowMenuEntry[] = [
 			ADD_STEP,
 			ADD_DECISION,
-			...(planClipboard ? [{ label: PASTE, value: PASTE, keys: "Ctrl+V" }] : []),
+			...(hasCopiedSteps() ? [{ label: PASTE, value: PASTE, keys: "Ctrl+V" }] : []),
 			...alignGroup,
 			"separator",
 			BUILD_PLAN,
@@ -2579,7 +2574,16 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 
 	// --- Plan & Node Field Mutators (shared with Palette via planBridge) -----
 
+	// A Palette field hands its text over when it is taken away, a moment after the fact (`pendingField` in
+	// planBridge.ts), and this view may be gone by then, with the tab changed or the plan switched to Source. What
+	// it reads is then the plan it last saw, and its group shows another file: an edit would put old text back and
+	// move the cursor in the wrong document. So the fields' edits are refused once the view is gone.
+	let unmounted = false;
+	onCleanup(() => {
+		unmounted = true;
+	});
 	const setPlanField = (field: "title" | "goal" | "ticket", value: string) => {
+		if (unmounted) return;
 		const p = plan();
 		if (!p) return;
 		const { [field]: _old, ...rest } = p;
@@ -2595,9 +2599,16 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			.filter(Boolean);
 		apply((list.length ? { ...rest, targets: list } : rest) as Plan);
 	};
-	const setNodeField = (field: "notes" | "ref", value: string) => {
+	/**
+	 * The node a Palette field's text is for: the one it names, or the selected one. A field names its node because
+	 * the selection may have moved on by the time its text arrives (a click on a port, Shift+click, a key): going by
+	 * the selection then, the text typed for one node was written to another, or dropped.
+	 */
+	const nodeFor = (id?: string) => (id === undefined ? selectedNode() : plan()?.nodes.find((n) => n.id === id));
+	const setNodeField = (field: "notes" | "ref", value: string, id?: string) => {
+		if (unmounted) return;
 		const p = plan();
-		const node = selectedNode();
+		const node = nodeFor(id);
 		if (!p || !node) return;
 		const nodes = p.nodes.map((n) => {
 			if (n.id !== node.id) return n;
@@ -2680,9 +2691,10 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 					const p = plan();
 					if (p) apply(removePlanTest(p, id));
 				},
-				setNodeText: (value) => {
+				setNodeText: (value, id) => {
+					if (unmounted) return;
 					const p = plan();
-					const node = selectedNode();
+					const node = nodeFor(id);
 					if (p && node && value.trim() && value.trim() !== node.text) apply(setText(p, node.id, value.trim()));
 				},
 				setNodeKind: (kind) => {
@@ -2693,9 +2705,10 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 				},
 				setNodeField,
 				setNodeRef,
-				setNodeGroup: (name) => {
+				setNodeGroup: (name, id) => {
+					if (unmounted) return;
 					const p = plan();
-					const node = selectedNode();
+					const node = nodeFor(id);
 					if (p && node) apply(setGroup(p, node.id, name));
 				},
 				renameStage: (groupId) => void renameStageAsk(groupId),
@@ -3017,7 +3030,8 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 								onPathNodes={onPath()?.nodes ?? null}
 								codeStateOf={codeStateOf}
 								troubleOf={(id) => issues().get(id)}
-								builderRequest={builderRequest()}
+								builderRequest={builder.pending()}
+								onBuilderRequestTaken={builder.taken}
 								onSelectNode={(id) => select(id)}
 								onPeekNode={peekNode}
 								onShowOnChart={showOnChart}
@@ -3062,8 +3076,12 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 						onContextMenu={(e) => void canvasContextMenu(e)}
 						onWheel={(e) => {
 							e.preventDefault();
+							// By as much as the wheel turned, and not at all for a movement sideways (wheelZoom): every
+							// event used to zoom by a tenth, so a trackpad ran through the whole range at a touch.
+							const factor = wheelZoom(e);
+							if (factor === 1) return;
 							const box = canvas.getBoundingClientRect();
-							zoomBy(e.deltaY < 0 ? 1.1 : 0.9, { x: e.clientX - box.left, y: e.clientY - box.top });
+							zoomBy(factor, { x: e.clientX - box.left, y: e.clientY - box.top });
 						}}
 						onMouseDown={(e) => {
 							if (e.button !== 0) return;
@@ -3107,7 +3125,8 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 							const pt = clientToCanvas(e.clientX, e.clientY);
 							const hitN = hitNodeAt(pt);
 							if (hitN) {
-								setDropNodeId(hitN);
+								// A suggested node is not lit as a target; the drop on it is refused below.
+								setDropNodeId(hitN.suggested ? null : hitN.id);
 								setDropEdgeKey(null);
 							} else {
 								const hitE = hitEdgeAt(pt);
@@ -3131,6 +3150,12 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 							setDropEdgeKey(null);
 							if (!p || (!procName && !shapeKind)) return;
 							e.preventDefault();
+							// The plan has no node to add after when the drop is on a suggested one: a step changed nothing and
+							// took the selection away, a branch said that only a step can branch, a call was added on its own.
+							if (hitNodeAt(clientToCanvas(e.clientX, e.clientY))?.suggested) {
+								notify(SUGGESTED_ONLY);
+								return refocus();
+							}
 							if (procName) {
 								if (targetEdge) {
 									const [from, to] = targetEdge.split(">");
@@ -3550,7 +3575,9 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 														onClick={(e) => {
 															e.stopPropagation();
 															const node = n();
-															if (!node || node.pending || performance.now() - justDraggedNodeAt < 120) return;
+															if (!node || performance.now() - justDraggedNodeAt < 120) return;
+															// A suggested node does nothing when clicked. Clicked as the end of a connection, it says why not.
+															if (node.pending) return void (linking() && notify(SUGGESTED_ONLY));
 															if (e.ctrlKey || e.metaKey) openCode(nid);
 															else clickNode(nid, e.shiftKey);
 														}}
