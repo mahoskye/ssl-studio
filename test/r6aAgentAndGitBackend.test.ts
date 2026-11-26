@@ -133,7 +133,9 @@ describe("Paid-model gate, USER_ONLY_SETTINGS, and URL validation", () => {
 			const localProj = { ...proj, agentModel: "ollama/qwen3:14b" };
 			expect(projectSettings(localProj)).toEqual({ agentModel: "ollama/qwen3:14b", stylePreset: "server" });
 
-			// ...while SettingsStore strips agentModel from both workspace and project layers, honoring only user scope.
+			// ...while SettingsStore takes no model from the workspace's settings.json and no paid one from project.toml:
+			// here the user's own stands. (A project's local model, where the user has chosen none, is the model:
+			// test/pass3MediumsBackend.test.ts.)
 			const store = new SettingsStore(() => ws);
 			const loaded = await store.load();
 			expect(loaded.workspace).toEqual({ fontSize: 15 });

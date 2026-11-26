@@ -86,7 +86,9 @@ export async function savePicture(svg: SVGSVGElement | undefined, content: Size 
 	}
 	try {
 		await backend.write(path, text);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => {
+			s.treeVersion += 1;
+		});
 		notify(`Saved the picture as ${relative}.`, "info", { label: "Open", run: () => void openFile(path) });
 	} catch (e: any) {
 		notify(`The picture was not saved: ${e?.message ?? e}`, "error");

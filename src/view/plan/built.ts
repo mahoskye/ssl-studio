@@ -3,7 +3,7 @@
 // the drift report, and knowing what a changed chart needs rebuilt. Once built the code is
 // the source of truth (ADR 0005): differences are reported, never repaired. Pure, and
 // nothing here reads SSL (ADR 0003): procedures and calls are the server's.
-import { hashText, planHash, type SpecUnit } from "./assist";
+import { hashText, planHashMatches, testsHash, type SpecUnit } from "./assist";
 import { lastPart, requiredCalls, scriptOf, type BuildRun, type BuildUnit } from "./build";
 import { planTestsOf, type Finding, type Plan, type PlanNode } from "./model";
 
@@ -48,6 +48,23 @@ export function nodePrint(plan: Plan, id: string): string {
 	return hashText(JSON.stringify([node?.kind, node?.text, node?.ref ?? "", node?.notes ?? "", out]));
 }
 
+/** Every node of a plan as a build sees it, by id: what a run keeps of the plan it is begun from (`BuildRun.prints`). */
+export const nodePrints = (plan: Plan): Record<string, string> => Object.fromEntries(plan.nodes.map((n) => [n.id, nodePrint(plan, n.id)]));
+
+/**
+ * The nodes a run's code was built from, each as it stood then: the prints the run keeps. A run with none, made
+ * before runs kept them, is of the plan in front of it for as long as its hash says so, and that plan's nodes are
+ * then what it was built from. Past that nothing says what it was built from, and the answer is null.
+ *
+ * What a plan records as built was once taken from the chart as it stood when a script was accepted. A step whose
+ * words were changed between the build and the accepting was recorded as built in its new words: nothing had
+ * changed since, "Rebuild what changed" kept its procedure, and the change was never built.
+ */
+export function builtFrom(run: Pick<BuildRun, "planHash" | "prints">, plan: Plan): Record<string, string> | null {
+	if (run.prints) return run.prints;
+	return planHashMatches(run.planHash, plan) ? nodePrints(plan) : null;
+}
+
 export type Changes = { changed: string[]; added: string[]; removed: string[] };
 const NONE: Changes = { changed: [], added: [], removed: [] };
 
@@ -64,7 +81,7 @@ export function changesSince(plan: Plan): Changes {
 }
 
 /** The same, for the chart to show: while a run of this very chart is open, what it has not reached yet is not a change. */
-export const chartChanges = (plan: Plan, run: BuildRun | null | undefined): Changes => (run && run.planHash === planHash(plan) ? NONE : changesSince(plan));
+export const chartChanges = (plan: Plan, run: BuildRun | null | undefined): Changes => (run && planHashMatches(run.planHash, plan) ? NONE : changesSince(plan));
 
 export const anyChanges = (c: Changes) => c.changed.length + c.added.length + c.removed.length > 0;
 
@@ -104,8 +121,13 @@ export function classifyUnits(run: BuildRun, plan: Plan, moved: Record<string, s
 	for (const node of settledNodes(plan)) if (!run.map.some((m) => m.node === node)) run.map.push({ node, becomes: "built earlier, and untouched" });
 }
 
-/** Records accepted units: the plan's links, and each node as it stood. A node belongs to the unit that last built it. */
-export function recordBuilt(plan: Plan, accepted: BuildUnit[], all: SpecUnit[]): Plan {
+/**
+ * Records accepted units: the plan's links, and each node as it stood. A node belongs to the unit that last built it.
+ * "As it stood" is `from`, the nodes the units were built from (`builtFrom`), which is not always the plan they are
+ * recorded in. A node `from` does not hold was not on the chart that was built, and is not recorded; one the chart
+ * has lost since is recorded, and so shows as removed since it was built.
+ */
+export function recordBuilt(plan: Plan, accepted: BuildUnit[], all: SpecUnit[], from: Record<string, string> = nodePrints(plan)): Plan {
 	const built = builtOf(plan) ?? { units: [], nodes: {} };
 	const claimed = new Set(accepted.flatMap((u) => u.nodes ?? []));
 	const units: BuiltUnit[] = built.units.map((u) => ({ ...u, nodes: u.nodes.filter((n) => !claimed.has(n)) }));
@@ -123,21 +145,35 @@ export function recordBuilt(plan: Plan, accepted: BuildUnit[], all: SpecUnit[]):
 		else units.push(record);
 	}
 	const nodes = { ...built.nodes };
-	for (const id of claimed) if (plan.nodes.some((n) => n.id === id)) nodes[id] = nodePrint(plan, id);
+	for (const id of claimed) if (typeof from[id] === "string") nodes[id] = from[id];
 	return { ...plan, built: { ...built, units, nodes } };
 }
 
-/** The whole run is accepted: what the spec only described is settled too, and removed nodes are forgotten. */
+/**
+ * The whole run is accepted: what the spec only described is settled too, and removed nodes are forgotten.
+ * Both are read from the plan the run was built from (`builtFrom`), as `recordBuilt` reads it: every node of the
+ * map was once printed as the chart had it at this moment, a step changed since the build among them. Forgotten
+ * are the nodes that plan no longer had. One taken off the chart after the build was built, and stays, to show as
+ * removed. Where nothing says what the run was built from, nothing is settled.
+ */
 export function settleBuilt(plan: Plan, run: BuildRun): Plan {
 	const built = builtOf(plan) ?? { units: [], nodes: {} };
-	const ids = new Set(plan.nodes.map((n) => n.id));
+	const from = builtFrom(run, plan);
+	if (!from) return plan;
+	const ids = new Set(Object.keys(from));
 	const nodes: Record<string, string> = {};
 	for (const [id, print] of Object.entries(built.nodes)) if (ids.has(id)) nodes[id] = print;
-	for (const { node } of run.map) if (ids.has(node)) nodes[node] = nodePrint(plan, node);
+	for (const { node } of run.map) if (typeof from[node] === "string") nodes[node] = from[node];
 	return { ...plan, built: { ...built, units: built.units.map((u) => ({ ...u, nodes: u.nodes.filter((n) => ids.has(n)) })), nodes } };
 }
 
-export const recordTests = (plan: Plan, script: string): Plan => ({ ...plan, built: { ...(builtOf(plan) ?? { units: [], nodes: {} }), tests: { script, hash: planHash(plan) } } });
+/**
+ * Records the test script in the plan as it is now, against the plan the script was written from. That is not
+ * always the plan it is recorded in: the agent takes its time and the review stays open, and the chart can be
+ * changed meanwhile. Hashed at the moment of accepting, tests written for the earlier chart were recorded as
+ * being of the later one, and nothing said that they were out of date.
+ */
+export const recordTests = (plan: Plan, script: string, writtenFrom: Plan = plan): Plan => ({ ...plan, built: { ...(builtOf(plan) ?? { units: [], nodes: {} }), tests: { script, hash: testsHash(writtenFrom) } } });
 
 /** The procedures that carry a node. */
 export const unitsOfNode = (plan: Plan, id: string): BuiltUnit[] => (builtOf(plan)?.units ?? []).filter((u) => u.nodes.includes(id));

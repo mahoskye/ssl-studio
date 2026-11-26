@@ -3,11 +3,11 @@
 // detail of a test case (scenario, step, linked journey, starting setup,
 // expected outcome, and sample data/notes — stored in `.plan.json`, undoable
 // via Ctrl+Z), and inspect or customize any flowchart journey.
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show, untrack } from "solid-js";
 import { baseName } from "../../shared/paths";
 import { Icon } from "../Icon";
 import { IconButton } from "../panels/Rows";
-import { planHash } from "./assist";
+import { testsHashMatches } from "./assist";
 import { builtOf, journeyBreakdown, journeyDraft, journeyOptionLabel, nodeTestContext, pathsForNode, pathStory, pathSummary, planPaths, shortPhrase, type JourneyBreakdownItem, type PlanPath } from "./built";
 import { planTestsOf, type Plan, type PlanNode, type PlanTestCase, type PlanTestInput, type PlanTestPatch } from "./model";
 import type { ScheduledBuildScope } from "./planBridge";
@@ -56,13 +56,27 @@ export function TestCaseForm(props: {
 	onCancel: () => void;
 	onDelete?: () => void;
 }) {
-	const [title, setTitle] = createSignal(props.initial?.title ?? "");
-	const [nodeId, setNodeId] = createSignal(props.initial?.node ?? "");
-	const [journey, setJourney] = createSignal(props.initial?.journey ? String(props.initial.journey) : "");
-	const [given, setGiven] = createSignal(props.initial?.given ?? "");
-	const [expect, setExpect] = createSignal(props.initial?.expect ?? "");
-	const [notes, setNotes] = createSignal(props.initial?.notes ?? "");
-	const [notesOpen, setNotesOpen] = createSignal(Boolean(props.initial?.notes?.trim()));
+	const [title, setTitle] = createSignal(untrack(() => props.initial?.title ?? ""));
+	const [nodeId, setNodeId] = createSignal(untrack(() => props.initial?.node ?? ""));
+	const [journey, setJourney] = createSignal(untrack(() => (props.initial?.journey ? String(props.initial.journey) : "")));
+	const [given, setGiven] = createSignal(untrack(() => props.initial?.given ?? ""));
+	const [expect, setExpect] = createSignal(untrack(() => props.initial?.expect ?? ""));
+	const [notes, setNotes] = createSignal(untrack(() => props.initial?.notes ?? ""));
+	const [notesOpen, setNotesOpen] = createSignal(untrack(() => Boolean(props.initial?.notes?.trim())));
+	let stepSelect: HTMLSelectElement | undefined;
+	let journeySelect: HTMLSelectElement | undefined;
+	createEffect(
+		() => [props.nodes, nodeId()] as const,
+		([, v]) => {
+			if (stepSelect && stepSelect.value !== v) stepSelect.value = v;
+		},
+	);
+	createEffect(
+		() => [props.paths, journey()] as const,
+		([, v]) => {
+			if (journeySelect && journeySelect.value !== v) journeySelect.value = v;
+		},
+	);
 
 	const selectedJourneySummary = createMemo(() => {
 		const n = journey() ? Number.parseInt(journey(), 10) : 0;
@@ -112,10 +126,14 @@ export function TestCaseForm(props: {
 						<Show when={props.nodes.length > 0}>
 							<label class="plan-test-attach-row">
 								<span>Step</span>
-								<select value={nodeId()} onChange={(e) => setNodeId(e.currentTarget.value)}>
+								<select
+									ref={(el) => (stepSelect = el)}
+									value={nodeId()}
+									onChange={(e) => setNodeId(e.currentTarget.value)}
+								>
 									<option value="">Whole plan</option>
-									<For each={props.nodes}>
-										{(n) => <option value={n.id}>{shortPhrase(n.text.trim() || n.id, 40)}</option>}
+									<For each={props.nodes} keyed={(n) => n.id}>
+										{(n) => <option value={n().id}>{shortPhrase(n().text.trim() || n().id, 40)}</option>}
 									</For>
 								</select>
 							</label>
@@ -123,12 +141,16 @@ export function TestCaseForm(props: {
 						<Show when={props.paths.length > 0}>
 							<label class="plan-test-attach-row">
 								<span>Journey</span>
-								<select value={journey()} onChange={(e) => setJourney(e.currentTarget.value)}>
+								<select
+									ref={(el) => (journeySelect = el)}
+									value={journey()}
+									onChange={(e) => setJourney(e.currentTarget.value)}
+								>
 									<option value="">None</option>
-									<For each={props.paths}>
+									<For each={props.paths} keyed={(p) => p.steps.map((s) => `${s.id}:${s.label ?? ""}`).join("->")}>
 										{(p, idx) => (
 											<option value={String(idx() + 1)}>
-												{journeyOptionLabel(p, props.paths, props.plan, idx())}
+												{journeyOptionLabel(p(), props.paths, props.plan, idx())}
 											</option>
 										)}
 									</For>
@@ -215,12 +237,12 @@ export function TestCaseForm(props: {
 				<button type="submit" class="primary" disabled={!title().trim()}>
 					{props.saveLabel}
 				</button>
-				<button type="button" onClick={props.onCancel}>
+				<button type="button" onClick={() => props.onCancel()}>
 					Cancel
 				</button>
 				<Show when={props.onDelete}>
 					<span class="spacer" />
-					<button type="button" class="plan-test-delete-btn" onClick={props.onDelete}>
+					<button type="button" class="plan-test-delete-btn" onClick={() => props.onDelete?.()}>
 						Delete
 					</button>
 				</Show>
@@ -261,21 +283,27 @@ export function TestCaseList(props: {
 	const nodeText = (id?: string) => (id ? props.plan.nodes.find((n) => n.id === id)?.text.trim() : undefined);
 
 	// Reset inline editing when switching selected step context.
-	createEffect(() => {
-		props.defaultNodeId;
-		setAdding(null);
-		setEditingId(null);
-		props.onConsumeDraft?.();
-	});
+	const defaultNodeId = createMemo(() => props.defaultNodeId);
+	createEffect(
+		() => defaultNodeId(),
+		() => {
+			setAdding(null);
+			setEditingId(null);
+			props.onConsumeDraft?.();
+		},
+		{ defer: true },
+	);
 
 	// Open pre-filled form when user clicks "Add test details" on a flowchart journey, and consume so collapsing never resurrects it.
-	createEffect(() => {
-		const req = props.externalDraft;
-		if (!req) return;
-		setEditingId(null);
-		setAdding(req.draft);
-		props.onConsumeDraft?.();
-	});
+	createEffect(
+		() => props.externalDraft,
+		(req) => {
+			if (!req) return;
+			setEditingId(null);
+			setAdding(req.draft);
+			props.onConsumeDraft?.();
+		},
+	);
 
 	return (
 		<div class="plan-impl-group">
@@ -301,8 +329,7 @@ export function TestCaseList(props: {
 						</Show>
 						<button
 							type="button"
-							class="plan-test-add-btn"
-							classList={{ subtle: Boolean(props.onOpenTextBuilder) }}
+							class={["plan-test-add-btn", { subtle: Boolean(props.onOpenTextBuilder) }]}
 							title="Quickly write a test case right here in the sidebar"
 							onClick={() => {
 								setEditingId(null);
@@ -350,59 +377,66 @@ export function TestCaseList(props: {
 				}
 			>
 				<div class="plan-test-cases">
-					<For each={props.cases}>
+					<For each={props.cases} keyed={(item) => item.id}>
 						{(item) => {
-							const isEditing = () => editingId() === item.id;
-							const isOpen = () => expandedId() === item.id;
-							const stepName = () => nodeText(item.node);
-							const journeyIdx = () => (item.journey && item.journey >= 1 && item.journey <= props.paths.length ? item.journey - 1 : null);
+							const isEditing = () => editingId() === item().id;
+							const isOpen = () => expandedId() === item().id;
+							const stepName = () => nodeText(item().node);
+							const journeyIdx = () => {
+								const j = item().journey;
+								return j && j >= 1 && j <= props.paths.length ? j - 1 : null;
+							};
 							const journeyActive = () => journeyIdx() !== null && props.activePathIndex === journeyIdx();
 							return (
 								<Show
 									when={isEditing()}
 									fallback={
-										<div class="plan-test-case" classList={{ open: isOpen() }}>
+										<div class={["plan-test-case", { open: isOpen() }]}>
 											<div class="plan-test-case-head">
 												<button
 													type="button"
 													class="plan-test-case-toggle"
-													aria-expanded={isOpen()}
+													aria-expanded={isOpen() ? "true" : "false"}
 													title={isOpen() ? "Hide test details" : "Click to inspect or modify test details"}
-													onClick={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
+													onClick={() => {
+														const id = item().id;
+														setExpandedId((cur) => (cur === id ? null : id));
+													}}
 												>
 													<Icon name={isOpen() ? "chevron-down" : "chevron-right"} class="plan-test-case-chev" />
-													<span class="plan-test-case-title">{item.title}</span>
+													<span class="plan-test-case-title">{item().title}</span>
 												</button>
 												<div class="plan-test-case-btns">
 													<IconButton
-														label={`Edit test case ${item.title}`}
+														label={`Edit test case ${item().title}`}
 														title="Edit test details"
 														icon="note"
 														onClick={() => {
+															const id = item().id;
 															setAdding(null);
-															setExpandedId(item.id);
-															setEditingId(item.id);
+															setExpandedId(id);
+															setEditingId(id);
 														}}
 													/>
 													<IconButton
-														label={`Remove test case ${item.title}`}
+														label={`Remove test case ${item().title}`}
 														title="Delete test case"
 														icon="trash"
-														onClick={() => props.onRemoveTestCase(item.id)}
+														onClick={() => props.onRemoveTestCase(item().id)}
 													/>
 												</div>
 											</div>
 
-											<Show when={!isOpen() && (item.expect || item.journey || (!props.hideStepBadge && stepName()))}>
-												<div class="plan-test-case-preview" onClick={() => setExpandedId(item.id)}>
+											<Show when={!isOpen() && (item().expect || item().journey || (!props.hideStepBadge && stepName()))}>
+												<div class="plan-test-case-preview" onClick={() => setExpandedId(item().id)}>
 													<Show when={!props.hideStepBadge && stepName()}>
 														<span class="plan-test-case-badge">{stepName()}</span>
 													</Show>
-													<Show when={item.journey}>
-														<span class="plan-test-case-badge journey">Journey #{item.journey}</span>
+													<Show when={item().journey}>
+														<span class="plan-test-case-badge journey">Journey #{item().journey}</span>
 													</Show>
-													<Show when={item.expect}>
-														<span class="plan-test-case-snippet">{item.expect}</span>
+													<Show when={item().expect}>
+														<span class="plan-test-case-snippet">{item().expect}</span>
 													</Show>
 												</div>
 											</Show>
@@ -411,7 +445,7 @@ export function TestCaseList(props: {
 												<div class="plan-test-case-details">
 													<Show when={stepName() || journeyIdx() !== null}>
 														<div class="plan-test-case-links">
-															<Show when={stepName() && item.node}>
+															<Show when={stepName() && item().node}>
 																<button
 																	type="button"
 																	class="plan-test-case-step"
@@ -420,12 +454,12 @@ export function TestCaseList(props: {
 																			? `Spotlight "${stepName()}" on chart (keeps current step selected)`
 																			: `Select "${stepName()}" on chart`
 																	}
-																	onMouseEnter={() => props.stepAction === "peek" && props.onPeekNode?.(item.node!, { pan: false })}
+																	onMouseEnter={() => props.stepAction === "peek" && props.onPeekNode?.(item().node!, { pan: false })}
 																	onMouseLeave={() => props.stepAction === "peek" && props.onPeekNode?.(null)}
 																	onClick={() =>
 																		props.stepAction === "peek" && props.onPeekNode
-																			? props.onPeekNode(item.node!, { pan: true })
-																			: props.onJumpToNode(item.node!)
+																			? props.onPeekNode(item().node!, { pan: true })
+																			: props.onJumpToNode(item().node!)
 																	}
 																>
 																	<Icon name={props.stepAction === "peek" ? "eye" : "play"} />
@@ -435,13 +469,12 @@ export function TestCaseList(props: {
 															<Show when={journeyIdx() !== null}>
 																<button
 																	type="button"
-																	class="plan-test-case-step journey"
-																	classList={{ active: journeyActive() }}
-																	title={journeyActive() ? "Hide journey on chart" : `Highlight Journey #${item.journey} on chart`}
+																	class={["plan-test-case-step journey", { active: journeyActive() }]}
+																	title={journeyActive() ? "Hide journey on chart" : `Highlight Journey #${item().journey} on chart`}
 																	onClick={() => props.onHighlightPath(journeyActive() ? null : journeyIdx())}
 																>
 																	<Icon name="eye" />
-																	<span>Journey #{item.journey}</span>
+																	<span>Journey #{item().journey}</span>
 																</button>
 															</Show>
 														</div>
@@ -450,10 +483,10 @@ export function TestCaseList(props: {
 													<div class="plan-test-detail-row">
 														<span class="plan-test-kw given">Given</span>
 														<Show
-															when={bulletLines(item.given)}
+															when={bulletLines(item().given)}
 															fallback={
-																<p class="plan-test-detail-val" classList={{ muted: !item.given }}>
-																	{item.given || "Not specified yet"}
+																<p class={["plan-test-detail-val", { muted: !item().given }]}>
+																	{item().given || "Not specified yet"}
 																</p>
 															}
 														>
@@ -466,14 +499,14 @@ export function TestCaseList(props: {
 													</div>
 													<div class="plan-test-detail-row">
 														<span class="plan-test-kw expect">Expect</span>
-														<p class="plan-test-detail-val" classList={{ muted: !item.expect }}>
-															{item.expect || "Not specified yet"}
+														<p class={["plan-test-detail-val", { muted: !item().expect }]}>
+															{item().expect || "Not specified yet"}
 														</p>
 													</div>
-													<Show when={item.notes}>
+													<Show when={item().notes}>
 														<div class="plan-test-detail-row">
 															<span class="plan-test-kw notes">Notes</span>
-															<p class="plan-test-detail-val">{item.notes}</p>
+															<p class="plan-test-detail-val">{item().notes}</p>
 														</div>
 													</Show>
 
@@ -483,7 +516,7 @@ export function TestCaseList(props: {
 															class="plan-test-edit-btn"
 															onClick={() => {
 																setAdding(null);
-																setEditingId(item.id);
+																setEditingId(item().id);
 															}}
 														>
 															<Icon name="note" />
@@ -492,7 +525,7 @@ export function TestCaseList(props: {
 														<button
 															type="button"
 															class="plan-test-delete-btn"
-															onClick={() => props.onRemoveTestCase(item.id)}
+															onClick={() => props.onRemoveTestCase(item().id)}
 														>
 															Delete
 														</button>
@@ -504,13 +537,14 @@ export function TestCaseList(props: {
 								>
 									<TestCaseForm
 										mode="edit"
-										initial={item}
+										initial={item()}
 										nodes={actionableNodes()}
 										plan={props.plan}
 										paths={props.paths}
 										saveLabel="Save changes"
 										onSave={(val, clearJourney) => {
-											props.onUpdateTestCase(item.id, {
+											const id = item().id;
+											props.onUpdateTestCase(id, {
 												title: val.title,
 												node: val.node ?? "",
 												journey: clearJourney ? null : val.journey,
@@ -519,12 +553,13 @@ export function TestCaseList(props: {
 												notes: val.notes ?? "",
 											});
 											setEditingId(null);
-											setExpandedId(item.id);
+											setExpandedId(id);
 										}}
 										onCancel={() => setEditingId(null)}
 										onDelete={() => {
+											const id = item().id;
 											setEditingId(null);
-											props.onRemoveTestCase(item.id);
+											props.onRemoveTestCase(id);
 										}}
 									/>
 								</Show>
@@ -577,7 +612,7 @@ function JourneyDetailBox(props: {
 	};
 
 	return (
-		<Show when={breakdown()} keyed>
+		<Show when={breakdown()}>
 			{(bd) => (
 				<div class="plan-test-journey-detail">
 					<div class="plan-test-journey-head">
@@ -598,49 +633,49 @@ function JourneyDetailBox(props: {
 
 					<Show when={sections().length > 0}>
 						<div class="plan-journey-timeline" role="list" aria-label={`Steps in Journey ${props.pathIndex + 1}`}>
-							<For each={sections()}>
+							<For each={sections()} keyed={(sec) => sec.stage ?? ""}>
 								{(sec) => (
 									<div class="plan-journey-stage">
-										<Show when={sec.stage}>
-											<div class="plan-journey-stage-label">{sec.stage}</div>
+										<Show when={sec().stage}>
+											<div class="plan-journey-stage-label">{sec().stage}</div>
 										</Show>
 										<div class="plan-journey-rail">
-											<For each={sec.items}>
+											<For each={sec().items} keyed={(item) => `${item.nodeId}:${item.answer}:${item.targetId ?? ""}`}>
 												{(item) => {
 													const isCurrent = () =>
-														Boolean(props.defaultNodeId && (item.nodeId === props.defaultNodeId || item.targetId === props.defaultNodeId));
+														Boolean(props.defaultNodeId && (item().nodeId === props.defaultNodeId || item().targetId === props.defaultNodeId));
 													return (
-														<div class="plan-journey-item" classList={{ current: isCurrent(), gate: Boolean(item.isLoopGate) }} role="listitem">
-															<Show when={item.context}>
-																<span class="plan-journey-context">{item.context}</span>
+														<div class={["plan-journey-item", { current: isCurrent(), gate: Boolean(item().isLoopGate) }]} role="listitem">
+															<Show when={item().context}>
+																<span class="plan-journey-context">{item().context}</span>
 															</Show>
 															<div class="plan-journey-qrow">
 																<button
 																	type="button"
 																	class="plan-journey-q"
 																	title="Spotlight this decision on the chart (keeps current step selected)"
-																	onMouseEnter={() => props.onPeekNode?.(item.nodeId, { pan: false })}
+																	onMouseEnter={() => props.onPeekNode?.(item().nodeId, { pan: false })}
 																	onMouseLeave={() => props.onPeekNode?.(null)}
-																	onClick={() => props.onPeekNode?.(item.nodeId, { pan: true })}
+																	onClick={() => props.onPeekNode?.(item().nodeId, { pan: true })}
 																>
-																	{item.question}
+																	{item().question}
 																</button>
-																<span class={`plan-test-tag ${toneOf(item.answer)}`}>{item.answer}</span>
+																<span class={`plan-test-tag ${toneOf(item().answer)}`}>{item().answer}</span>
 															</div>
-															<Show when={item.result}>
+															<Show when={item().result}>
 																<button
 																	type="button"
 																	class="plan-journey-then"
 																	title="Spotlight this step on the chart (keeps current step selected)"
-																	onMouseEnter={() => props.onPeekNode?.(item.targetId, { pan: false })}
+																	onMouseEnter={() => props.onPeekNode?.(item().targetId, { pan: false })}
 																	onMouseLeave={() => props.onPeekNode?.(null)}
-																	onClick={() => props.onPeekNode?.(item.targetId, { pan: true })}
+																	onClick={() => props.onPeekNode?.(item().targetId, { pan: true })}
 																>
 																	<Icon name="arrow-right" class="plan-journey-arrow" />
-																	<span>{item.result}</span>
+																	<span>{item().result}</span>
 																</button>
 															</Show>
-															<Show when={item.loopsBack}>
+															<Show when={item().loopsBack}>
 																<span class="plan-journey-loop">
 																	<Icon name="sync" class="plan-journey-arrow" />
 																	<span>Continues loop</span>
@@ -657,17 +692,23 @@ function JourneyDetailBox(props: {
 						</div>
 					</Show>
 
-					<Show when={bd.outcome}>
+					<Show when={bd().outcome}>
 						<button
 							type="button"
 							class="plan-journey-outcome"
-							title={bd.outcomeId ? "Spotlight this end result on the chart (keeps current step selected)" : undefined}
-							onMouseEnter={() => bd.outcomeId && props.onPeekNode?.(bd.outcomeId, { pan: false })}
-							onMouseLeave={() => bd.outcomeId && props.onPeekNode?.(null)}
-							onClick={() => bd.outcomeId && props.onPeekNode?.(bd.outcomeId, { pan: true })}
+							title={bd().outcomeId ? "Spotlight this end result on the chart (keeps current step selected)" : undefined}
+							onMouseEnter={() => {
+								const id = bd().outcomeId;
+								if (id) props.onPeekNode?.(id, { pan: false });
+							}}
+							onMouseLeave={() => bd().outcomeId && props.onPeekNode?.(null)}
+							onClick={() => {
+								const id = bd().outcomeId;
+								if (id) props.onPeekNode?.(id, { pan: true });
+							}}
 						>
 							<span class="plan-test-kw expect">Result</span>
-							<span class="plan-journey-outcome-text">{bd.outcome}</span>
+							<span class="plan-journey-outcome-text">{bd().outcome}</span>
 						</button>
 					</Show>
 				</div>
@@ -702,14 +743,21 @@ export function NodeTests(props: {
 	let draftSeq = 0;
 
 	// Clear any active branch/outcome filter and draft form when switching to another step or collapsing the drawer.
-	createEffect(() => {
-		props.node.id;
-		setJourneyFilter(null);
-		setDraftReq(null);
-	});
-	createEffect(() => {
-		if (!props.open) setDraftReq(null);
-	});
+	const nodeId = createMemo(() => props.node.id);
+	createEffect(
+		() => nodeId(),
+		() => {
+			setJourneyFilter(null);
+			setDraftReq(null);
+		},
+	);
+	const isOpen = createMemo(() => props.open);
+	createEffect(
+		() => isOpen(),
+		(open) => {
+			if (!open) setDraftReq(null);
+		},
+	);
 
 	const info = createMemo(() => pathsForNode(props.plan, props.node.id, props.allPaths));
 	const ctx = createMemo(() => nodeTestContext(props.plan, props.node.id, props.allPaths));
@@ -723,7 +771,7 @@ export function NodeTests(props: {
 	const testScript = createMemo(() => validTestScript(props.plan));
 	const testStale = createMemo(() => {
 		const t = testScript();
-		return Boolean(t && t.hash !== planHash(props.plan));
+		return Boolean(t && !testsHashMatches(t.hash, props.plan));
 	});
 
 	const visibleMatches = createMemo(() => {
@@ -776,14 +824,14 @@ export function NodeTests(props: {
 			<button
 				type="button"
 				class="plan-impl-toggle"
-				aria-expanded={props.open}
-				onClick={props.onToggle}
+				aria-expanded={props.open ? "true" : "false"}
+				onClick={() => props.onToggle()}
 				title="See and edit plain-English test cases for this step, and inspect every flowchart journey through it"
 			>
 				<Icon name={props.open ? "chevron-down" : "chevron-right"} />
 				<span class="plan-impl-label">Tests</span>
 				<span class="spacer" />
-				<span class="plan-impl-meta" classList={{ linked: stepCases().length > 0 || sharedCases().length > 0 || info().matches.length > 0 }}>
+				<span class={["plan-impl-meta", { linked: stepCases().length > 0 || sharedCases().length > 0 || info().matches.length > 0 }]}>
 					{summary()}
 				</span>
 			</button>
@@ -894,9 +942,8 @@ export function NodeTests(props: {
 													return (
 														<button
 															type="button"
-															class="plan-test-filter-row"
-															classList={{ active: active(), empty: b.count === 0 }}
-															aria-pressed={active()}
+															class={["plan-test-filter-row", { active: active(), empty: b.count === 0 }]}
+															aria-pressed={active() ? "true" : "false"}
 															disabled={b.count === 0}
 															title={
 																b.count === 0
@@ -933,9 +980,8 @@ export function NodeTests(props: {
 													return (
 														<button
 															type="button"
-															class="plan-test-filter-row"
-															classList={{ active: active() }}
-															aria-pressed={active()}
+															class={["plan-test-filter-row", { active: active() }]}
+															aria-pressed={active() ? "true" : "false"}
 															title={
 																active()
 																	? "Click to show all journeys through this step"
@@ -971,24 +1017,23 @@ export function NodeTests(props: {
 								</Show>
 							</div>
 							<div class="plan-test-list">
-								<For each={visibleMatches()}>
+								<For each={visibleMatches()} keyed={(m) => m.pathIndex}>
 									{(m) => {
-										const active = () => props.activePathIndex === m.pathIndex;
-										const branchTone = () => toneOf(m.branchOut ?? "");
+										const active = () => props.activePathIndex === m().pathIndex;
+										const branchTone = () => toneOf(m().branchOut ?? "");
 										return (
 											<button
 												type="button"
-												class="plan-test-row"
-												classList={{ active: active() }}
-												aria-pressed={active()}
-												title={`${active() ? "Click to clear chart highlight" : "Click to inspect and highlight this journey on the chart"}\n\n${m.story}`}
-												onClick={() => props.onHighlightPath(active() ? null : m.pathIndex)}
+												class={["plan-test-row", { active: active() }]}
+												aria-pressed={active() ? "true" : "false"}
+												title={`${active() ? "Click to clear chart highlight" : "Click to inspect and highlight this journey on the chart"}\n\n${m().story}`}
+												onClick={() => props.onHighlightPath(active() ? null : m().pathIndex)}
 											>
-												<span class="plan-test-num">#{m.index}</span>
-												<Show when={m.branchOut}>
-													<span class={`plan-test-tag ${branchTone()}`}>{m.branchOut}</span>
+												<span class="plan-test-num">#{m().index}</span>
+												<Show when={m().branchOut}>
+													<span class={`plan-test-tag ${branchTone()}`}>{m().branchOut}</span>
 												</Show>
-												<span class="plan-test-summary">{m.summary}</span>
+												<span class="plan-test-summary">{m().summary}</span>
 												<Icon name="eye" class="plan-test-eye" />
 											</button>
 										);
@@ -997,12 +1042,12 @@ export function NodeTests(props: {
 							</div>
 						</div>
 
-						<Show when={activeMatch()} keyed>
+						<Show when={activeMatch()}>
 							{(m) => (
 								<JourneyDetailBox
 									plan={props.plan}
 									paths={props.allPaths.paths}
-									pathIndex={m.pathIndex}
+									pathIndex={m().pathIndex}
 									defaultNodeId={props.node.id}
 									onPeekNode={props.onPeekNode}
 									onCustomize={(draft) => setDraftReq({ draft, seq: ++draftSeq })}
@@ -1011,19 +1056,19 @@ export function NodeTests(props: {
 						</Show>
 					</Show>
 
-					<Show when={testScript()} keyed>
+					<Show when={testScript()}>
 						{(tests) => (
-							<Show when={typeof tests?.script === "string" && tests.script.length > 0}>
+							<Show when={typeof tests()?.script === "string" && tests().script.length > 0}>
 								<div class="plan-impl-group">
 									<span class="plan-impl-subhead">STARLIMS test script</span>
 									<button
 										type="button"
 										class="plan-impl-script-row"
-										title={`Open ${tests.script}`}
-										onClick={() => props.onOpenScript(tests.script)}
+										title={`Open ${tests().script}`}
+										onClick={() => props.onOpenScript(tests().script)}
 									>
 										<Icon name="beaker" />
-										<span class="plan-impl-script-file">{baseName(tests.script)}</span>
+										<span class="plan-impl-script-file">{baseName(tests().script)}</span>
 										<Show when={testStale()}>
 											<span class="spacer" />
 											<span class="plan-test-stale">Out of date</span>
@@ -1074,9 +1119,13 @@ export function PlanTests(props: {
 	const [draftReq, setDraftReq] = createSignal<{ draft: TestCaseDraft; seq: number } | null>(null);
 	let draftSeq = 0;
 
-	createEffect(() => {
-		if (!props.open) setDraftReq(null);
-	});
+	const isOpen = createMemo(() => props.open);
+	createEffect(
+		() => isOpen(),
+		(open) => {
+			if (!open) setDraftReq(null);
+		},
+	);
 
 	const pathsResult = createMemo(() => props.allPaths ?? planPaths(props.plan));
 	const cases = createMemo(() => planTestsOf(props.plan));
@@ -1084,7 +1133,7 @@ export function PlanTests(props: {
 	const testScript = createMemo(() => validTestScript(props.plan));
 	const testStale = createMemo(() => {
 		const t = testScript();
-		return Boolean(t && t.hash !== planHash(props.plan));
+		return Boolean(t && !testsHashMatches(t.hash, props.plan));
 	});
 
 	const summary = createMemo(() => {
@@ -1101,14 +1150,14 @@ export function PlanTests(props: {
 			<button
 				type="button"
 				class="plan-impl-toggle"
-				aria-expanded={props.open}
-				onClick={props.onToggle}
+				aria-expanded={props.open ? "true" : "false"}
+				onClick={() => props.onToggle()}
 				title="Add and edit business test cases, and walk through end-to-end flowchart journeys"
 			>
 				<Icon name={props.open ? "chevron-down" : "chevron-right"} />
 				<span class="plan-impl-label">Tests</span>
 				<span class="spacer" />
-				<span class="plan-impl-meta" classList={{ linked: cases().length > 0 || pathsResult().paths.length > 0 }}>
+				<span class={["plan-impl-meta", { linked: cases().length > 0 || pathsResult().paths.length > 0 }]}>
 					{summary()}
 				</span>
 			</button>
@@ -1173,20 +1222,19 @@ export function PlanTests(props: {
 							</div>
 
 							<div class="plan-test-list">
-								<For each={pathsResult().paths}>
+								<For each={pathsResult().paths} keyed={(p) => p.steps.map((s) => `${s.id}:${s.label ?? ""}`).join("->")}>
 									{(path, idx) => {
 										const active = () => props.activePathIndex === idx();
 										return (
 											<button
 												type="button"
-												class="plan-test-row"
-												classList={{ active: active() }}
-												aria-pressed={active()}
-												title={`${active() ? "Click to clear chart highlight" : "Click to inspect and highlight this journey on the chart"}\n\n${pathStory(path)}`}
+												class={["plan-test-row", { active: active() }]}
+												aria-pressed={active() ? "true" : "false"}
+												title={`${active() ? "Click to clear chart highlight" : "Click to inspect and highlight this journey on the chart"}\n\n${pathStory(path())}`}
 												onClick={() => props.onHighlightPath(active() ? null : idx())}
 											>
 												<span class="plan-test-num">#{idx() + 1}</span>
-												<span class="plan-test-summary">{pathSummary(path, pathsResult().paths, props.plan)}</span>
+												<span class="plan-test-summary">{pathSummary(path(), pathsResult().paths, props.plan)}</span>
 												<Icon name="eye" class="plan-test-eye" />
 											</button>
 										);
@@ -1206,19 +1254,19 @@ export function PlanTests(props: {
 						</Show>
 					</Show>
 
-					<Show when={testScript()} keyed>
+					<Show when={testScript()}>
 						{(tests) => (
-							<Show when={typeof tests?.script === "string" && tests.script.length > 0}>
+							<Show when={typeof tests()?.script === "string" && tests().script.length > 0}>
 								<div class="plan-impl-group">
 									<span class="plan-impl-subhead">STARLIMS test script</span>
 									<button
 										type="button"
 										class="plan-impl-script-row"
-										title={`Open ${tests.script}`}
-										onClick={() => props.onOpenScript(tests.script)}
+										title={`Open ${tests().script}`}
+										onClick={() => props.onOpenScript(tests().script)}
 									>
 										<Icon name="beaker" />
-										<span class="plan-impl-script-file">{baseName(tests.script)}</span>
+										<span class="plan-impl-script-file">{baseName(tests().script)}</span>
 										<Show when={testStale()}>
 											<span class="spacer" />
 											<span class="plan-test-stale">Out of date</span>

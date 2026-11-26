@@ -128,9 +128,8 @@ describe("R7A.1 — DOCX security, crash resistance, XML 1.0 validity & fidelity
 		const bombRaw = new Uint8Array(36 * 1024 * 1024);
 		const bombZip = packZip([{ name: "word/document.xml", data: bombRaw }]);
 		expect(bombZip.length).toBeLessThan(100 * 1024);
-		const parsedBomb = parseDocxToMarkdown(bombZip);
-		expect(parsedBomb.markdown).toBe("");
-		expect(parsedBomb.images).toEqual([]);
+		// The document's text is not read, so there is no document: said, not read as an empty one.
+		expect(() => parseDocxToMarkdown(bombZip)).toThrow(/not a Word document that can be read/);
 
 		// 2. Duplicate/overlapping localOffset central directory entries: only the first entry at offset 0 is extracted
 		const enc = new TextEncoder();
@@ -179,14 +178,14 @@ describe("R7A.1 — DOCX security, crash resistance, XML 1.0 validity & fidelity
 		overlapZip.set(eocd, local.length + cd1.length + cd2.length);
 
 		// word/document.xml reused localOffset 0 -> rejected!
-		expect(parseDocxToMarkdown(overlapZip).markdown).toBe("");
+		expect(() => parseDocxToMarkdown(overlapZip)).toThrow(/not a Word document that can be read/);
 
 		// 3. Truncated fallback scan (no EOCD, nameLen exceeds buffer) doesn't crash
 		const trunc = new Uint8Array(34);
 		const tv = new DataView(trunc.buffer);
 		tv.setUint32(0, 0x04034b50, true);
 		tv.setUint16(26, 500, true); // nameLen > remaining bytes
-		expect(parseDocxToMarkdown(trunc).markdown).toBe("");
+		expect(() => parseDocxToMarkdown(trunc, "Cut.docx")).toThrow(/^Cut\.docx is not a Word document that can be read/);
 
 		// 4. Cumulative >64 MB across 3 x 25 MB entries caps extraction safely without OOM
 		const chunk25 = new Uint8Array(25 * 1024 * 1024);
@@ -317,7 +316,8 @@ describe("R7A.1 — DOCX security, crash resistance, XML 1.0 validity & fidelity
 
 		const parsed = parseDocxToMarkdown(zip);
 		// Self-closing <w:t/> didn't swallow <w:br/> or next <w:t>, and invalid entities didn't crash
-		expect(parsed.markdown).toContain("AfterEmpty &#x110000; &#xD800; A");
+		// The `#` after `&` carries a backslash: written out, `&#x41;` would be read by Markdown as a letter (pass 3, low 19).
+		expect(parsed.markdown).toContain("AfterEmpty &\\#x110000; &\\#xD800; A");
 		expect(parsed.markdown).not.toContain("<w:br/>");
 
 		// w:ilvl clamped to 8 (16 spaces)
@@ -873,10 +873,12 @@ describe("R7A.5 — codeCitations, docTables, tasks, ticketImport/projectDocs, c
 		expect(fromJson.tickets.map((t) => t.source)).toEqual([undefined, undefined, "https://example.test/3"]);
 	});
 
-	test("catalog.ts withCatalog replaces old entries with escaped brackets when closing marker is missing", () => {
+	test("catalog.ts withCatalog writes one list when closing marker is missing, and keeps an old entry it cannot tell from a person's line below it", () => {
 		const broken = `# Docs\n\n${CATALOG_START}\n\n- [With \\[brackets\\]](a.md): open.\n\nMy own notes.\n`;
 		const fixed = withCatalog(broken, [{ path: "b.md", title: "New" }]);
-		expect(fixed).not.toContain("With \\[brackets\\]");
+		// Once taken out as "the old list"; a bullet that links to a document is also what a person writes (pass 3, low 5).
+		expect(fixed.split(CATALOG_START).length).toBe(2);
+		expect(fixed.indexOf("With \\[brackets\\]")).toBeGreaterThan(fixed.indexOf("<!-- /catalog -->"));
 		expect(fixed).toContain("- [New](b.md)");
 		expect(fixed).toContain("My own notes.");
 	});

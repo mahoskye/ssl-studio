@@ -1,7 +1,7 @@
 // Targeted "Check in code" dialog for CSV tables: lets the user pick the exact
 // column, row subset (selected, filtered, or all), file scope/globs, and match
 // options instead of blindly scanning the first 300 entries of column 1.
-import { createMemo, createSignal, createUniqueId, For, Show } from "solid-js";
+import { createMemo, createSignal, createUniqueId, For, Show, untrack } from "solid-js";
 import type { Cell, Table } from "../../shared/csv";
 import {
 	CODE_FILE_SCOPES,
@@ -29,14 +29,12 @@ export function CsvCodeCheckDialog(props: {
 	onClose: () => void;
 }) {
 	const titleId = createUniqueId();
-	const safeInitialCol = Math.max(0, Math.min(props.initialColumn, Math.max(0, props.table.header.length - 1)));
+	const safeInitialCol = () => Math.max(0, Math.min(props.initialColumn, Math.max(0, props.table.header.length - 1)));
 	const hasChecked = () => (props.checkedRows?.length ?? 0) > 0;
-	const initialScope: CodeCheckRowScope =
-		props.initialRowScope ?? (hasChecked() ? "checked" : props.hasActiveFilters ? "filtered" : "all");
-
-	const [column, setColumn] = createSignal(safeInitialCol);
-	const [rowScope, setRowScope] = createSignal<CodeCheckRowScope>(
-		initialScope === "selected" && !props.selectedRow
+	const computeInitialScope = (): CodeCheckRowScope => {
+		const initialScope: CodeCheckRowScope =
+			props.initialRowScope ?? (hasChecked() ? "checked" : props.hasActiveFilters ? "filtered" : "all");
+		return initialScope === "selected" && !props.selectedRow
 			? hasChecked()
 				? "checked"
 				: props.hasActiveFilters
@@ -46,14 +44,17 @@ export function CsvCodeCheckDialog(props: {
 				? props.hasActiveFilters
 					? "filtered"
 					: "all"
-				: initialScope,
-	);
-	const [fileScope, setFileScope] = createSignal<CodeFileScopeId>(props.lastSpec?.fileScope ?? "code");
-	const [include, setInclude] = createSignal(props.lastSpec?.include ?? "");
-	const [exclude, setExclude] = createSignal(props.lastSpec?.exclude ?? props.defaultExclude);
-	const [wholeWord, setWholeWord] = createSignal(props.lastSpec?.wholeWord ?? true);
-	const [caseSensitive, setCaseSensitive] = createSignal(props.lastSpec?.caseSensitive ?? false);
-	const [splitLists, setSplitLists] = createSignal(looksLikeListColumn(props.table.rows, safeInitialCol));
+				: initialScope;
+	};
+
+	const [column, setColumn] = createSignal(untrack(safeInitialCol));
+	const [rowScope, setRowScope] = createSignal<CodeCheckRowScope>(untrack(computeInitialScope));
+	const [fileScope, setFileScope] = createSignal<CodeFileScopeId>(untrack(() => props.lastSpec?.fileScope ?? "code"));
+	const [include, setInclude] = createSignal(untrack(() => props.lastSpec?.include ?? ""));
+	const [exclude, setExclude] = createSignal(untrack(() => props.lastSpec?.exclude ?? props.defaultExclude));
+	const [wholeWord, setWholeWord] = createSignal(untrack(() => props.lastSpec?.wholeWord ?? true));
+	const [caseSensitive, setCaseSensitive] = createSignal(untrack(() => props.lastSpec?.caseSensitive ?? false));
+	const [splitLists, setSplitLists] = createSignal(untrack(() => looksLikeListColumn(props.table.rows, safeInitialCol())));
 
 	const colName = (idx: number) => props.table.header[idx]?.text.trim() || `Column ${idx + 1}`;
 
@@ -119,7 +120,7 @@ export function CsvCodeCheckDialog(props: {
 					<h3 id={titleId}>Check values in code</h3>
 					<p class="csv-fmt-sub">Search workspace files for values from a specific column and annotate matches inline.</p>
 				</div>
-				<button type="button" class="icon-btn" title="Close (Esc)" aria-label="Close" onClick={props.onClose}>
+				<button type="button" class="icon-btn" title="Close (Esc)" aria-label="Close" onClick={() => props.onClose()}>
 					<Icon name="close" />
 				</button>
 			</div>
@@ -285,7 +286,7 @@ export function CsvCodeCheckDialog(props: {
 
 				<div class="csv-fmt-foot">
 					<span class="spacer" />
-					<button type="button" onClick={props.onClose}>
+					<button type="button" onClick={() => props.onClose()}>
 						Cancel
 					</button>
 					<button type="submit" class="primary" disabled={!targets().terms.length}>

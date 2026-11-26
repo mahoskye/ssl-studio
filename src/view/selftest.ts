@@ -128,7 +128,9 @@ export async function selftest() {
 	try {
 		// The call graph, in this webview: laid out and drawn, with its key, and its picture written out.
 		if (session.supports("ssl/callGraph")) {
-			setState("centerView", "graph");
+			setState((s) => {
+				s.centerView = "graph";
+			});
 			const graph = await until(() => {
 				const svg = document.querySelector<SVGSVGElement>(".graph svg.graph-canvas");
 				return svg && svg.querySelectorAll(".g-proc, .g-top, .g-fold").length > 0 && svg;
@@ -141,7 +143,9 @@ export async function selftest() {
 				report.graphDrawn = Boolean(box && box.width > 0 && box.height > 0);
 				report.graphPicture = await pictureParses(graph);
 			} else report.graphNodes = 0;
-			setState("centerView", "editors");
+			setState((s) => {
+				s.centerView = "editors";
+			});
 		}
 	} catch (e: any) {
 		errors.push(String(e?.stack ?? e));

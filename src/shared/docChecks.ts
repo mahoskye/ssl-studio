@@ -1,4 +1,5 @@
 import { CATALOG_FILE } from "./catalog";
+import { localDay } from "./dates";
 import { linkFile, type LinkEdit } from "./docLinks";
 import { headingAnchor } from "./docTables";
 import { documentHeadings } from "./markdownEdit";
@@ -15,6 +16,24 @@ import { pathMatchesRef } from "./workContext";
 
 /** A broken `[[wikilink]]` to rewrite: where it stands, its current name, and the suggested replacement name. */
 export type WikiLinkMend = { line: number; column: number; name: string; href: string; instead: string };
+
+/** A name as two spellings of it are compared: its last part, without a Markdown ending, its letters and digits alone. */
+const spelled = (name: string) =>
+	(name.split("\\").join("/").split("/").pop() ?? "")
+		.replace(/\.(md|markdown)$/i, "")
+		.toLowerCase()
+		.replace(/[^\p{L}\p{N}]+/gu, "");
+
+/**
+ * Whether a wikilink's mend keeps the name the link was written with: the same file at the place it moved to, or
+ * the same name spelled the way the file spells it (`[[DueSoonReport]]` for `Due-soon-report`). Any other mend
+ * names a different note, found by its likeness, and is a guess: the link may be to a note nobody has written
+ * yet. A guess is never made without showing both names and asking.
+ */
+export function mendKeepsName(mend: Pick<WikiLinkMend, "name" | "instead">): boolean {
+	const was = spelled(mend.name);
+	return was.length > 0 && was === spelled(mend.instead);
+}
 
 export type DocCheckFix =
 	| { kind: "catalogs" }
@@ -547,7 +566,11 @@ export function findDuplicateHeadings(text: string): { heading: string; line: nu
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Parses `YYYY-MM-DD` (or ISO-8601 prefix) into UTC midnight ms epoch; null if invalid. */
+/**
+ * Parses `YYYY-MM-DD` (or ISO-8601 prefix) into UTC midnight ms epoch; null if invalid. A date in a document is
+ * the day it was where the person wrote it (dates.ts), so this number is that day's place on the calendar, to be
+ * set against another day's place, and not the instant the day began.
+ */
 function parseIsoDateMs(raw: string | undefined): number | null {
 	const s = raw?.trim();
 	if (!s) return null;
@@ -561,6 +584,22 @@ function parseIsoDateMs(raw: string | undefined): number | null {
 	const check = new Date(ms);
 	if (check.getUTCFullYear() !== y || check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d) return null;
 	return ms;
+}
+
+/** The instant a written day began where the person is: local midnight of the day `parseIsoDateMs` read. */
+function dayStartMs(dayMs: number): number {
+	const day = new Date(dayMs);
+	return new Date(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate()).getTime();
+}
+
+/**
+ * How many days from one written day to another: 0 on the day itself, negative once it has passed, null when
+ * either is not a day. Both are days as documents write them, so the answer does not move with the hour.
+ */
+export function daysBetween(today: string, day: string | undefined): number | null {
+	const fromMs = parseIsoDateMs(today);
+	const toMs = parseIsoDateMs(day);
+	return fromMs === null || toMs === null ? null : Math.round((toMs - fromMs) / DAY_MS);
 }
 
 export type StaleDocIssue = {
@@ -581,16 +620,20 @@ export type StaleDocIssue = {
  * - `STATE.md` older than 14 days
  * - Controlled documents (`version`, `change-control`, `gxp-impact`, or `status: approved`) missing approval metadata
  * - Periodic review deadlines (`review-due: YYYY-MM-DD`): past due (`warn`) or due within 30 days (`note`)
+ *
+ * `today` is the day it is where the person is, written as documents write a day. The dates in a document are
+ * days of that kind, and "today" was once the UTC day instead: every evening west of UTC a review due today was
+ * called a day past due, and every morning east of UTC one due yesterday was still called due today.
  */
-export function staleDocChecks(docs: readonly DocFile[], nowMs = Date.now()): StaleDocIssue[] {
+export function staleDocChecks(docs: readonly DocFile[], nowMs = Date.now(), today = localDay(new Date(nowMs))): StaleDocIssue[] {
 	const out: StaleDocIssue[] = [];
-	const nowDate = new Date(nowMs);
-	const todayUtcMs = Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate());
 
 	for (const doc of docs) {
 		if (!doc.exists || isCatalog(doc) || isArchivedDoc(doc)) continue;
 		const mtimeMs = typeof doc.mtime === "number" && doc.mtime > 0 ? doc.mtime : null;
-		const explicitMs = parseIsoDateMs(doc.asked) ?? parseIsoDateMs(doc.date) ?? parseIsoDateMs(doc.approvedDate);
+		// An age is counted from the instant the written day began here, not from when it began in UTC.
+		const explicitDayMs = parseIsoDateMs(doc.asked) ?? parseIsoDateMs(doc.date) ?? parseIsoDateMs(doc.approvedDate);
+		const explicitMs = explicitDayMs === null ? null : dayStartMs(explicitDayMs);
 		const effectiveMs =
 			explicitMs !== null && (mtimeMs === null || explicitMs < mtimeMs) ? explicitMs : mtimeMs;
 		const ageMs = effectiveMs !== null ? Math.max(0, nowMs - effectiveMs) : null;
@@ -647,9 +690,8 @@ export function staleDocChecks(docs: readonly DocFile[], nowMs = Date.now()): St
 		}
 
 		// 5. Periodic review due date (`review-due: YYYY-MM-DD`) on active/controlled docs
-		const reviewDueMs = parseIsoDateMs(doc.reviewDue);
-		if (reviewDueMs !== null && toneOf(doc.status) !== "off") {
-			const daysUntil = Math.round((reviewDueMs - todayUtcMs) / DAY_MS);
+		const daysUntil = daysBetween(today, doc.reviewDue);
+		if (daysUntil !== null && toneOf(doc.status) !== "off") {
 			if (daysUntil < 0) {
 				const overdue = -daysUntil;
 				out.push({

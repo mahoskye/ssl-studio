@@ -3,7 +3,7 @@
 // taken out. Compared with what is staged (failing that, the last commit),
 // so that staging a change clears its marks. Which lines differ is worked
 // out in src/shared/lineDiff.ts; this draws them and keeps them current.
-import { createEffect, on, onCleanup } from "solid-js";
+import { createEffect, createMemo, onCleanup } from "solid-js";
 import { lineChanges } from "../../shared/lineDiff";
 import { backend } from "../backend";
 import { gitStatus, gitVersion } from "../git";
@@ -50,35 +50,39 @@ export function useGitMarks(editor: monaco.editor.IStandaloneCodeEditor, active:
 	};
 
 	// The file shown, and what git has of it, either of which may change.
-	createEffect(
-		on([active, gitVersion, () => Boolean(gitStatus())], ([path, , repository], before) => {
-			// Another file has other marks. The same file keeps the ones it has until git has answered again: asked
-			// on every save, an answer that says the same would otherwise make them blink.
-			if (path !== before?.[0] || !repository) {
+	const source = createMemo(
+		() => [active(), gitVersion(), Boolean(gitStatus())] as const,
+		{ equals: (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] },
+	);
+	createEffect(source, ([path, , repository], before) => {
+		// Another file has other marks. The same file keeps the ones it has until git has answered again: asked
+		// on every save, an answer that says the same would otherwise make them blink.
+		if (path !== before?.[0] || !repository) {
+			clearTimeout(timer);
+			timer = undefined;
+			base = null;
+			marks.clear();
+		}
+		if (!path || !repository || isUntitled(path) || documents.get(path)?.binary) return;
+		let stale = false;
+		backend.gitBase(path, "index").then(
+			(text) => {
+				if (stale) return;
+				base = text === null ? null : text.split(/\r?\n/);
+				draw();
+			},
+			() => {
+				if (stale) return;
 				clearTimeout(timer);
 				timer = undefined;
 				base = null;
 				marks.clear();
-			}
-			if (!path || !repository || isUntitled(path) || documents.get(path)?.binary) return;
-			let stale = false;
-			onCleanup(() => (stale = true));
-			backend.gitBase(path, "index").then(
-				(text) => {
-					if (stale) return;
-					base = text === null ? null : text.split(/\r?\n/);
-					draw();
-				},
-				() => {
-					if (stale) return;
-					clearTimeout(timer);
-					timer = undefined;
-					base = null;
-					marks.clear();
-				},
-			);
-		}),
-	);
+			},
+		);
+		return () => {
+			stale = true;
+		};
+	});
 	const typed = editor.onDidChangeModelContent(() => {
 		clearTimeout(timer);
 		timer = setTimeout(draw, SETTLE_MS);

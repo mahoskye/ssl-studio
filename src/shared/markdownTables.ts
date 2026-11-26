@@ -16,6 +16,12 @@ export type MarkdownTable = {
 	alignments: TableAlign[];
 	/** Normalized rows: row 0 is the header, rows 1..N are body rows. */
 	rows: string[][];
+	/**
+	 * The cells a row has beyond the header's columns, by row (`extra[r]` belongs to `rows[r]`); not set when no
+	 * row has any. GFM draws a table without them, but they are text of the file: `rows` alone held the header's
+	 * count of cells for each row, and a table written back from it had lost the rest.
+	 */
+	extra?: string[][];
 };
 
 export type TableEdit = {
@@ -151,6 +157,7 @@ export function parseMarkdownTable(lines: readonly string[], cursorLine: number)
 	while (alignments.length < colCount) alignments.push("none");
 
 	const rows: string[][] = [normalize(headerCells)];
+	const extra: string[][] = [[]];
 	for (let i = start + 2; i <= end; i++) {
 		const rowCells = splitTableRow(lines[i]!, prefix);
 		if (!rowCells) {
@@ -158,10 +165,11 @@ export function parseMarkdownTable(lines: readonly string[], cursorLine: number)
 			break;
 		}
 		rows.push(normalize(rowCells));
+		extra.push(rowCells.slice(colCount));
 	}
 
 	if (cursorLine > end) return null;
-	return { startLine: start, endLine: end, prefix, alignments, rows };
+	return { startLine: start, endLine: end, prefix, alignments, rows, ...(extra.some((cells) => cells.length) ? { extra } : {}) };
 }
 
 /**
@@ -212,8 +220,11 @@ export function formatTableLines(table: MarkdownTable): string[] {
 		return max;
 	});
 
-	const renderRow = (cells: string[]): string => {
-		const parts = widths.map((w, c) => {
+	// A row's cells beyond the header's columns follow its last column as they were written, unpadded: they
+	// belong to no column. They were left out, so every action that writes the table again (a cell edited, Tab,
+	// a row added, Format) deleted them from rows the user had not touched.
+	const renderRow = (cells: string[], extra: readonly string[] = []): string => {
+		const parts: string[] = widths.map((w, c) => {
 			const val = cells[c] ?? "";
 			const align = table.alignments[c] ?? "none";
 			const pad = Math.max(0, w - val.length);
@@ -224,7 +235,7 @@ export function formatTableLines(table: MarkdownTable): string[] {
 			}
 			return `${val}${" ".repeat(pad)}`;
 		});
-		return `${table.prefix}| ${parts.join(" | ")} |`;
+		return `${table.prefix}| ${[...parts, ...extra].join(" | ")} |`;
 	};
 
 	const renderDelim = (): string => {
@@ -239,7 +250,7 @@ export function formatTableLines(table: MarkdownTable): string[] {
 	};
 
 	const out: string[] = [renderRow(table.rows[0] ?? []), renderDelim()];
-	for (let r = 1; r < table.rows.length; r++) out.push(renderRow(table.rows[r]!));
+	for (let r = 1; r < table.rows.length; r++) out.push(renderRow(table.rows[r]!, table.extra?.[r]));
 	return out;
 }
 
@@ -305,7 +316,20 @@ function cloneTable(table: MarkdownTable): MarkdownTable {
 		...table,
 		alignments: [...table.alignments],
 		rows: table.rows.map((r) => [...r]),
+		...(table.extra ? { extra: table.extra.map((cells) => [...cells]) } : {}),
 	};
+}
+
+/**
+ * Adds, removes or reorders rows, each with the cells it has beyond the header's columns: those are the row's
+ * own text and go where the row goes. (A column added, removed or moved leaves them where they are, after the
+ * row's last column: they belong to no column.)
+ */
+function editRows(table: MarkdownTable, edit: (rows: { cells: string[]; extra: string[] }[]) => void): void {
+	const paired = table.rows.map((cells, r) => ({ cells, extra: table.extra?.[r] ?? [] }));
+	edit(paired);
+	table.rows = paired.map((row) => row.cells);
+	if (table.extra) table.extra = paired.map((row) => row.extra);
 }
 
 /** Parses a raw Markdown table string directly into a `MarkdownTable` (0-based line indices). */
@@ -342,6 +366,55 @@ export function updateTableCell(table: MarkdownTable, row: number, col: number, 
 		next.rows[row]![col] = serializeTableCell(value);
 	}
 	return makeEdit(next, Math.max(0, row), Math.max(0, col), false);
+}
+
+/** One cell's change as a change of text: `from` and `to` are offsets in the table as it is written. */
+export type TableCellTextEdit = { from: number; to: number; insert: string };
+
+/**
+ * The edit of one cell `(row, col)` as a change of that cell's own text in `raw`, the table as it is written
+ * (`table` is `raw` parsed, see `parseTableRaw`); null when the cell already says `value`.
+ *
+ * The live table wrote the whole table again, padded, for every letter typed in a cell (`updateTableCell`): the
+ * lines the user was not in were rewritten with it, and what a rewrite does not carry was gone from them. Here
+ * nothing but the cell is touched: every other line, and the rest of its own line, stays byte for byte.
+ *
+ * - A cell the row does not have (it is shorter than the header) is written after the row's last cell, with the
+ *   empty cells between; nothing is written for it while it is empty.
+ * - A value that ends in a backslash gets a space before a pipe that follows it directly, or the backslash would
+ *   escape that pipe and join the cell to the next.
+ * - The first cell of a row written without a leading pipe is emptied by writing that pipe: left bare, the
+ *   row's first separator would be read as one and every cell would move a column to the left.
+ */
+export function tableCellTextEdit(raw: string, table: MarkdownTable, row: number, col: number, value: string): TableCellTextEdit | null {
+	if (row < 0 || row >= table.rows.length || col < 0 || col >= table.alignments.length) return null;
+	const lines = raw.split("\n");
+	const lineIdx = row === 0 ? 0 : row + 1;
+	const lineText = lines[lineIdx];
+	if (lineText === undefined) return null;
+	let lineStart = 0;
+	for (let i = 0; i < lineIdx; i++) lineStart += lines[i]!.length + 1;
+	const text = serializeTableCell(value);
+	const rowStart = table.prefix && lineText.startsWith(table.prefix) ? table.prefix.length : 0;
+	const contentStart = rowStart + (/^[ \t]*/.exec(lineText.slice(rowStart))?.[0].length ?? 0);
+	const written = splitTableRow(lineText, table.prefix)?.length ?? 0;
+
+	if (col >= written) {
+		if (!text) return null;
+		// Before what ends the line (spaces, and the `\r` of a table read with its CRLF line ends).
+		const end = lineText.trimEnd().length;
+		const closed = end - 1 > contentStart && isUnescapedPipe(lineText, end - 1, contentStart);
+		const between = "  |".repeat(col - written);
+		const at = lineStart + end;
+		return { from: at, to: at, insert: closed ? `${between} ${text} |` : ` |${between} ${text}` };
+	}
+
+	const cell = cellRangeInLine(lineText, col, table.prefix);
+	if (lineText.slice(cell.from, cell.to) === text) return null;
+	let insert = text;
+	if (!text && col === 0 && lineText[contentStart] !== "|") insert = "|";
+	else if (text.endsWith("\\") && lineText[cell.to] === "|") insert = `${text} `;
+	return { from: lineStart + cell.from, to: lineStart + cell.to, insert };
 }
 
 /** Formats the table cleanly while keeping cursor in `(row, col)`. */
@@ -387,7 +460,7 @@ export function insertTableRow(table: MarkdownTable, row: number, where: "above"
 	} else {
 		insertAt = where === "above" ? curRow : curRow + 1;
 	}
-	next.rows.splice(insertAt, 0, empty);
+	editRows(next, (rows) => rows.splice(insertAt, 0, { cells: empty, extra: [] }));
 	return makeEdit(next, insertAt, 0, true);
 }
 
@@ -395,7 +468,7 @@ export function insertTableRow(table: MarkdownTable, row: number, where: "above"
 export function deleteTableRow(table: MarkdownTable, row: number, col: number): TableEdit | null {
 	if (row <= 0 || row >= table.rows.length) return null;
 	const next = cloneTable(table);
-	next.rows.splice(row, 1);
+	editRows(next, (rows) => rows.splice(row, 1));
 	const focusRow = Math.min(row, next.rows.length - 1);
 	return makeEdit(next, focusRow, col, false);
 }
@@ -406,9 +479,11 @@ export function moveTableRow(table: MarkdownTable, row: number, col: number, dir
 	const target = row + dir;
 	if (target < 1 || target >= table.rows.length) return null;
 	const next = cloneTable(table);
-	const tmp = next.rows[row]!;
-	next.rows[row] = next.rows[target]!;
-	next.rows[target] = tmp;
+	editRows(next, (rows) => {
+		const tmp = rows[row]!;
+		rows[row] = rows[target]!;
+		rows[target] = tmp;
+	});
 	return makeEdit(next, target, col, false);
 }
 
@@ -459,16 +534,17 @@ export function setTableAlignment(table: MarkdownTable, row: number, col: number
 export function sortTableByColumn(table: MarkdownTable, row: number, col: number, dir: "asc" | "desc"): TableEdit {
 	const next = cloneTable(table);
 	if (next.rows.length <= 2) return makeEdit(next, Math.max(0, row), col, false);
-	const header = next.rows[0]!;
-	const body = next.rows.slice(1);
 	const strip = (s: string) => s.replace(/[`*_~[\]]/g, "").trim();
-	body.sort((a, b) => {
-		const av = strip(a[col] ?? "");
-		const bv = strip(b[col] ?? "");
-		const cmp = av.localeCompare(bv, undefined, { numeric: true, sensitivity: "base" });
-		return dir === "asc" ? cmp : -cmp;
+	editRows(next, (rows) => {
+		const body = rows.splice(1);
+		body.sort((a, b) => {
+			const av = strip(a.cells[col] ?? "");
+			const bv = strip(b.cells[col] ?? "");
+			const cmp = av.localeCompare(bv, undefined, { numeric: true, sensitivity: "base" });
+			return dir === "asc" ? cmp : -cmp;
+		});
+		rows.push(...body);
 	});
-	next.rows = [header, ...body];
 	return makeEdit(next, Math.max(0, row), col, false);
 }
 

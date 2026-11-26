@@ -3,7 +3,7 @@
 // outlined; a click or a drag on it moves the view there. It is a pointer's
 // convenience and is hidden from a screen reader: the arrow keys already move
 // through the picture node by node.
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createSignal, For, onSettled, Show } from "solid-js";
 import { centredOn, mapScaleIn, outOfSight, seen, type Rect, type Size, type View } from "./canvas";
 
 // How large the map is and where it sits is canvas.ts's (mapScaleIn, mapArea): what moves the view clear of it reads the same.
@@ -12,7 +12,7 @@ export type MapBox = Rect & { /** What it is, for its shade: a frame around othe
 
 export function Minimap(props: { content: Size; boxes: readonly MapBox[]; view: View; /** The element the picture is drawn in: its size is the view's. */ host: () => Element | undefined; onMove: (view: View) => void }) {
 	const [box, setBox] = createSignal<Size>({ width: 0, height: 0 });
-	onMount(() => {
+	onSettled(() => {
 		const host = props.host();
 		if (!host) return;
 		const measure = () => {
@@ -23,7 +23,7 @@ export function Minimap(props: { content: Size; boxes: readonly MapBox[]; view: 
 		if (typeof ResizeObserver === "undefined") return;
 		const observer = new ResizeObserver(measure);
 		observer.observe(host);
-		onCleanup(() => observer.disconnect());
+		return () => observer.disconnect();
 	});
 	const k = () => mapScaleIn(props.content, box());
 	const part = () => seen(props.view, box());

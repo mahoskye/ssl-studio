@@ -248,9 +248,73 @@ export function overLimit(plan: Plan, units: SpecUnit[], limit: number): { scrip
 	return [...totals].filter(([, lines]) => lines > limit).map(([script, lines]) => ({ script, lines }));
 }
 
-/** The plan as the spec was written from: words and structure, not who answered what when. */
+/** What the plan says, in the order it says it: each node's words and each way on, and nothing of where they are drawn. */
+const meaningOf = (plan: Plan) => [
+	plan.title,
+	plan.goal,
+	plan.nodes.map((n) => [n.id, n.kind, n.text, n.ref ?? "", n.notes ?? ""]),
+	plan.edges.map((e) => [e.from, e.to, e.label ?? ""]),
+	decisionsOf(plan).map((d) => [d.question, d.answer]),
+];
+
+/**
+ * The plan as the spec was written from: words and structure, not who answered what when, and not where a node
+ * or a wire is drawn. A node's offset, a wire's route and a node's group were once part of this (see
+ * `legacyPlanHash`), so dragging a node made the plan doc, the build and the test script out of date, and the
+ * advice was then to write and build them again. Of a node it takes what `nodePrint` in `built.ts` takes: its
+ * kind, words, target and notes. Documents linked to a node are left out there too.
+ */
 export function planHash(plan: Plan): string {
+	return hashText(JSON.stringify(meaningOf(plan)));
+}
+
+/**
+ * The hash as it was made before layout was left out of it. Plan docs, build runs and test scripts written
+ * then hold this one, and must still read as current: nothing new is written with it.
+ */
+export function legacyPlanHash(plan: Plan): string {
 	return hashText(JSON.stringify([plan.title, plan.goal, plan.nodes, plan.edges, decisionsOf(plan).map((d) => [d.question, d.answer])]));
+}
+
+/** The plan with no node offset and no wire route: how most plans stood when an older hash was taken of them. */
+const undrawn = (plan: Plan): Plan => ({
+	...plan,
+	nodes: plan.nodes.map((n) => {
+		if (!("offset" in n)) return n;
+		const { offset: _drawn, ...rest } = n;
+		return rest as PlanNode;
+	}),
+	edges: plan.edges.map((e) => {
+		if (!("route" in e)) return e;
+		const { route: _drawn, ...rest } = e;
+		return rest as PlanEdge;
+	}),
+});
+
+/**
+ * Whether a hash kept in a plan doc, a build run or a recorded test script is of this plan as it now stands.
+ * It may be of either kind. An older one is also taken as current when it is of this plan before anything in
+ * it was moved by hand, so a plan written before the change does not go out of date at the first drag.
+ */
+export function planHashMatches(stored: string | null | undefined, plan: Plan): boolean {
+	if (!stored) return false;
+	return stored === planHash(plan) || stored === legacyPlanHash(plan) || stored === legacyPlanHash(undrawn(plan));
+}
+
+/**
+ * What a test script was written from: the plan, and the business test cases written on it, which the agent is
+ * given beside the chart's paths (`testsPrompt`). The cases are not part of `planHash`: a new test case does not
+ * make the plan doc or the build out of date, only the script that was written without it.
+ */
+export function testsHash(plan: Plan): string {
+	const cases = planTestsOf(plan).map((t) => [t.id, t.title, t.node ?? "", t.journey ?? 0, t.given ?? "", t.expect ?? "", t.notes ?? ""]);
+	return hashText(JSON.stringify([meaningOf(plan), cases]));
+}
+
+/** Whether a recorded test script is of this plan and its test cases. A script recorded before the cases counted holds a plan hash. */
+export function testsHashMatches(stored: string | null | undefined, plan: Plan): boolean {
+	if (!stored) return false;
+	return stored === testsHash(plan) || stored === legacyPlanHash(plan) || stored === legacyPlanHash(undrawn(plan));
 }
 
 export function hashText(text: string): string {
@@ -669,7 +733,7 @@ export function checkPlanDocs(plan: Plan, options: PlanDocCheckOptions): Finding
 		});
 	}
 	const recorded = options.specText ? specHash(options.specText) : null;
-	if (recorded !== null && recorded !== planHash(plan)) {
+	if (recorded !== null && !planHashMatches(recorded, plan)) {
 		out.push({
 			severity: "warning",
 			code: "plan-stale-spec",
@@ -1317,6 +1381,36 @@ export function marqueeNodeIds(
 		.map((b) => b.id);
 }
 
+/**
+ * Whether a press that began a marquee was dragged at all, in screen pixels. A Shift+click begins a marquee too,
+ * and one that never moved is the click's to handle: a marquee of no size selects the node under the pointer, and
+ * the click that followed then took that node out again, so Shift+click left nothing selected.
+ */
+export function marqueeMoved(start: { x: number; y: number }, end: { x: number; y: number }): boolean {
+	return Math.hypot(end.x - start.x, end.y - start.y) > 4;
+}
+
+/**
+ * Shift+click on a node: it joins what is selected, or leaves it if it was there, and nothing else changes.
+ * `lead` is the node the text cursor goes to: the one added, or one that is left.
+ */
+export function toggleSelection(current: ReadonlySet<string>, id: string): { ids: Set<string>; lead: string | null } {
+	const ids = new Set(current);
+	if (ids.has(id)) ids.delete(id);
+	else ids.add(id);
+	return { ids, lead: ids.has(id) ? id : ([...ids][0] ?? null) };
+}
+
+/**
+ * The line to put the text cursor back on after an edit made from the chart, so that the selection stays where
+ * it was. The chart's selection is the node on the cursor's line, and the cursor does not hold its line through an
+ * edit of several lines (an auto-layout, a nudge of several nodes): the editor leaves it at one end of what was
+ * replaced, on another node's line. Null when nothing was selected, or the node is no longer in the plan.
+ */
+export function lineToKeep(text: string, plan: Plan, lead: string | null | undefined): number | null {
+	return lead ? (nodeLines(text, plan).get(lead) ?? null) : null;
+}
+
 /** Applies one delta `(dx, dy)` to every node in `ids`, producing a single clean Plan update. */
 export function batchOffsetPlanNodes(
 	plan: Plan,
@@ -1448,7 +1542,21 @@ export function copyPlanSelection(plan: Plan, ids: ReadonlySet<string>, sourcePl
 	};
 }
 
-/** Pastes copied nodes and internal edges with fresh IDs and a slight canvas offset. */
+/**
+ * Pastes copied nodes and internal edges with fresh IDs. Back into the plan they were copied from, each keeps its
+ * stage and stands a little off where its original was nudged to.
+ *
+ * Its stage, that is, while the plan still has it: the stage with the id and the name it was copied under. A
+ * stage's id is free again once the stage has lost its last step, and the next stage made takes it. Going by the
+ * id alone, a step copied from "Validation" and pasted after that had happened landed in whichever stage held
+ * the id by then. When the stage is not there any more, the step goes where one from another plan would.
+ *
+ * Into another plan, nothing of the first plan's layout comes along. A stage's id means something only in its
+ * own plan, so a step joins the stage of the same name where the other plan has one, and stands outside every
+ * stage otherwise: the stage itself is not copied, as a frame is not on a whiteboard when only what is in it
+ * was. Its offset is left behind as well, since that is a distance from where the first plan's layout had put
+ * it: the steps are laid out as any new loose step is, and the chart selects them and pans to the first.
+ */
 export function pastePlanSelection(
 	plan: Plan,
 	clip: PlanClipboard,
@@ -1458,7 +1566,7 @@ export function pastePlanSelection(
 ): { plan: Plan; pastedIds: string[] } {
 	if (!clip.nodes.length) return { plan, pastedIds: [] };
 	const idMap = new Map<string, string>();
-	const validGroups = new Set(plan.groups.map((g) => g.id));
+	const stageNames = new Map(plan.groups.map((g) => [g.id, g.name]));
 	const groupByName = new Map(plan.groups.map((g) => [g.name.trim().toLowerCase(), g.id]));
 	const samePlan = !clip.sourcePlanPath || !targetPlanPath || clip.sourcePlanPath === targetPlanPath;
 	let alreadyHasStart = plan.nodes.some((n) => n.kind === "start");
@@ -1470,21 +1578,24 @@ export function pastePlanSelection(
 		idMap.set(src.id, freshId);
 		pastedIds.push(freshId);
 		const curOff = offsetFor(src.offset, dir);
-		const nextOffset: PlanOffset = {
-			x: Math.round(curOff.x + shift),
-			y: Math.round(curOff.y + shift),
-			...(dir === "RIGHT" ? { dir: "RIGHT" } : {}),
-		};
+		const nextOffset: PlanOffset | null = samePlan
+			? {
+					x: Math.round(curOff.x + shift),
+					y: Math.round(curOff.y + shift),
+					...(dir === "RIGHT" ? { dir: "RIGHT" } : {}),
+				}
+			: null;
 		const docs = nodeDocsOf(src);
 		const kind: NodeKind = src.kind === "start" && alreadyHasStart ? "step" : src.kind;
 		if (kind === "start") alreadyHasStart = true;
 
 		let resolvedGroup: string | undefined;
 		if (typeof src.group === "string" && src.group) {
-			if (samePlan && validGroups.has(src.group)) {
+			const copiedName = clip.groupNames?.[src.group];
+			if (samePlan && copiedName !== undefined && stageNames.get(src.group) === copiedName) {
 				resolvedGroup = src.group;
-			} else if (!samePlan && clip.groupNames?.[src.group]) {
-				resolvedGroup = groupByName.get(clip.groupNames[src.group]!.trim().toLowerCase());
+			} else if (copiedName) {
+				resolvedGroup = groupByName.get(copiedName.trim().toLowerCase());
 			}
 		}
 
@@ -1509,7 +1620,7 @@ export function pastePlanSelection(
 			...(resolvedGroup ? { group: resolvedGroup } : {}),
 			...(typeof src.notes === "string" && src.notes ? { notes: src.notes } : {}),
 			...(docs.length ? { docs } : {}),
-			offset: nextOffset,
+			...(nextOffset ? { offset: nextOffset } : {}),
 		};
 		working = { ...working, nodes: [...working.nodes, clone] };
 	}
@@ -1523,6 +1634,29 @@ export function pastePlanSelection(
 		newEdges.push({ ...edgeRest, from, to, ...(typeof e.label === "string" && e.label ? { label: e.label } : {}) });
 	}
 	return { plan: { ...working, edges: [...working.edges, ...newEdges] }, pastedIds };
+}
+
+/** What was copied on a chart last, for a paste on any chart. */
+let copiedSteps: PlanClipboard | null = null;
+
+/**
+ * Copy on a chart: the steps, with the plan they are copied from. The plan is asked for here, where it cannot be
+ * left out. The chart used to call `copyPlanSelection` and `pastePlanSelection` itself, without it, so a paste
+ * into another plan was taken for a paste back into the same one, and a step went into whichever stage there
+ * happened to have the id its own stage had in the plan it came from. Null when there is nothing to copy; what
+ * was copied before then stays.
+ */
+export function copySteps(plan: Plan, ids: ReadonlySet<string>, planPath: string): PlanClipboard | null {
+	const clip = copyPlanSelection(plan, ids, planPath);
+	if (clip) copiedSteps = clip;
+	return clip;
+}
+
+export const hasCopiedSteps = (): boolean => copiedSteps !== null;
+
+/** Paste on a chart: what was copied last, into this plan. Null when nothing has been copied. */
+export function pasteSteps(plan: Plan, planPath: string, dir: LayoutDirection = "DOWN"): { plan: Plan; pastedIds: string[] } | null {
+	return copiedSteps ? pastePlanSelection(plan, copiedSteps, dir, 36, planPath) : null;
 }
 
 // --- Plan node lookup for Call Graph -> Plan jumps (Wave 4.4) --------------------

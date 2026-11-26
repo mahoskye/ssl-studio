@@ -323,9 +323,10 @@ the question box, to send as they are or to change first.
   description is a tree of nodes) and GitHub (`gh issue list --json` and
   its issues API). Jira Cloud's CSV export, and other systems, have not
   been read.
-- A table a script uses that no registry lists. It needs the language
-  server to say which tables a script uses
-  ([LSP-REQUESTS.md](LSP-REQUESTS.md), L6).
+- A table a script uses that no registry lists. The IDE has to find the
+  tables a script names itself: the request for the language server to list
+  them was withdrawn ([LSP-REQUESTS.md](LSP-REQUESTS.md), L6). It can do so
+  reliably once the server says where comments and strings are (L9).
 - Every stage of the planner has been run on opencode 2.3 with a local
   model at Ollama's default context, where a build and a test script are
   cut and do not pass. None has been tried with a larger context or a

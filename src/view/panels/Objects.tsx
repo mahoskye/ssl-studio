@@ -5,7 +5,8 @@
 // Plan (.plan.json) stages & steps + drag-to-chart SSL procedures, and
 // outlines for TOML / INI / JSON / SQL / YAML (shared/outline.ts).
 import { Icon, type IconName } from "../Icon";
-import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
+import { createAsyncQuery } from "../asyncQuery";
 import { backend } from "../backend";
 import { activeLiveEditor, jumpToTableColumn, liveSelectionVersion, onSplitScrollSync } from "../editor/liveBridge";
 import { mdOutline } from "../editor/mdOutline";
@@ -14,7 +15,7 @@ import { lspReadyEpoch, session } from "../lsp/session";
 import { activeDoc, activePath, canonical, documents, markdownMode, notify, openFile, setState, state } from "../state";
 import { cycleRegionColor, isRegion, regionColor, symbolPath } from "../editor/regions";
 import { isPlanPath, PROCEDURE_DRAG } from "../plan/model";
-import { docs, isMarkdown, isTable } from "../project";
+import { docs, docsLoading, isMarkdown, isTable } from "../project";
 import { parseCsv } from "../../shared/csv";
 import { frontMatter } from "../../shared/frontMatter";
 import {
@@ -123,10 +124,16 @@ const isActiveCsv = () => {
 
 export function useSymbols() {
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deps = createMemo(
+		() => [activePath(), state.lsp.state, lspReadyEpoch(), state.kindVersion] as const,
+		{
+			equals: (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3],
+		},
+	);
 	createEffect(
-		on([activePath, () => state.lsp.state, lspReadyEpoch, () => state.kindVersion], () => {
+		() => deps(),
+		([path]) => {
 			clearTimeout(timer);
-			const path = activePath();
 			const doc = activeDoc();
 			setSymbols([]);
 			setMdSections([]);
@@ -145,8 +152,10 @@ export function useSymbols() {
 					clearTimeout(timer);
 					timer = setTimeout(readPlan, 250);
 				});
-				onCleanup(() => (clearTimeout(timer), sub.dispose()));
-				return;
+				return () => {
+					clearTimeout(timer);
+					sub.dispose();
+				};
 			}
 
 			if (isMarkdown(path)) {
@@ -161,8 +170,10 @@ export function useSymbols() {
 					clearTimeout(timer);
 					timer = setTimeout(readMd, 250);
 				});
-				onCleanup(() => (clearTimeout(timer), sub.dispose()));
-				return;
+				return () => {
+					clearTimeout(timer);
+					sub.dispose();
+				};
 			}
 
 			if (isTable(path) || doc.model.getLanguageId() === "csv") {
@@ -177,8 +188,10 @@ export function useSymbols() {
 					clearTimeout(timer);
 					timer = setTimeout(readCsv, 250);
 				});
-				onCleanup(() => (clearTimeout(timer), sub.dispose()));
-				return;
+				return () => {
+					clearTimeout(timer);
+					sub.dispose();
+				};
 			}
 
 			// A document that is not SSL is outlined here, from its own text: nothing is asked of the language server.
@@ -189,8 +202,10 @@ export function useSymbols() {
 					clearTimeout(timer);
 					timer = setTimeout(read, 300);
 				});
-				onCleanup(() => (clearTimeout(timer), sub.dispose()));
-				return;
+				return () => {
+					clearTimeout(timer);
+					sub.dispose();
+				};
 			}
 			if (doc.model.getLanguageId() !== "ssl") return;
 			let current = true;
@@ -217,12 +232,12 @@ export function useSymbols() {
 				clearTimeout(timer);
 				timer = setTimeout(load, 400);
 			});
-			onCleanup(() => {
+			return () => {
 				current = false;
 				clearTimeout(timer);
 				sub.dispose();
-			});
-		}),
+			};
+		},
 	);
 }
 
@@ -231,11 +246,11 @@ const PROCEDURE_KINDS = new Set([6, 12]);
 
 /** With a plan open: the workspace's procedures, to drag into the chart as calls. */
 function Procedures(props: { filter: string }) {
-	const [all] = createResource(
+	const [all] = createAsyncQuery(
 		() => {
 			const epoch = lspReadyEpoch();
 			const root = state.workspace?.root;
-			return state.lsp.state === "running" && epoch > 0 && root ? ([root, epoch] as const) : false;
+			return state.lsp.state === "running" && epoch > 0 && root ? `${root}\0${epoch}` : false;
 		},
 		() => session.workspaceSymbols("").then((list) => ({ list, error: "" }), (e) => ({ list: [], error: String(e?.message ?? e) })),
 	);
@@ -259,35 +274,40 @@ function Procedures(props: { filter: string }) {
 		<Show when={list().length} fallback={<p class="hint">{empty()}</p>}>
 			<p class="hint">Drag a procedure into the chart to call it. Enter opens it.</p>
 			<Rows label="Procedures in the workspace, by script">
-				<For each={scripts()}>
+				<For each={scripts()} keyed={(s) => s.file}>
 					{(script) => (
 						<RowGroup
-							title={script.file}
+							title={script().file}
 							headClass="group-head proc-script"
 							head={
 								<>
-									<span class="proc-script-name">{baseName(script.file)}</span>
+									<span class="proc-script-name">{baseName(script().file)}</span>
 									{/* A long folder keeps its end, the part that tells two scripts of one name apart. */}
 									<span class="meta">
-										<bdi>{dirName(script.file)}</bdi>
+										<bdi>{dirName(script().file)}</bdi>
 									</span>
 								</>
 							}
 						>
-							<For each={script.items}>
+							<For each={script().items} keyed={(s) => `${s.location.uri}#${s.name}:${s.location.range.start.line}`}>
 								{(s) => (
 									<Row
-										key={`${s.location.uri}#${s.name}`}
+										key={`${s().location.uri}#${s().name}`}
 										draggable={true}
-										title={`${s.name} in ${script.file}`}
+										title={`${s().name} in ${script().file}`}
 										onDragStart={(e) => {
-											e.dataTransfer?.setData(PROCEDURE_DRAG, s.name);
+											e.dataTransfer?.setData(PROCEDURE_DRAG, s().name);
 											if (e.dataTransfer) e.dataTransfer.effectAllowed = "copy";
 										}}
-										onActivate={() => void openFile(monaco.Uri.parse(s.location.uri).fsPath, { reveal: { line: s.location.range.start.line + 1, column: s.location.range.start.character + 1 } })}
+										onActivate={() => {
+											const sym = s();
+											void openFile(monaco.Uri.parse(sym.location.uri).fsPath, {
+												reveal: { line: sym.location.range.start.line + 1, column: sym.location.range.start.character + 1 },
+											});
+										}}
 									>
 										<Icon name="symbol-method" class="icon" />
-										<span class="label">{s.name}</span>
+										<span class="label">{s().name}</span>
 									</Row>
 								)}
 							</For>
@@ -540,19 +560,38 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 	const [trackSource, setTrackSource] = createSignal<"cursor" | "scroll">("cursor");
 	const [sourceScrollLine, setSourceScrollLine] = createSignal<{ path: string; line: number } | null>(null);
 
-	createEffect(on(() => state.cursor.line, () => setTrackSource("cursor"), { defer: true }));
-	createEffect(on(() => liveSelectionVersion(), () => setTrackSource("cursor"), { defer: true }));
-	createEffect(on(() => mdOutline()?.activeId, () => setTrackSource("scroll"), { defer: true }));
-	createEffect(() => {
-		const unsub = onSplitScrollSync((payload) => {
+	const cursorLine = createMemo(() => state.cursor.line);
+	const mdActiveId = createMemo(() => mdOutline()?.activeId);
+	createEffect(
+		() => cursorLine(),
+		() => {
+			setTrackSource("cursor");
+		},
+		{ defer: true },
+	);
+	createEffect(
+		() => liveSelectionVersion(),
+		() => {
+			setTrackSource("cursor");
+		},
+		{ defer: true },
+	);
+	createEffect(
+		() => mdActiveId(),
+		() => {
+			setTrackSource("scroll");
+		},
+		{ defer: true },
+	);
+	onSettled(() =>
+		onSplitScrollSync((payload) => {
 			const p = activePath();
 			if (!p || !isMarkdown(p) || canonical(payload.path) !== canonical(p)) return;
 			if (markdownMode(p) !== "source") return;
 			setSourceScrollLine({ path: payload.path, line: payload.topLine });
 			setTrackSource("scroll");
-		});
-		onCleanup(unsub);
-	});
+		}),
+	);
 
 	const toggle = (key: string) =>
 		setOutlineClosed((set) => {
@@ -629,7 +668,9 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 		if (live && canonical(live.path) === canonical(path)) {
 			live.reveal({ line: newLine, column: 1 });
 		} else {
-			setState("cursor", { line: newLine, column: 1 });
+			setState((s) => {
+				s.cursor = { line: newLine, column: 1 };
+			});
 			if (markdownMode(path) === "source") void openFile(path, { reveal: { line: newLine, column: 1 } });
 		}
 	};
@@ -990,7 +1031,9 @@ function PlanOutline(props: { filter?: string; compact?: boolean; label?: string
 	const jumpToLine = (line: number) => {
 		const path = activePath();
 		if (!path) return;
-		setState("cursor", { line, column: 1 });
+		setState((s) => {
+			s.cursor = { line, column: 1 };
+		});
 		void openFile(path, { reveal: { line, column: 1 } });
 	};
 
@@ -1002,9 +1045,9 @@ function PlanOutline(props: { filter?: string; compact?: boolean; label?: string
 	return (
 		<Show when={visibleStages().length} fallback={<p class="hint">{empty()}</p>}>
 			<Rows role="tree" label={props.label ?? "Outline of this plan"}>
-				<For each={visibleStages()}>
+				<For each={visibleStages()} keyed={(s) => s.id}>
 					{(stage) => {
-						const key = () => planCollapseKey(activePath(), stage.id);
+						const key = () => planCollapseKey(activePath(), stage().id);
 						const open = () => Boolean(filter()) || !outlineClosed().has(key());
 						return (
 							<>
@@ -1012,56 +1055,56 @@ function PlanOutline(props: { filter?: string; compact?: boolean; label?: string
 									role="treeitem"
 									key={key()}
 									level={1}
-									expanded={stage.nodes.length ? open() : undefined}
+									expanded={stage().nodes.length ? open() : undefined}
 									style={{ "padding-left": "8px" }}
-									title={`${stage.name} (${count(stage.nodes.length, "step")})`}
-									onActivate={() => jumpToLine(stage.nodes[0]?.line ?? stage.line)}
+									title={`${stage().name} (${count(stage().nodes.length, "step")})`}
+									onActivate={() => jumpToLine(stage().nodes[0]?.line ?? stage().line)}
 									onToggle={() => toggle(key())}
 								>
 									<span
 										class="twisty"
 										aria-hidden="true"
 										onClick={(e) => {
-											if (!stage.nodes.length) return;
+											if (!stage().nodes.length) return;
 											e.stopPropagation();
 											toggle(key());
 										}}
 									>
-										<Show when={stage.nodes.length}>
+										<Show when={stage().nodes.length}>
 											<Icon name={open() ? "chevron-down" : "chevron-right"} />
 										</Show>
 									</span>
 									<Icon name="layers" class="icon" />
 									<span class="label" style={{ "font-weight": "600" }}>
-										{stage.name}
+										{stage().name}
 									</span>
-									<span class="meta">{stage.nodes.length}</span>
+									<span class="meta">{stage().nodes.length}</span>
 								</Row>
-								<Show when={stage.nodes.length && open()}>
+								<Show when={stage().nodes.length && open()}>
 									<div role="group">
-										<For each={stage.nodes}>
+										<For each={stage().nodes} keyed={(n) => n.id}>
 											{(node) => {
-												const here = () => activeNodeId() === node.id;
+												const here = () => activeNodeId() === node().id;
 												return (
 													<Row
 														role="treeitem"
-														key={`plan-node:${node.id}`}
+														key={`plan-node:${node().id}`}
 														classList={{ here: here() }}
 														level={2}
 														style={{ "padding-left": "22px" }}
-														title={`${node.kind}: ${node.text}${node.ref ? ` (${node.ref})` : ""} — line ${node.line}`}
-														onActivate={() => jumpToLine(node.line)}
+														title={`${node().kind}: ${node().text}${node().ref ? ` (${node().ref})` : ""} — line ${node().line}`}
+														onActivate={() => jumpToLine(node().line)}
 													>
 														<span class="twisty" aria-hidden="true" />
-														<Icon name={planNodeIcon(node.kind)} class="icon" />
-														<span class="label">{node.text}</span>
+														<Icon name={planNodeIcon(node().kind)} class="icon" />
+														<span class="label">{node().text}</span>
 														<Show when={here()}>
 															<span class="here-mark" title="Selected step">
 																<Icon name="arrow-left" />
 																<span class="visually-hidden">Selected step</span>
 															</span>
 														</Show>
-														<span class="meta">{node.kind}</span>
+														<span class="meta">{node().kind}</span>
 													</Row>
 												);
 											}}
@@ -1230,27 +1273,43 @@ export function Objects() {
 	let mdInfoTabEl: HTMLButtonElement | undefined;
 	let mdOutlineTabEl: HTMLButtonElement | undefined;
 
+	const currentActivePath = createMemo(() => activePath());
+	const mdAutoDefault = createMemo(
+		() => {
+			const p = currentActivePath();
+			if (!p || !isMarkdown(p)) return null;
+			const key = canonical(p);
+			const loading = docsLoading();
+			const isTicketDoc = docs().some((f) => f.group === "tickets" && f.ticket && canonical(f.path) === key);
+			return { key, loading, isTicketDoc };
+		},
+		{
+			equals: (a, b) =>
+				a === b ||
+				(Boolean(a && b) && a!.key === b!.key && a!.loading === b!.loading && a!.isTicketDoc === b!.isTicketDoc),
+		},
+	);
 	// Default to Info for Markdown files with frontmatter or ticket metadata when user hasn't pinned a preference yet.
 	createEffect(
-		on(activePath, (p) => {
-			if (!p || !isMarkdown(p) || hasSavedMarkdownTab()) return;
-			const key = canonical(p);
-			if (key === lastAutoDefaultMdPath) return;
-			lastAutoDefaultMdPath = key;
-			const d = documents.get(key);
+		mdAutoDefault,
+		(info) => {
+			if (!info || hasSavedMarkdownTab()) return;
+			if (info.key === lastAutoDefaultMdPath) return;
+			const d = documents.get(info.key);
 			const hasFm = Boolean(d && !d.binary && frontMatter(d.model.getValue()).lines > 0);
-			const isTicketDoc = docs().some((f) => f.group === "tickets" && f.ticket && canonical(f.path) === key);
-			setActiveMarkdownTab(defaultMarkdownPanelTab(hasFm || isTicketDoc, null));
-		}),
+			setActiveMarkdownTab(defaultMarkdownPanelTab(hasFm || info.isTicketDoc, null));
+			if (!info.loading) lastAutoDefaultMdPath = info.key;
+		},
 	);
 
 	// Honor explicit tab-switch requests from the Markdown editor (Info / Links / Edit YAML).
 	createEffect(
-		on(markdownPanelTabRequest, (req) => {
+		() => markdownPanelTabRequest(),
+		(req) => {
 			if (!req || req.seq <= lastHandledMdTabReqSeq) return;
 			lastHandledMdTabReqSeq = req.seq;
 			setActiveMarkdownTab(req.tab);
-		}),
+		},
 	);
 
 	const mdBrokenCount = createMemo(() => {
@@ -1305,8 +1364,8 @@ export function Objects() {
 						ref={mdInfoTabEl}
 						type="button"
 						role="tab"
-						aria-selected={mdTab() === "info"}
-						classList={{ on: mdTab() === "info" }}
+						aria-selected={mdTab() === "info" ? "true" : "false"}
+						class={{ on: mdTab() === "info" }}
 						onClick={() => chooseMarkdownPanelTab("info")}
 					>
 						<span>Info</span>
@@ -1322,8 +1381,8 @@ export function Objects() {
 						ref={mdOutlineTabEl}
 						type="button"
 						role="tab"
-						aria-selected={mdTab() === "outline"}
-						classList={{ on: mdTab() === "outline" }}
+						aria-selected={mdTab() === "outline" ? "true" : "false"}
+						class={{ on: mdTab() === "outline" }}
 						onClick={() => chooseMarkdownPanelTab("outline")}
 					>
 						Outline
@@ -1340,8 +1399,8 @@ export function Objects() {
 					<button
 						type="button"
 						role="tab"
-						aria-selected={planTab() === "outline"}
-						classList={{ on: planTab() === "outline" }}
+						aria-selected={planTab() === "outline" ? "true" : "false"}
+						class={{ on: planTab() === "outline" }}
 						onClick={() => setPlanTab("outline")}
 					>
 						Plan Outline
@@ -1349,8 +1408,8 @@ export function Objects() {
 					<button
 						type="button"
 						role="tab"
-						aria-selected={planTab() === "procedures"}
-						classList={{ on: planTab() === "procedures" }}
+						aria-selected={planTab() === "procedures" ? "true" : "false"}
+						class={{ on: planTab() === "procedures" }}
 						onClick={() => setPlanTab("procedures")}
 					>
 						SSL Procedures

@@ -37,10 +37,15 @@ Under [ADR 0009](0009-nothing-is-lost-or-destroyed-without-a-say.md),
 - **Changing line ends is an edit.** It can be undone, it is kept only by
   saving, and "Revert" takes it back with the rest.
 - **A replace across files shows every change before it makes any,** and
-  makes none until it is confirmed. The two find their matches with one
-  expression; what is replaced is what is in the file when the replace
-  runs, and the app says so when that is not what was listed. A search
-  that ran into its limit refuses the replace.
+  makes none until it is confirmed. It is made only in a file whose text
+  is still the text that was searched: the search takes a mark of each
+  text it finds a match in, and the replace compares it, under the
+  file's write lock on disk and against the editor's text in an open
+  file. A file that has changed since is left as it is and named, and is
+  replaced after a new search. The expression that is searched for is
+  run by the backend only, under its time budget, for files on disk and
+  for unsaved text alike. A search that ran into its limit, or out of
+  time, refuses the replace.
 - **A replaced file has a way back.** Every file that is written goes
   into its local history first, as it was. A file with a tab is changed in
   the editor, where undo takes it back as well.
@@ -59,8 +64,11 @@ Under [ADR 0009](0009-nothing-is-lost-or-destroyed-without-a-say.md),
 - A file with a zero byte in its first 8000 bytes cannot be opened as
   text here, even when it is text in an encoding this does not know.
   UTF-16 without its mark is the one exception: it opens as it did.
-- A replace cannot leave single results out: the search is narrowed
-  first, by words or by which files it looks in.
+- Single results can be left out of a replace. They are known by their
+  lines in the text that was searched, which is one reason why a text
+  that has changed since is not replaced.
+- A file edited between a search and its replace needs the search again
+  before it is replaced.
 - Local history grows by a snapshot or two for each file a replace
   writes.
 - Copying a file between two workspaces, or in from the system's file
@@ -82,3 +90,11 @@ and was changed while it was a draft; what changed is kept here.
   programs. Its text was rewritten twice more as reviews found cases it
   did not cover (`0b5b593`, `ae3e4d2`).
 - 2026-11-19, with the fixes of the review of `defb4df`: this section.
+- 2026-11-25, with the fixes of audit pass 4: the rule about replacing.
+  It said that what is replaced is what is in the file when the replace
+  runs. With single results left out, that replaced the very result that
+  had been left out once a line had been added above it. It also now
+  says where the expression is run: run in the window over unsaved text,
+  one that never ends froze the window. The consequence about leaving
+  results out was no longer true and is corrected; the one about a file
+  edited in between is new. The user has not reviewed this change.

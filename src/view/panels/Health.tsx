@@ -26,7 +26,7 @@ import { chooseFromMenu, type RowMenuEntry } from "./RowMenu";
 import { serverDown } from "./server";
 import { openStyleProfile } from "../StyleProfile";
 import { docs, setUpProject } from "../project";
-import { checksSummary, docChecks, type DocCheck, type LinkMend, type WikiLinkMend } from "../../shared/docChecks";
+import { checksSummary, docChecks, mendKeepsName, type DocCheck, type LinkMend, type WikiLinkMend } from "../../shared/docChecks";
 import { folderParts } from "../../shared/docSections";
 import { CATALOG_AREAS, isCatalog, projectDocLabel, registryTitle, toneOf } from "../../shared/projectDocs";
 import { addDatabaseRegistryRow, generateSchemaDocFromSql, mendLinks, newSchema, newTicket, recordDocApproval, updateCatalogs } from "../projectDocs";
@@ -91,6 +91,54 @@ export function applyCombinedLinkMends(
 	return { text: cur, done };
 }
 
+/**
+ * A document's wikilink mends, apart: the ones that keep the link's name (the same file, at the place it moved
+ * to) and the ones that would give the link another note's name. The second kind is a guess from the likeness
+ * of two names, and the link may be to a note nobody has written yet.
+ */
+export function splitWikiMends(mends: readonly WikiLinkMend[]): { moved: WikiLinkMend[]; guessed: WikiLinkMend[] } {
+	return { moved: mends.filter((m) => mendKeepsName(m)), guessed: mends.filter((m) => !mendKeepsName(m)) };
+}
+
+/** What is asked before links are given another note's name: each link as it is written, and as it would be. */
+export function guessedMendQuestion(docName: string, guessed: readonly WikiLinkMend[]): string {
+	const shown = guessed.slice(0, 3).map((m) => `[[${m.name}]] → [[${m.instead}]]`);
+	const more = guessed.length - shown.length;
+	const pairs = `${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
+	return guessed.length === 1
+		? `Rewrite ${pairs} in ${docName}? No note has the name as written. The new name is the closest there is, and may be a different note.`
+		: `Rewrite ${guessed.length} wikilinks in ${docName}: ${pairs}? No note has these names as written. The new names are the closest there are, and may be different notes.`;
+}
+
+/**
+ * What "Mend all broken links" makes: the mends of every link whose file moved, by document. A wikilink that
+ * would be given another note's name is not among them, since nobody has looked at it: `guessed` counts the ones
+ * left for their own rows, and `checks` the checks that have something for the bulk mend.
+ */
+export function movedLinkMends(
+	checks: readonly { path: string; fix: { kind: "links"; mends: LinkMend[] } | { kind: "mend-wikilinks"; mends: WikiLinkMend[] } }[],
+): { byPath: Map<string, { path: string; mends: CombinedLinkMend[] }>; links: number; checks: number; guessed: number } {
+	const byPath = new Map<string, { path: string; mends: CombinedLinkMend[] }>();
+	let links = 0;
+	let withMends = 0;
+	let guessed = 0;
+	for (const check of checks) {
+		const mends: CombinedLinkMend[] =
+			check.fix.kind === "mend-wikilinks"
+				? splitWikiMends(check.fix.mends).moved.map((edit) => ({ kind: "wiki", edit }))
+				: check.fix.mends.map((edit) => ({ kind: "path", edit }));
+		if (check.fix.kind === "mend-wikilinks") guessed += check.fix.mends.length - mends.length;
+		if (!mends.length) continue;
+		const key = canonical(check.path);
+		const entry = byPath.get(key) ?? { path: check.path, mends: [] };
+		entry.mends.push(...mends);
+		byPath.set(key, entry);
+		links += mends.length;
+		withMends++;
+	}
+	return { byPath, links, checks: withMends, guessed };
+}
+
 export function Health() {
 	const limits = () => state.settings.limits;
 	const findings = () => {
@@ -147,9 +195,12 @@ export function Health() {
 	const [healthMode, setHealthMode] = createSignal<"all" | "ticket" | "warnings">("all");
 	const [healthQuery, setHealthQuery] = createSignal("");
 	const activeTicketKey = () => state.settings.activeTicket?.trim() || "";
-	createEffect(() => {
-		if (!activeTicketKey() && healthMode() === "ticket") setHealthMode("all");
-	});
+	createEffect(
+		() => !activeTicketKey() && healthMode() === "ticket",
+		(shouldReset) => {
+			if (shouldReset) setHealthMode("all");
+		},
+	);
 	const activeTicketScope = createMemo(() => {
 		const key = activeTicketKey();
 		if (!key) return { paths: new Set<string>(), folders: [] as string[], keys: new Set<string>() };
@@ -249,7 +300,9 @@ export function Health() {
 				(c.fix?.kind === "links" || c.fix?.kind === "mend-wikilinks") && c.fix.mends.length > 0,
 		),
 	);
-	const mendableDocCount = createMemo(() => new Set(mendableChecks().map((c) => canonical(c.path))).size);
+	/** What "Mend all broken links" would make: only the links whose files moved, never a guess at another note's name. */
+	const bulkMends = createMemo(() => movedLinkMends(mendableChecks()));
+	const mendableDocCount = createMemo(() => bulkMends().byPath.size);
 	const reanchorableCitations = createMemo(() => filteredCitations().filter((c) => Boolean(c.reanchor)));
 
 	/** Reads live editor text when open as a non-disposed text buffer, otherwise reads from disk. */
@@ -285,7 +338,7 @@ export function Health() {
 		const next = `${cur.slice(0, offset)}x${cur.slice(offset + 1)}`;
 		try {
 			await writeDocEdit(task.path, next);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 			notify(`Ticked off task in ${task.ticket ?? task.title ?? baseName(task.path)}.`);
 		} catch (e: any) {
@@ -301,7 +354,7 @@ export function Health() {
 		if (next === cur) return;
 		try {
 			await writeDocEdit(issue.docPath, next);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 			notify(`Re-anchored citation to L${issue.reanchor.from}-L${issue.reanchor.to}.`);
 		} catch (e: any) {
@@ -334,7 +387,7 @@ export function Health() {
 		if (!next || next === freshDoc) return notify("Could not refresh excerpt — the document changed since.", "error");
 		try {
 			await writeDocEdit(issue.docPath, next);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 			notify(`Refreshed quoted excerpt in ${baseName(issue.docPath)}.`);
 		} catch (e: any) {
@@ -386,7 +439,7 @@ export function Health() {
 			}
 		}
 		if (changedFiles) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 		}
 		if (updated) {
@@ -405,7 +458,7 @@ export function Health() {
 		try {
 			await backend.trash(path);
 			fileRemoved(path);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 			notify(`Moved unused attachment ${baseName(path)} to trash.`);
 		} catch (e: any) {
@@ -439,20 +492,32 @@ export function Health() {
 			}
 		}
 		if (trashed) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 			notify(`Moved ${count(trashed, "unused attachment")} to trash${failed ? ` (${failed} failed)` : ""}.`);
 		}
 	};
 
-	const mendWikiLinks = async (path: string, mends: WikiLinkMend[]) => {
+	const mendWikiLinks = async (path: string, all: WikiLinkMend[]) => {
+		// A mend that gives a link another note's name is a guess: `[[Release 2.1 notes]]` may be a note not written
+		// yet, and not a slip for `Release-2.0-notes`. It is shown, old name and new, and made only on the person's word.
+		const { moved, guessed } = splitWikiMends(all);
+		let mends = all;
+		if (guessed.length) {
+			const startRoot = state.workspace?.root;
+			const REWRITE = guessed.length === 1 ? "Rewrite link" : `Rewrite ${guessed.length} links`;
+			const MOVED_ONLY = `Mend ${count(moved.length, "moved link")} only`;
+			const picked = await choose(guessedMendQuestion(baseName(path), guessed), moved.length ? [REWRITE, MOVED_ONLY] : [REWRITE]);
+			if (!picked || state.workspace?.root !== startRoot) return;
+			if (picked === MOVED_ONLY) mends = moved;
+		}
 		const before = await readDocText(path);
 		if (before === null) return notify("Could not read the document.", "error");
 		const { text: after, done } = withNames(before, mends);
 		if (!done || after === before) return notify("Those wikilinks could not be mended — the document may have already changed.");
 		try {
 			await writeDocEdit(path, after);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 			notify(`Mended ${count(done, "wikilink")} in ${baseName(path)}.`);
 		} catch (e: any) {
@@ -468,10 +533,12 @@ export function Health() {
 		const next = existing.length
 			? addToFrontMatterList(before, fixSpec.field, fixSpec.value)
 			: withFrontMatter(before, fixSpec.field, fixSpec.value);
-		if (!next || next === before) return notify(`${baseName(fixSpec.path)} already lists ${fixSpec.field}: ${fixSpec.value}.`);
+		// Null says the field is laid out over several lines and was left alone: it is not said to list the value already.
+		if (next === null) return notify(`Could not add ${fixSpec.field}: ${fixSpec.value} to ${baseName(fixSpec.path)}: the field is written over several lines. Add it in the text.`, "error");
+		if (next === before) return notify(`${baseName(fixSpec.path)} already lists ${fixSpec.field}: ${fixSpec.value}.`);
 		try {
 			await writeDocEdit(fixSpec.path, next);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 			notify(`Added ${fixSpec.field}: ${fixSpec.value} to ${baseName(fixSpec.path)}.`);
 		} catch (e: any) {
@@ -485,21 +552,11 @@ export function Health() {
 	};
 
 	const mendAllBrokenLinks = async () => {
-		const list = mendableChecks();
-		if (list.length < 2) return;
+		// Only the links whose files moved, grouped by canonical(check.path): the prompt says "where their files
+		// moved", and a wikilink that would be given another note's name is left to its own row, which asks.
+		const { byPath, links: totalLinks, checks: withMends, guessed } = bulkMends();
+		if (withMends < 2) return;
 		const startRoot = state.workspace?.root;
-		const byPath = new Map<string, { path: string; mends: CombinedLinkMend[] }>();
-		for (const check of list) {
-			const key = canonical(check.path);
-			const entry = byPath.get(key) ?? { path: check.path, mends: [] };
-			if (check.fix.kind === "mend-wikilinks") {
-				for (const edit of check.fix.mends) entry.mends.push({ kind: "wiki", edit });
-			} else {
-				for (const edit of check.fix.mends) entry.mends.push({ kind: "path", edit });
-			}
-			byPath.set(key, entry);
-		}
-		const totalLinks = [...byPath.values()].reduce((sum, entry) => sum + entry.mends.length, 0);
 		const uniquePaths = [...byPath.values()].map((e) => e.path);
 		const preview =
 			uniquePaths
@@ -508,7 +565,9 @@ export function Health() {
 				.join(", ") + (uniquePaths.length > 4 ? ` and ${uniquePaths.length - 4} more` : "");
 		const GO = "Mend all links";
 		const picked = await choose(
-			`Rewrite ${count(totalLinks, "broken link")} across ${count(byPath.size, "document")} (${preview}) to point at where their files moved?`,
+			`Rewrite ${count(totalLinks, "broken link")} across ${count(byPath.size, "document")} (${preview}) to point at where their files moved?${
+				guessed ? ` ${count(guessed, "wikilink")} that would be given a different note's name ${guessed === 1 ? "is" : "are"} not among them: mend ${guessed === 1 ? "it" : "them"} one at a time.` : ""
+			}`,
 			[GO],
 		);
 		if (picked !== GO || state.workspace?.root !== startRoot) return;
@@ -531,7 +590,7 @@ export function Health() {
 			}
 		}
 		if (mendedPaths.size) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 		}
 		if (mendedLinks) {
@@ -781,11 +840,15 @@ export function Health() {
 				const left = d.tally ? d.tally.by.filter(([status]) => toneOf(status) !== "done").map(([status, count]) => `${count} ${status || "with no status"}`) : [];
 				return { file: d, title: registryTitle(d.name), total, done, counted: Boolean(d.tally), left };
 			});
+	/** A mend that asks before it is made: one of its wikilinks would be given another note's name. */
+	const asksFirst = (check: DocCheck) => check.fix?.kind === "mend-wikilinks" && splitWikiMends(check.fix.mends).guessed.length > 0;
 	const fixLabel = (check: DocCheck) =>
 		check.fix?.kind === "catalogs"
 			? "Update"
 			: check.fix?.kind === "links" || check.fix?.kind === "mend-wikilinks"
-				? "Mend"
+				? asksFirst(check)
+					? "Mend…"
+					: "Mend"
 				: check.fix?.kind === "reciprocal-adr"
 					? `Add ${check.fix.field}`
 					: check.fix?.kind === "record-approval"
@@ -793,10 +856,12 @@ export function Health() {
 						: "Start it";
 	/** What mending a document's links does, in a line: where the one link will lead, or how many will be pointed where their files are. */
 	const mendTitle = (mends: LinkMend[]) => (mends.length === 1 ? `Point the link at ${mends[0]!.instead}, where a file of that name is` : `Point ${mends.length} links at where files of their names are`);
-	const wikiMendTitle = (mends: WikiLinkMend[]) =>
-		mends.length === 1
-			? `Point [[${mends[0]!.name}]] at [[${mends[0]!.instead}]]`
-			: `Point ${mends.length} wikilinks at matching notes`;
+	const wikiMendTitle = (mends: WikiLinkMend[]) => {
+		// Where a link would be given another note's name, the title says it is a likeness and that it asks.
+		const guessed = splitWikiMends(mends).guessed.length;
+		if (mends.length === 1) return `Point [[${mends[0]!.name}]] at [[${mends[0]!.instead}]]${guessed ? ", the closest name there is: asks first" : ""}`;
+		return guessed ? `Point ${mends.length} wikilinks at notes, ${guessed} of them at the closest name there is: asks first` : `Point ${mends.length} wikilinks at matching notes`;
+	};
 	const fixTitle = (check: DocCheck) =>
 		check.fix?.kind === "catalogs"
 			? "Write every catalog afresh from the documents in its folder"
@@ -843,6 +908,26 @@ export function Health() {
 		if (picked === open) await openCheck(check);
 		else if (picked && picked === put) fix(check);
 	};
+	const bindTaskSpace = () => {
+		let boundEl: HTMLElement | undefined;
+		const onTaskSpace = (e: KeyboardEvent) => {
+			if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+			const row = (e.target as HTMLElement | null)?.closest<HTMLElement>("[data-row]");
+			const rowKey = row?.dataset.row;
+			if (!rowKey) return;
+			const task = filteredOpenTasks().find((t) => `${t.path}:${t.line}:${t.offset}` === rowKey);
+			if (!task) return;
+			e.preventDefault();
+			e.stopPropagation();
+			void tickOpenTask(task);
+		};
+		onCleanup(() => boundEl?.removeEventListener("keydown", onTaskSpace, true));
+		return (el: HTMLElement) => {
+			boundEl?.removeEventListener("keydown", onTaskSpace, true);
+			boundEl = el;
+			el.addEventListener("keydown", onTaskSpace, true);
+		};
+	};
 	const fileState = (file: { exists: boolean; untouched?: boolean }) => (!file.exists ? "missing" : file.untouched ? "still the template text" : "written");
 	return (
 		<div class="panel-body health" data-panel="health">
@@ -868,13 +953,13 @@ export function Health() {
 					onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
 				/>
 				<div class="docs-filter-pills" role="group" aria-label="Health filter mode">
-					<button type="button" classList={{ on: healthMode() === "all" }} onClick={() => setHealthMode("all")}>
+					<button type="button" class={{ on: healthMode() === "all" }} onClick={() => setHealthMode("all")}>
 						All
 					</button>
 					<Show when={activeTicketKey()}>
 						<button
 							type="button"
-							classList={{ on: healthMode() === "ticket" }}
+							class={{ on: healthMode() === "ticket" }}
 							title={`Show only Health items for ${activeTicketKey()} and its linked work`}
 							onClick={() => setHealthMode("ticket")}
 						>
@@ -883,7 +968,7 @@ export function Health() {
 					</Show>
 					<button
 						type="button"
-						classList={{ on: healthMode() === "warnings" }}
+						class={{ on: healthMode() === "warnings" }}
 						title="Show only warning-level checks and citations"
 						onClick={() => setHealthMode("warnings")}
 					>
@@ -932,7 +1017,7 @@ export function Health() {
 						<h3 title="The tickets, specs, knowledge base and registries under the docs folder: what is out of date, not written, or named and not there">
 							Work <span class="meta">{checksSummary(filteredChecks()) || (isFiltering() ? "0 matches" : "in order")}</span>
 						</h3>
-						<Show when={mendableChecks().length >= 2}>
+						<Show when={bulkMends().checks >= 2}>
 							<button
 								type="button"
 								class="link health-sec-action"
@@ -1178,23 +1263,7 @@ export function Health() {
 				</section>
 			</Show>
 			<Show when={filteredOpenTasks().length > 0}>
-				<section
-					ref={(el) => {
-						const onTaskSpace = (e: KeyboardEvent) => {
-							if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
-							const row = (e.target as HTMLElement | null)?.closest<HTMLElement>("[data-row]");
-							const rowKey = row?.dataset.row;
-							if (!rowKey) return;
-							const task = filteredOpenTasks().find((t) => `${t.path}:${t.line}:${t.offset}` === rowKey);
-							if (!task) return;
-							e.preventDefault();
-							e.stopPropagation();
-							void tickOpenTask(task);
-						};
-						el.addEventListener("keydown", onTaskSpace, true);
-						onCleanup(() => el.removeEventListener("keydown", onTaskSpace, true));
-					}}
-				>
+				<section ref={bindTaskSpace()}>
 					<h3 title="Unchecked - [ ] tasks across active tickets, specs, and project notes">
 						Open tasks <span class="meta">{filteredOpenTasks().length}</span>
 					</h3>
@@ -1425,7 +1494,12 @@ export function Health() {
 										key={rule}
 										label={rule}
 										title={`${rule}: ${count(entry.count, "finding")} (${SEVERITY[entry.severity]!.toLowerCase()}). Click, or press Enter, to see them in Problems.`}
-										onActivate={() => (setState("bottomView", "problems"), setState("settings", "layout", "bottom", true))}
+										onActivate={() =>
+											setState((s) => {
+												s.bottomView = "problems";
+												s.settings.layout.bottom = true;
+											})
+										}
 									>
 										<SeverityMark severity={entry.severity} />
 										<span class="label">{rule}</span>

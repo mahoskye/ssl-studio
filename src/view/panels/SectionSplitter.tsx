@@ -16,8 +16,7 @@ export function SectionSplitter(props: {
 	onCleanup(() => cleanupDrag?.());
 	return (
 		<div
-			class="section-splitter"
-			classList={{ dragging: dragging() }}
+			class={["section-splitter", { dragging: dragging() }]}
 			role="separator"
 			tabindex={0}
 			aria-orientation="horizontal"
@@ -26,7 +25,7 @@ export function SectionSplitter(props: {
 			aria-valuemin={props.min}
 			aria-valuemax={props.max}
 			title={`${props.label}: drag, or use Up/Down arrows. Double-click or Home to reset.`}
-			onDblClick={props.onReset}
+			onDblClick={() => props.onReset()}
 			onKeyDown={(e) => {
 				const step = e.shiftKey ? 64 : 16;
 				if (e.key === "ArrowUp") (e.preventDefault(), props.onDrag(-step));

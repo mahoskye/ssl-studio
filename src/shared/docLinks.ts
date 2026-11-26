@@ -1,6 +1,6 @@
 import { marked, type Token } from "marked";
 import { fenced } from "./catalog";
-import { bodyOffset, frontMatter } from "./frontMatter";
+import { bodyOffset, frontMatter, plainMarkdown } from "./frontMatter";
 import { baseName, dirName, isInside, relativePath, relativeTo, resolvePath } from "./paths";
 import { linkedLines } from "./projectDocs";
 import type { DocFile } from "./protocol";
@@ -720,6 +720,17 @@ export function rewriteHeadingReferences(
 	let count = 0;
 	let fenceChar = "";
 	let fenceLen = 0;
+	const slugOf = (words: string) =>
+		words
+			.toLowerCase()
+			.replace(/[^\p{L}\p{N}\s-]/gu, "")
+			.replace(/\s+/g, "-");
+	// A heading's words name the first heading that has them. A later heading with the same words has a numbered
+	// anchor (`notes-1`), and a link written with the words alone, `#notes` or `[[#Notes]]`, leads to the first:
+	// when the later one is renamed such a link is not its own, and when a heading is renamed to words an earlier
+	// one has, only its anchor says which of the two is meant.
+	const oldIsFirst = slugOf(plainMarkdown(options.oldHeading).trim()) === oldSlug;
+	const newIsFirst = slugOf(plainMarkdown(options.newHeading).trim()) === options.newAnchor.toLowerCase();
 
 	const matchesAnchor = (rawFragment: string) => {
 		let decoded = rawFragment;
@@ -729,12 +740,9 @@ export function rewriteHeadingReferences(
 			// keep raw
 		}
 		const trimmed = decoded.trim();
-		if (trimmed.toLowerCase() === oldSlug || trimmed.toLowerCase() === oldHeadingLower) return true;
-		const slug = trimmed
-			.toLowerCase()
-			.replace(/[^\p{L}\p{N}\s-]/gu, "")
-			.replace(/\s+/g, "-");
-		return slug === oldSlug;
+		if (trimmed.toLowerCase() === oldSlug) return true;
+		if (oldIsFirst && trimmed.toLowerCase() === oldHeadingLower) return true;
+		return slugOf(trimmed) === oldSlug;
 	};
 
 	const rewriteMarkdownLinks = (seg: string): { text: string; changed: boolean } => {
@@ -881,7 +889,7 @@ export function rewriteHeadingReferences(
 				if (!targetMatch || !matchesAnchor(frag)) return full;
 				count++;
 				changed = true;
-				const replacement = frag.trim().toLowerCase() === oldSlug && frag.includes("-") && !frag.includes(" ") ? options.newAnchor : options.newHeading;
+				const replacement = !newIsFirst || (frag.trim().toLowerCase() === oldSlug && frag.includes("-") && !frag.includes(" ")) ? options.newAnchor : options.newHeading;
 				return `${open}${target}#${replacement}${rest}`;
 			});
 			part.text = seg;
@@ -890,4 +898,59 @@ export function rewriteHeadingReferences(
 	}
 
 	return { text: count ? lines.join("") : markdown, count };
+}
+
+/** A file that is shown as a picture where it is embedded: found as a picture is, never as a document by its name. */
+const PICTURE = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
+export const isPictureName = (name: string) => PICTURE.test(name);
+
+/**
+ * The folders a picture written without a folder is looked for in, in order, when it is not beside the document:
+ * the configured attachments folder, the document's own attachments, assets and images, the docs folder's, and
+ * the project's assets and images. The page that shows the picture (`resolveImageTarget` in the view) and
+ * `bareNameTarget` below both read the order from here: each once held its own copy of it, and a rename is
+ * followed rightly only while the two agree. `docDir` is null for a document that is not in the project, which
+ * has no folders of its own.
+ */
+export function pictureFolders(docDir: string | null, where: { root: string; docs?: string | null; attachments?: string | null }): string[] {
+	const docsDir = resolvePath(where.root, where.docs || "docs");
+	const docsRoot = isInside(where.root, docsDir) ? docsDir : resolvePath(where.root, "docs");
+	const configured = where.attachments?.trim() ? resolvePath(where.root, where.attachments.trim()) : null;
+	return [
+		...(configured && isInside(where.root, configured) ? [configured] : []),
+		...(docDir === null ? [] : ["attachments", "assets", "images"].map((folder) => resolvePath(docDir, folder))),
+		...["attachments", "assets", "images"].map((folder) => resolvePath(docsRoot, folder)),
+		resolvePath(where.root, "assets"),
+		resolvePath(where.root, "images"),
+	];
+}
+
+/**
+ * The file a bare name (`shot.png`, with no folder) in an embed or a link by name leads to from the document
+ * that holds it, as the page finds it (`resolveImageTarget` in the view): the file of that name beside the
+ * document; then, for a picture, the attachment folders (`pictureFolders`) and at
+ * last the file of that name nearest the document; for any other file, the one at the project's top. Null
+ * where no file answers. Two tickets may each keep an `attachments/shot.png`: which of them a name means
+ * depends on the document it is written in, so a rename of the one must not be followed in the other.
+ */
+export function bareNameTarget(
+	name: string,
+	holder: string,
+	files: readonly string[],
+	where: { root: string; docs?: string | null; attachments?: string | null },
+): string | null {
+	const byLower = new Map(files.map((file) => [file.toLowerCase(), file]));
+	const within = (dir: string) => byLower.get(resolvePath(dir, name).toLowerCase()) ?? null;
+	const docDir = dirName(holder);
+	const beside = within(docDir);
+	if (beside) return beside;
+	if (!PICTURE.test(name)) return within(where.root);
+	for (const folder of pictureFolders(docDir, where)) {
+		const hit = within(folder);
+		if (hit) return hit;
+	}
+	const wanted = name.toLowerCase();
+	const named = files.filter((file) => baseName(file).toLowerCase() === wanted);
+	if (!named.length) return null;
+	return named.sort((a, b) => relativePath(docDir, a).length - relativePath(docDir, b).length)[0]!;
 }

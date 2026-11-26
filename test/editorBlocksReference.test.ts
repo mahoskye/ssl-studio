@@ -69,60 +69,17 @@ const SAMPLE_DOCS: DocFile[] = [
 ];
 
 describe("schemaHover comment doc-path & wikilink detection", () => {
-	test("extracts SSL and SQL comment spans while ignoring strings", () => {
-		const sslLines = [
-			'sText := "/* docs/specs/due-dates.md not a comment";',
-			"/* See docs/specs/due-dates.md and [[DEMO-101]];",
-			"/*",
-			" * Multi-line banner referencing design/due-dates.plan.json",
-			";",
-			":RETURN sText;",
-		];
-		const sslSpans = extractCommentSpans(sslLines, "ssl");
-		expect(sslSpans[0]).toEqual([]);
-		expect(sslSpans[1]!.length).toBe(1);
-		expect(sslSpans[3]!.length).toBe(1);
-		expect(sslSpans[5]).toEqual([]);
-
+	test("extracts SQL comment spans while ignoring strings", () => {
+		// SQL only: where a comment is in SSL is the grammar's to say (pass3LowsEditorsPanels reads SSL with it).
 		const sqlLines = [
 			"SELECT '-- not a comment' FROM DEMO_HOLIDAYS;",
 			"-- See schema/database/DEMO_HOLIDAYS.md and [[0001-utc-dates]]",
 			"/* block comment docs/specs/due-dates.md#L12-L20 */ SELECT 1;",
 		];
-		const sqlSpans = extractCommentSpans(sqlLines, "sql");
+		const sqlSpans = extractCommentSpans(sqlLines);
 		expect(sqlSpans[0]).toEqual([]);
 		expect(sqlSpans[1]!.length).toBe(1);
 		expect(sqlSpans[2]!.length).toBe(1);
-	});
-
-	test("detects workspace doc paths (with #L / #heading) and [[wikilinks]] in SSL comments, skipping code/strings", () => {
-		const sslLines = [
-			'sIgnored := "docs/specs/due-dates.md [[DEMO-101]]";',
-			"/* Implements docs/specs/due-dates.md#holidays and [[DEMO-101]];",
-			"/*",
-			" * Plan: design/due-dates.plan.json",
-			" * Schema: schema/database/DEMO_HOLIDAYS.md#L5-L18",
-			" * ADR: [[0001-utc-dates|UTC rule]]",
-			" * Missing: docs/specs/does-not-exist.md",
-			";",
-			"// Inline check: [[DEMO_HOLIDAYS#Columns]]",
-		];
-
-		const refs = findCommentDocRefsInLines(sslLines, "ssl", SAMPLE_DOCS, ROOT);
-		expect(refs.map((r) => [r.line, r.kind, r.doc.name, r.heading ?? null, r.targetLine ?? null, r.targetEndLine ?? null])).toEqual([
-			[2, "wikilink", "DEMO-101.md", null, null, null],
-			[2, "path", "due-dates.md", "holidays", null, null],
-			[4, "path", "due-dates.plan.json", null, null, null],
-			[5, "path", "DEMO_HOLIDAYS.md", null, 5, 18],
-			[6, "wikilink", "decisions/0001-utc-dates.md", null, null, null],
-			[9, "wikilink", "DEMO_HOLIDAYS.md", "Columns", null, null],
-		]);
-
-		// Verify column offsets slice back to exact tokens (excluding trailing SSL `;`).
-		for (const r of refs) {
-			expect(sslLines[r.line - 1]!.slice(r.from, r.to)).toBe(r.raw);
-			expect(r.raw.endsWith(";")).toBe(false);
-		}
 	});
 
 	test("detects workspace doc paths and [[wikilinks]] in SQL line and block comments", () => {
@@ -131,7 +88,7 @@ describe("schemaHover comment doc-path & wikilink detection", () => {
 			"/* Decision [[0001-utc-dates]] and table schema/database/DEMO_HOLIDAYS.md */",
 			"SELECT * FROM DEMO_HOLIDAYS; -- [[DEMO-101]]",
 		];
-		const refs = findCommentDocRefsInLines(sqlLines, "sql", SAMPLE_DOCS, ROOT);
+		const refs = findCommentDocRefsInLines(sqlLines, SAMPLE_DOCS, ROOT);
 		expect(refs.map((r) => [r.line, r.kind, r.doc.name, r.targetLine ?? null])).toEqual([
 			[1, "path", "due-dates.md", 10],
 			[2, "wikilink", "decisions/0001-utc-dates.md", null],

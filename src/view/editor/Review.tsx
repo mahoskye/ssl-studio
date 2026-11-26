@@ -10,7 +10,7 @@ import { frontMatter } from "../../shared/frontMatter";
 import { diffMarkdownBlocks, diffPlainTextHtml, type MarkdownDiffRow } from "../../shared/markdownDiff";
 import { initialReviewLayout, reviewLayoutKey, type ReviewFormat, type ReviewLayout } from "../../shared/menuBar";
 import { Icon } from "../Icon";
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";
 import { choose } from "../dialogs";
 import { canonical, keepTab, state, notify } from "../state";
 import { baseName, isInside, joinPath, relativeTo } from "../../shared/paths";
@@ -18,7 +18,7 @@ import { recall, remember } from "../graph/canvas";
 import { CenterTabStrip } from "./CenterTabStrip";
 import { observeMarkerHoverSeverity } from "./hoverSeverity";
 import { languageFor } from "./languages";
-import { finishMarkdown } from "./markdownHtml";
+import { finishMarkdown, hydrateMathInElement } from "./markdownHtml";
 import { monaco } from "./monaco";
 import { changeSize, reviewFlow } from "./reviewFlow";
 
@@ -73,11 +73,16 @@ export type ComparisonInput = {
 };
 
 const [review, setReview] = createSignal<Review | null>(null);
+/** Synchronous mirror of `review()` so Solid 2 deferred writes never cause stale read-after-write in `reviewFlow` or `closeComparison`. */
+let currentReview: Review | null = null;
 export { review };
 
 const flow = reviewFlow<Review>({
-	current: () => untrack(review),
-	show: setReview,
+	current: () => currentReview,
+	show: (r) => {
+		currentReview = r;
+		setReview(r);
+	},
 	// Looked up when asked, not when this module loads: state.ts and this file import each other.
 	choose: (title, buttons) => choose(title, buttons),
 	fail: (text) => notify(text, "error"),
@@ -98,7 +103,7 @@ export const openReview = (r: Review): Promise<boolean> => {
 /** Force-closes any open review without prompting, notifying its owner via `onReject`. */
 export const closeReview = () => flow.close();
 /** A comparison gives way to a file that is opened: it holds nothing to lose, and would otherwise stand in front of the file. */
-export const closeComparison = () => void (untrack(review)?.compare && flow.close());
+export const closeComparison = () => void (currentReview?.compare && flow.close());
 
 /** Opens a read-only side-by-side comparison (`before` on the left vs `after` on the right) in ReviewView. */
 export function openComparison(input: ComparisonInput): Promise<boolean> {
@@ -357,7 +362,7 @@ export function ReviewView() {
 	const rightLabel = r.compare?.right ?? r.sides?.right ?? "Proposed";
 	const label = r.acceptLabel ?? "Accept";
 	const rejectLabel = r.rejectLabel ?? "Reject";
-	const file = r.path ? relativeTo(state.workspace?.root, r.path) : "";
+	const file = () => (r.path ? relativeTo(state.workspace?.root, r.path) : "");
 	const tabTitle = r.path ? (r.compare ? `${baseName(r.path)} (diff)` : `Review: ${baseName(r.path)}`) : r.title;
 	const effect = r.effect ?? `"${label}" applies the ${r.acceptSide === "original" ? "left" : "right"} side.`;
 
@@ -366,9 +371,6 @@ export function ReviewView() {
 	let rightPaneEl: HTMLDivElement | undefined;
 	let syncingFrom: "left" | "right" | null = null;
 	let syncFrame = 0;
-	onCleanup(() => {
-		if (syncFrame) cancelAnimationFrame(syncFrame);
-	});
 	const syncRenderedScroll = (from: "left" | "right") => {
 		const src = from === "left" ? leftPaneEl : rightPaneEl;
 		const dst = from === "left" ? rightPaneEl : leftPaneEl;
@@ -416,10 +418,13 @@ export function ReviewView() {
 		});
 	};
 
-	onMount(() => {
+	onSettled(() => {
 		const original = monaco.editor.createModel(r.original, r.language);
 		const proposed = (proposedModel = monaco.editor.createModel(r.proposed, r.language));
 		if (r.original.includes("\n")) proposed.setEOL(original.getEndOfLineSequence());
+		// The Code font is given here as well as in the effect below: that effect's first run comes before this
+		// editor exists, so until a setting changed both sides showed Monaco's own font.
+		const codeFont = state.settings.codeFont?.trim() ? resolveFontStack(state.settings.codeFont, DEFAULT_CODE_FONT) : undefined;
 		const diff = (editor = monaco.editor.createDiffEditor(host, {
 			automaticLayout: true,
 			renderSideBySide: diffLayout() !== "inline",
@@ -427,6 +432,7 @@ export function ReviewView() {
 			originalEditable: false,
 			readOnly: isReadOnly,
 			fontSize: state.settings.fontSize,
+			...(codeFont ? { fontFamily: codeFont } : {}),
 			fixedOverflowWidgets: true,
 			selectionClipboard: false,
 		}));
@@ -438,11 +444,6 @@ export function ReviewView() {
 		const sized = diff.onDidUpdateDiff(() => setSize(changeSize(diff.getLineChanges())));
 		const synced = proposed.onDidChangeContent(() => setLiveProposed(proposed.getValue()));
 		const stopHoverSevs = [diff.getOriginalEditor(), diff.getModifiedEditor()].map((side) => observeMarkerHoverSeverity(side));
-		onCleanup(() => {
-			sized.dispose();
-			synced.dispose();
-			for (const stop of stopHoverSevs) stop();
-		});
 		untouched = proposed.getAlternativeVersionId();
 		// Escape needs the keyboard in here. Typing somewhere else (the agent's composer) is left alone.
 		const focused = document.activeElement;
@@ -450,44 +451,63 @@ export function ReviewView() {
 			if (isCodeDiff()) diff.getModifiedEditor().focus();
 			else root.focus();
 		}
-		onCleanup(() => {
+		return () => {
+			if (syncFrame) cancelAnimationFrame(syncFrame);
+			sized.dispose();
+			synced.dispose();
+			for (const stop of stopHoverSevs) stop();
 			editor = undefined;
+			proposedModel = undefined;
 			diff.dispose();
 			original.dispose();
 			proposed.dispose();
-		});
+		};
 	});
 	// Both sides follow the Font size, Code font, and explicit Side-by-Side / Inline layout choice.
-	createEffect(() => {
-		const fontSize = state.settings.fontSize;
-		const fontFamily = state.settings.codeFont?.trim() ? resolveFontStack(state.settings.codeFont, DEFAULT_CODE_FONT) : undefined;
-		const sideBySide = diffLayout() !== "inline";
-		editor?.updateOptions({
-			fontSize,
-			renderSideBySide: sideBySide,
-			useInlineViewWhenSpaceIsLimited: false,
-			...(fontFamily ? { fontFamily } : {}),
-		});
-		if (isCodeDiff()) queueMicrotask(() => editor?.layout());
-	});
+	createEffect(
+		() => ({
+			fontSize: state.settings.fontSize,
+			fontFamily: state.settings.codeFont?.trim() ? resolveFontStack(state.settings.codeFont, DEFAULT_CODE_FONT) : undefined,
+			sideBySide: diffLayout() !== "inline",
+			codeDiff: isCodeDiff(),
+		}),
+		({ fontSize, fontFamily, sideBySide, codeDiff }) => {
+			editor?.updateOptions({
+				fontSize,
+				renderSideBySide: sideBySide,
+				useInlineViewWhenSpaceIsLimited: false,
+				...(fontFamily ? { fontFamily } : {}),
+			});
+			if (codeDiff) queueMicrotask(() => editor?.layout());
+		},
+	);
 
 	// Undoing every edit counts as not edited: the version id goes back with the text.
 	const edited = () => !isReadOnly && Boolean(proposedModel && !proposedModel.isDisposed() && proposedModel.getAlternativeVersionId() !== untouched);
+	let isBusy = false;
+	let isRejecting = false;
 	const accept = async () => {
-		if (busy() || rejecting() || r.blocked || !proposedModel) return;
+		if (isBusy || isRejecting || busy() || rejecting() || r.blocked || !proposedModel) return;
+		isBusy = true;
 		setBusy(true);
 		setError("");
-		const nextText = r.acceptSide === "original" ? r.original : proposedModel.getValue();
-		const failed = await flow.accept(r, nextText);
-		setBusy(false);
-		if (failed !== null) setError(failed);
+		try {
+			const nextText = r.acceptSide === "original" ? r.original : proposedModel.getValue();
+			const failed = await flow.accept(r, nextText);
+			if (failed !== null) setError(failed);
+		} finally {
+			isBusy = false;
+			setBusy(false);
+		}
 	};
 	const reject = async () => {
-		if (busy() || rejecting()) return;
+		if (isBusy || isRejecting || busy() || rejecting()) return;
+		isRejecting = true;
 		setRejecting(true);
 		try {
 			await flow.reject(r, edited());
 		} finally {
+			isRejecting = false;
 			setRejecting(false);
 		}
 	};
@@ -505,9 +525,9 @@ export function ReviewView() {
 					<div class="review-head">
 						<div class="review-what">
 							<strong>{r.title}</strong>
-							<Show when={file}>
+							<Show when={file()}>
 								<span class="review-path" title={r.path}>
-									{file}
+									{file()}
 								</span>
 							</Show>
 						</div>
@@ -526,16 +546,16 @@ export function ReviewView() {
 					</div>
 					<div class="review-actions">
 						<div class="mode-switch diff-layout-switch" role="group" aria-label="Diff layout">
-							<button classList={{ on: diffLayout() === "split" }} aria-pressed={diffLayout() === "split"} title="Show left and right versions side by side" onClick={() => chooseLayout("split")}>
+							<button class={{ on: diffLayout() === "split" }} aria-pressed={diffLayout() === "split" ? "true" : "false"} title="Show left and right versions side by side" onClick={() => chooseLayout("split")}>
 								Side-by-Side
 							</button>
-							<button classList={{ on: diffLayout() === "inline" }} aria-pressed={diffLayout() === "inline"} title="Show changes inline in one column" onClick={() => chooseLayout("inline")}>
+							<button class={{ on: diffLayout() === "inline" }} aria-pressed={diffLayout() === "inline" ? "true" : "false"} title="Show changes inline in one column" onClick={() => chooseLayout("inline")}>
 								Inline
 							</button>
 							<Show when={isMdReview}>
 								<button
-									classList={{ on: diffLayout() === "rendered" }}
-									aria-pressed={diffLayout() === "rendered"}
+									class={{ on: diffLayout() === "rendered" }}
+									aria-pressed={diffLayout() === "rendered" ? "true" : "false"}
 									title="Show rendered Markdown diff side by side with inline highlights"
 									onClick={() => chooseLayout("rendered")}
 								>
@@ -544,8 +564,8 @@ export function ReviewView() {
 							</Show>
 							<Show when={isCsvReview}>
 								<button
-									classList={{ on: diffLayout() === "table" }}
-									aria-pressed={diffLayout() === "table"}
+									class={{ on: diffLayout() === "table" }}
+									aria-pressed={diffLayout() === "table" ? "true" : "false"}
 									title="Show structured CSV/TSV row and cell diff"
 									onClick={() => chooseLayout("table")}
 								>
@@ -636,6 +656,21 @@ export function ReviewView() {
 						const visibleRows = () => (mdOnlyChanged() ? diff().rows.filter((row) => row.kind !== "same") : diff().rows);
 						const showFm = () => Boolean((diff().fmBeforeHtml || diff().fmAfterHtml) && (!mdOnlyChanged() || diff().fmChanged));
 						const hasAnyVisible = () => visibleRows().length > 0 || showFm();
+						createEffect(
+							() => (diffLayout() === "rendered" ? visibleRows() : null),
+							(rows) => {
+								if (!rows?.length) return;
+								let alive = true;
+								queueMicrotask(() => {
+									if (!alive) return;
+									if (leftPaneEl?.isConnected) hydrateMathInElement(leftPaneEl);
+									if (rightPaneEl?.isConnected) hydrateMathInElement(rightPaneEl);
+								});
+								return () => {
+									alive = false;
+								};
+							},
+						);
 						return (
 							<div class="review-md-wrap">
 								<style>{`
@@ -761,7 +796,7 @@ export function ReviewView() {
 													<th class="csv-diff-gutter" aria-label="Change" />
 													<For each={diff().headers}>
 														{(h) => (
-															<th classList={{ "csv-cell-changed": h.changed }}>
+															<th class={{ "csv-cell-changed": h.changed }}>
 																<Show when={h.changed} fallback={h.cur || h.old}>
 																	<del class="csv-diff-old">{h.old || "(empty)"}</del>
 																	<span class="csv-diff-arrow" aria-hidden="true">
@@ -787,7 +822,7 @@ export function ReviewView() {
 																	const newVal = () => row.newCells?.[colIdx()] ?? "";
 																	const cellChanged = () => row.kind === "modified" && oldVal() !== newVal();
 																	return (
-																		<td classList={{ "csv-cell-changed": cellChanged() }}>
+																		<td class={{ "csv-cell-changed": cellChanged() }}>
 																			<Show
 																				when={cellChanged()}
 																				fallback={row.kind === "removed" ? oldVal() : newVal()}

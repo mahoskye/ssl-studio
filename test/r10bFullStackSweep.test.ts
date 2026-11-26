@@ -9,7 +9,7 @@ import { WorkspaceFiles } from "../src/bun/workspace";
 import { replaceSafeInText } from "../src/shared/menuBar";
 import type { BackendEvents, Info, LspState, Settings } from "../src/shared/protocol";
 import { DEFAULT_SETTINGS } from "../src/shared/protocol";
-import { REGEX_MAX_LINE_LENGTH, replaceIn, searchPattern } from "../src/shared/searchPattern";
+import { REGEX_MAX_LINE_LENGTH, replaceIn, replaceSearched, searchPattern, textMark } from "../src/shared/searchPattern";
 
 // Minimal browser & Monaco shims so view modules load cleanly under Bun tests.
 const origLocation = (globalThis as any).location;
@@ -26,13 +26,17 @@ if (typeof (globalThis as any).localStorage === "undefined") {
 if (typeof (globalThis as any).window === "undefined") {
 	(globalThis as any).window = {
 		Error,
+		Map,
+		Set,
 		addEventListener() {},
 		removeEventListener() {},
 		location: { protocol: "http:", host: "127.0.0.1:0", href: "http://127.0.0.1:0/" },
 		matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
 	};
-} else if (!(globalThis as any).window.Error) {
-	(globalThis as any).window.Error = Error;
+} else {
+	if (!(globalThis as any).window.Error) (globalThis as any).window.Error = Error;
+	if (!(globalThis as any).window.Map) (globalThis as any).window.Map = Map;
+	if (!(globalThis as any).window.Set) (globalThis as any).window.Set = Set;
 }
 if (typeof (globalThis as any).document === "undefined") {
 	(globalThis as any).document = {
@@ -275,17 +279,17 @@ describe("R10B #1 — chooseModel() persists agentModel to 'user' scope even whe
 			writeFileSync(join(ws, ".ssl-studio", "project.toml"), '[agent]\nmodel = "ollama/qwen3:8b"\n');
 
 			const store = new SettingsStore(() => ws);
-			// Workspace save strips USER_ONLY_SETTINGS.agentModel.
+			// Workspace save strips USER_ONLY_SETTINGS.agentModel: what shows through is the local model project.toml names.
 			const wsEffective = await store.save("workspace", { agentModel: "ollama/llama3:8b" });
-			expect(wsEffective.agentModel).toBeUndefined();
+			expect(wsEffective.agentModel).toBe("ollama/qwen3:8b");
 
 			// User save persists agentModel cleanly.
 			const userEffective = await store.save("user", { agentModel: "ollama/llama3:8b" });
 			expect(userEffective.agentModel).toBe("ollama/llama3:8b");
 
-			// Clearing via null removes it cleanly.
+			// Clearing via null removes the user's own choice, and the project's shows through again.
 			const cleared = await store.save("user", { agentModel: null });
-			expect(cleared.agentModel).toBeUndefined();
+			expect(cleared.agentModel).toBe("ollama/qwen3:8b");
 		});
 	});
 
@@ -308,21 +312,27 @@ describe("R10B #1 — chooseModel() persists agentModel to 'user' scope even whe
 				return null;
 			},
 			async () => {
+				const { flush } = await import("solid-js");
 				const { setState } = await import("../src/view/state");
 				const { chooseModel, setAgent } = await import("../src/view/agent/store");
-				setState("project", {
-					configured: true,
-					path: "/ws/.ssl-studio/project.toml",
-					name: "Demo",
-					description: "",
-					docs: "docs",
-					schema: "schema",
-					tests: "tests",
-					code: ".",
-					plans: "design",
-					agentModel: "ollama/qwen3:8b",
+				setState((s) => {
+					s.project = {
+						configured: true,
+						path: "/ws/.ssl-studio/project.toml",
+						name: "Demo",
+						description: "",
+						docs: "docs",
+						schema: "schema",
+						tests: "tests",
+						code: ".",
+						plans: "design",
+						agentModel: "ollama/qwen3:8b",
+					};
 				});
-				setAgent("models", [{ providerID: "ollama", id: "llama3:8b", name: "Llama 3", local: true, tools: true, variants: [] }]);
+				setAgent((s) => {
+					s.models = [{ providerID: "ollama", id: "llama3:8b", name: "Llama 3", local: true, tools: true, variants: [] }];
+				});
+				flush();
 
 				const ok = await chooseModel("ollama/llama3:8b");
 				expect(ok).toBe(true);
@@ -357,12 +367,20 @@ describe("R10B #2 — Startup workspace syncWorkspaceThreads & ask() defense-in-
 				return null;
 			},
 			async () => {
+				const { flush } = await import("solid-js");
 				const { canonical, setState } = await import("../src/view/state");
 				const { agent, ask, setAgent, syncWorkspaceThreads } = await import("../src/view/agent/store");
 				const startupRoot = "/ws/startup-demo";
 				syncWorkspaceThreads(null);
-				setState("workspace", { root: startupRoot, name: "startup-demo" });
-				setAgent({ status: { state: "ready" }, busy: false, entries: [] });
+				setState((s) => {
+					s.workspace = { root: startupRoot, name: "startup-demo" };
+				});
+				setAgent((s) => {
+					s.status = { state: "ready" };
+					s.busy = false;
+					s.entries = [];
+				});
+				flush();
 
 				const turnPromise = ask("Explain startup sync");
 				// Calling syncWorkspaceThreads for the same startup root mid-turn must be a no-op and NOT bump turnEpoch.
@@ -370,6 +388,7 @@ describe("R10B #2 — Startup workspace syncWorkspaceThreads & ask() defense-in-
 				releaseAsk();
 
 				const reply = await turnPromise;
+				flush();
 				expect(reply).not.toBeNull();
 				expect(reply!.text).toBe("Startup turn answer");
 				expect(agent.entries.some((e) => e.role === "agent" && e.text === "Startup turn answer")).toBe(true);
@@ -380,7 +399,7 @@ describe("R10B #2 — Startup workspace syncWorkspaceThreads & ask() defense-in-
 	test("main.tsx syncs workspace threads immediately on startup workspace load", () => {
 		const mainSrc = readSrc("src/view/main.tsx");
 		expect(mainSrc).toContain('import { syncWorkspaceThreads } from "./agent/store";');
-		expect(mainSrc).toMatch(/setState\("workspace", workspace\);\s*syncWorkspaceThreads\(canonical\(workspace\.root\)\);/);
+		expect(mainSrc).toMatch(/setState\(\(s\)\s*=>\s*\{\s*s\.workspace = workspace;\s*\}\);\s*syncWorkspaceThreads\(canonical\(workspace\.root\)\);/);
 	});
 });
 
@@ -518,15 +537,20 @@ describe("R10B #3 — LSP recovery from initial failure, lspRestart() lspPath pi
 				return null;
 			},
 			async () => {
+				const { flush } = await import("solid-js");
 				const { restartLsp, setState, state } = await import("../src/view/state");
-				setState("info", {
-					app: "0.1.0",
-					host: "app",
-					selftest: false,
-					lsp: { ok: false, message: "not found" },
-					opencode: { ok: false },
+				setState((s) => {
+					s.info = {
+						app: "0.1.0",
+						host: "app",
+						selftest: false,
+						lsp: { ok: false, message: "not found" },
+						opencode: { ok: false },
+					};
 				});
+				flush();
 				await restartLsp();
+				flush();
 				expect(restartCount).toBe(1);
 				expect(state.info?.lsp.ok).toBe(true);
 				expect(state.info?.lsp.path).toBe("/opt/bin/starlims-lsp");
@@ -543,16 +567,19 @@ describe("R10B #3 — LSP recovery from initial failure, lspRestart() lspPath pi
 
 describe("R10B #4 — resetTidy() clears tidy store and proposals across workspace switch A -> B", () => {
 	test("resetTidy() resets tidy.path, all step states, all problems, and clears cached proposals", async () => {
+		const { flush } = await import("solid-js");
 		const { proposalOf, resetTidy, setTidy, STEPS, tidy } = await import("../src/view/agent/tidy");
-		setTidy({
-			path: "/ws-a/src/Order.ssl",
-			steps: STEPS.map((_, idx) => (idx === 0 ? "accepted" : idx === 1 ? "review" : "pending")),
-			problems: STEPS.map((_, idx) => (idx === 1 ? "Waiting on review" : "")),
+		setTidy((s) => {
+			s.path = "/ws-a/src/Order.ssl";
+			s.steps = STEPS.map((_, idx) => (idx === 0 ? "accepted" : idx === 1 ? "review" : "pending"));
+			s.problems = STEPS.map((_, idx) => (idx === 1 ? "Waiting on review" : ""));
 		});
+		flush();
 		expect(tidy.path).toBe("/ws-a/src/Order.ssl");
 		expect(tidy.steps[1]).toBe("review");
 
 		resetTidy();
+		flush();
 		expect(tidy.path).toBeNull();
 		expect([...tidy.steps]).toEqual(STEPS.map(() => "pending"));
 		expect([...tidy.problems]).toEqual(STEPS.map(() => ""));
@@ -649,17 +676,21 @@ describe("R10B #6 — REGEX_MAX_LINE_LENGTH consistency across Search/Replace & 
 		expect(litRep!.count).toBe(2);
 	});
 
-	test("Search.tsx scanTextBuffer() and replaceInModel() enforce REGEX_MAX_LINE_LENGTH and drop backend.replace cast", async () => {
-		const { replaceInModel, scanTextBuffer } = await import("../src/view/panels/Search");
+	test("the scan of an open file's text and Search.tsx replaceInModel() enforce REGEX_MAX_LINE_LENGTH and drop backend.replace cast", async () => {
+		const { replaceInModel } = await import("../src/view/panels/Search");
 		const overLine = `${"z".repeat(REGEX_MAX_LINE_LENGTH + 10)}TOKEN`;
 		const shortLine = "let TOKEN = 1;";
 		const text = `${overLine}\n${shortLine}`;
 
-		const regexHits = scanTextBuffer("/ws/a.ssl", text, searchPattern("TOKEN", { regex: true }), true, 100);
+		// An open file's unsaved text is searched by the backend's scan, given with the search: the window runs no expression.
+		const openWs = join(rootTmp, "ws-open-text");
+		mkdirSync(openWs, { recursive: true });
+		const open = [{ path: join(openWs, "a.ssl"), text }];
+		const regexHits = (await new WorkspaceFiles(openWs).searchScan("TOKEN", { regex: true }, open)).hits;
 		expect(regexHits.length).toBe(1);
 		expect(regexHits[0]!.line).toBe(2);
 
-		const litHits = scanTextBuffer("/ws/a.ssl", text, searchPattern("TOKEN", { regex: false }), false, 100);
+		const litHits = (await new WorkspaceFiles(openWs).searchScan("TOKEN", { regex: false }, open)).hits;
 		expect(litHits.length).toBe(2);
 
 		const lines = [overLine, shortLine];
@@ -674,13 +705,14 @@ describe("R10B #6 — REGEX_MAX_LINE_LENGTH consistency across Search/Replace & 
 			},
 		} as any;
 
-		const changedRegex = replaceInModel(fakeModel, searchPattern("TOKEN", { regex: true }), "VALUE", true);
+		// What is replaced in an open file is what the search found in its text.
+		const changedRegex = replaceInModel(fakeModel, replaceSearched(text, textMark(text), regexHits, "VALUE", true)!.edits);
 		expect(changedRegex).toBe(1);
 		expect(applied.length).toBe(1);
 		expect(applied[0]!.range.startLineNumber).toBe(2);
 
 		applied.length = 0;
-		const changedLit = replaceInModel(fakeModel, searchPattern("TOKEN", { regex: false }), "VALUE", false);
+		const changedLit = replaceInModel(fakeModel, replaceSearched(text, textMark(text), litHits, "VALUE", false)!.edits);
 		expect(changedLit).toBe(2);
 		expect(applied.length).toBe(2);
 
@@ -770,7 +802,7 @@ describe("R11 — Final Clean-Sweep Verification Fixes", () => {
 	test("state.ts openFolder() cancel restarts LSP via restartLsp() rather than double-initializing", () => {
 		const stateSrc = readSrc("src/view/state.ts");
 		expect(stateSrc).toMatch(/if \(!workspace\) \{[\s\S]*?session\.setRoot\(prevRoot\);[\s\S]*?void restartLsp\(\);/);
-		expect(stateSrc).toMatch(/export async function restartLsp\(\)[\s\S]*?const seq = openSeq;[\s\S]*?if \(next && seq === openSeq\) setState\("info", next\);/);
+		expect(stateSrc).toMatch(/export async function restartLsp\(\)[\s\S]*?const seq = openSeq;[\s\S]*?if \(next && seq === openSeq\) setState\(\(s\) => \{ s\.info = next; \}\);/);
 	});
 
 	test("R12: loadInfo() monotonic infoSeq, open() emits stopped on teardown, readAuthToken guards partial document, and GraphView uses restartLsp()", () => {

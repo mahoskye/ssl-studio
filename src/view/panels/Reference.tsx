@@ -1,7 +1,8 @@
 // Built-in functions, classes and keywords from the language server's
 // bundled reference, read through completion and hover on a scratch document.
-import { createEffect, createMemo, createResource, createSignal, For, on, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
+import { createAsyncQuery } from "../asyncQuery";
 import { Icon } from "../Icon";
 import { monaco } from "../editor/monaco";
 import { activeEditor } from "../editor/EditorGroup";
@@ -11,7 +12,7 @@ import { lspReadyEpoch, session } from "../lsp/session";
 import { docs } from "../project";
 import { activeDoc, notify, openFile, state } from "../state";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
-import { searchFor } from "./Search";
+import { docsFolderGlob, searchFor } from "./Search";
 import { SectionSplitter } from "./SectionSplitter";
 import { recall, remember } from "../graph/canvas";
 import { followReplyLink, renderReply } from "../agent/markdown";
@@ -119,12 +120,13 @@ export const describeElement = (name: string, root: string) => describe({ label:
 export function Reference() {
 	const [filter, setFilter] = createSignal("");
 	const [open, setOpen] = createSignal<Entry | null>(null);
+	const wsRoot = createMemo(() => state.workspace?.root);
 	createEffect(
-		on(
-			() => state.workspace?.root,
-			() => setOpen(null),
-			{ defer: true },
-		),
+		() => wsRoot(),
+		() => {
+			setOpen(null);
+		},
+		{ defer: true },
 	);
 	const [detailH, setDetailH] = createSignal(clampReferenceHeight(recall("reference.detail.h"), 100, 520, 220));
 	const resizeDetail = (delta: number) => {
@@ -136,7 +138,7 @@ export function Reference() {
 		setDetailH(220);
 		remember("reference.detail.h", "220");
 	};
-	const [reference, { refetch }] = createResource(
+	const [reference, { refetch }] = createAsyncQuery(
 		() => {
 			const epoch = lspReadyEpoch();
 			const root = state.workspace?.root;
@@ -145,7 +147,7 @@ export function Reference() {
 		([root]) => loadReference(root).then((entries) => ({ entries, error: "" }), (e) => ({ entries: [] as Entry[], error: String(e?.message ?? e) })),
 	);
 	const entries = () => reference()?.entries ?? [];
-	const [details] = createResource(
+	const [details] = createAsyncQuery(
 		() => {
 			const cur = open();
 			const root = state.workspace?.root;
@@ -159,9 +161,7 @@ export function Reference() {
 		return cur ? matchingProjectDocsForReference(cur.label, docs()) : { snippets: [] as DocFile[], notes: [] as DocFile[] };
 	});
 	const findInDocs = (label: string) => {
-		const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
-		const include = docsRel && docsRel !== "." ? `${docsRel}/**` : "**/*.md";
-		searchFor(label, { include, exclude: "" });
+		searchFor(label, { include: docsFolderGlob(), exclude: "" });
 	};
 	const findUsages = (label: string) => {
 		searchFor(label, { wholeWord: true, include: "", exclude: "" });

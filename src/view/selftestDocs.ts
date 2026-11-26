@@ -173,7 +173,7 @@ export function selftestDocsSetup(): Promise<Steps> {
 		const path = canonical(joinPath(root, ...state.project!.docs.split(/[\\/]/), "Links.md"));
 		await backend.create(path, "file");
 		await backend.write(path, LINKS);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		const opened: string[] = [];
 		const open = window.open;
 		window.open = (url) => (opened.push(String(url)), null);
@@ -229,7 +229,7 @@ export function selftestWork(): Promise<Steps> {
 		await write(["specs", "Self-spec.md"], specTemplate({ title: "Self spec", ticket: "SELF-1" }));
 		const question = await write(["knowledge", "questions", "Is-it-read.md"], questionTemplate({ title: "Is it read?", date: "2026-01-01", ticket: "SELF-1" }));
 		const registry = await write(["registries", "settings.csv"], "name,value,status,ticket\nAlpha,1,found,SELF-1\nBeta,2,verified,SELF-1\n");
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 
 		showPanel("docs");
 		const keyed = (key: string) => rows().find((r) => r.querySelector(".doc-key")?.textContent === key);
@@ -300,8 +300,10 @@ export function selftestWork(): Promise<Steps> {
 			const target = await until(() => keyed("SELF-2"));
 			const box = target!.getBoundingClientRect();
 			target!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: box.left + 8, clientY: box.top + 4 }));
+			// By its label: an item that opens a submenu also holds its arrow, which is a character of the icon font, so
+			// its whole text is never the label alone, and this step never found the item.
 			const statusTrigger = await until(() =>
-				[...document.querySelectorAll<HTMLElement>(".menu-pop.row-menu [role=menuitem]")].find((item) => item.textContent?.trim() === "Set status"),
+				[...document.querySelectorAll<HTMLElement>(".menu-pop.row-menu [role=menuitem]")].find((item) => (item.querySelector(".menu-label") ?? item).textContent?.trim() === "Set status"),
 			);
 			if (!statusTrigger) return false;
 			statusTrigger.click();
@@ -390,7 +392,7 @@ export function selftestWork(): Promise<Steps> {
 		// A prompt kept in the knowledge base is offered in the Agent panel, by its name.
 		await step("promptKeptAndOffered", async () => {
 			await write(["knowledge", "prompts", "Self-prompt.md"], "# Self prompt\n\nSay what the selected code does.\n");
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			const { keptPrompts } = await import("./agent/Agent");
 			return until(() => keptPrompts().some((prompt) => prompt.title === "Self prompt" && prompt.kind === "prompts"));
 		});
@@ -405,7 +407,7 @@ export function selftestWork(): Promise<Steps> {
 
 		// A link to a file that is not there is said in Health, and marked on the page before anyone clicks it.
 		const linked = await write(["knowledge", "reference", "Links.md"], "# Where things are\n\nThe ticket is [SELF-1](../../tickets/SELF-1.md). The first notes were in [a file since removed](../../specs/Removed.md#notes).\n");
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		showPanel("health");
 		await step("brokenLinkSaid", () => until(() => checks().some((text) => text.includes("links to a file that is not there: ../../specs/Removed.md"))));
 		await step("brokenLinkMarked", async () => {
@@ -420,7 +422,7 @@ export function selftestWork(): Promise<Steps> {
 		// written in the prose is a way to that ticket.
 		await write(["specs", "kept", "Moved.md"], "# A spec that was moved\n");
 		const moved = await write(["knowledge", "reference", "Moved.md"], "# Where the spec went\n\nIt follows SELF-1. The spec is [here](../../specs/Moved.md#checks).\n");
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		showPanel("health");
 		await step("movedLinkMended", async () => {
 			const row = await until(() => [...document.querySelectorAll<HTMLElement>(".check-row")].find((r) => r.textContent?.includes("../../specs/Moved.md")));
@@ -474,7 +476,7 @@ export function selftestWriting(): Promise<Steps> {
 		const inLive = (selector: string) => document.querySelector(`.cm-md-host ${selector}`);
 
 		const note = await write(["Writing.md"], "# Writing\n\nSee [[SELF-1]] and [[SELF-1|the ticket]]. None: [[no such note]].\n\n- first\n");
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		await listed(note);
 		await step("namedLinkOnPage", async () => {
 			await openFile(note);
@@ -521,7 +523,7 @@ export function selftestWriting(): Promise<Steps> {
 		await step("longPageDrawn", async () => {
 			const long = `# Long\n\n${Array.from({ length: 400 }, (_, n) => `## Part ${n}\n\nA paragraph with **strong** words and \`code\`, number ${n}.\n`).join("\n")}`;
 			const path = await write(["Long.md"], long);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			const from = performance.now();
 			await openFile(path);
 			switchTo("Edit");
@@ -534,7 +536,7 @@ export function selftestWriting(): Promise<Steps> {
 		await step("renameFollowedByName", async () => {
 			const target = await write(["Named.md"], "# A page to be renamed\n");
 			const pointer = await write(["Pointer.md"], "# Pointer\n\nSee [[Named]] and [[Named|it]].\n");
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			await listed(target);
 			const to = canonical(joinPath(root, ...folder, "Renamed.md"));
 			await backend.rename(target, to);

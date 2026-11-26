@@ -83,15 +83,33 @@ export async function openInSystemApp(filePath: string): Promise<void> {
 	proc.unref();
 }
 
+/**
+ * The one word Explorer is given to open a folder with a file selected in it: `/select,"<path>"`. Explorer reads
+ * its command line itself, and there a comma ends a word unless it is inside quotes. Given as a word of its own,
+ * the path was put in quotes only when it had a space in it, so `a,b.txt` was cut at its comma and nothing was
+ * selected. Here the path is in quotes whatever is in it, which is why the line must reach Explorer as written
+ * (`windowsVerbatimArguments`): quoted for it a second time, the quotes would arrive with backslashes before them.
+ */
+export function explorerSelectArgument(filePath: string): string {
+	// A quote cannot be in a Windows name, and Explorer does not take a forward slash for a backslash here.
+	const path = filePath.replace(/"/g, "").replace(/\//g, "\\");
+	// A drive's root keeps its backslash (`C:` alone is another place) and has nothing in it that needs quotes.
+	if (/^[A-Za-z]:\\?$/.test(path)) return `/select,${path}`;
+	// A backslash before the closing quote can be read as part of the quote; a folder is the same without it.
+	return `/select,"${path.replace(/\\+$/, "")}"`;
+}
+
+/** Builds the OS command to reveal/highlight a file on macOS or Windows without shell interpolation. */
+export function revealFileCommand(platform: "darwin" | "win32", filePath: string): string[] {
+	if (platform === "darwin") return ["open", "-R", filePath];
+	return ["explorer.exe", explorerSelectArgument(filePath)];
+}
+
 /** Reveals/highlights a workspace-validated file path in the OS file manager without shell interpolation. */
 export async function revealPathInFileManager(filePath: string): Promise<void> {
-	if (process.platform === "darwin") {
-		const proc = Bun.spawn(["open", "-R", filePath], { stdout: "ignore", stderr: "ignore" });
-		proc.unref();
-		return;
-	}
-	if (process.platform === "win32") {
-		const proc = Bun.spawn(["explorer.exe", `/select,${filePath}`], { stdout: "ignore", stderr: "ignore" });
+	if (process.platform === "darwin" || process.platform === "win32") {
+		// On Windows the command is a line written out for Explorer, quotes and all: it is passed as written.
+		const proc = Bun.spawn(revealFileCommand(process.platform, filePath), { stdout: "ignore", stderr: "ignore", windowsVerbatimArguments: process.platform === "win32" });
 		proc.unref();
 		return;
 	}

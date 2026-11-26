@@ -1,7 +1,7 @@
 // Side panels and where they dock. Each panel has a home side; the user can
 // move any of them to the other side, and the choice is saved with the
 // workspace's layout.
-import { createSignal } from "solid-js";
+import { createSignal, snapshot } from "solid-js";
 import { hasOutline } from "../../shared/outline";
 import { recall, remember } from "../graph/canvas";
 import { dockedView } from "../layout";
@@ -69,7 +69,8 @@ export const isPanelAvailable = (id: PanelId): boolean => {
 	return panel?.when ? panel.when() : true;
 };
 
-export const sideOf = (id: PanelId): Side => state.settings.layout.dock?.[id] ?? PANELS.find((p) => p.id === id)!.home;
+const sideOfFrom = (src: typeof state, id: PanelId): Side => src.settings.layout.dock?.[id] ?? PANELS.find((p) => p.id === id)!.home;
+export const sideOf = (id: PanelId): Side => sideOfFrom(state, id);
 const viewKey = (side: Side) => (side === "left" ? "leftView" : "rightView");
 export const isOpen = (id: PanelId) => state.settings.layout[sideOf(id)] && state[viewKey(sideOf(id))] === id;
 
@@ -100,7 +101,7 @@ export function loadOutlineMemory(root: string | undefined) {
 }
 export function recordOutlineActive(active: boolean, before?: SideSnapshot | null) {
 	outlineMemory = active ? { active: true, before: before !== undefined ? before : outlineMemory.before } : observeOutlineState(false, outlineMemory);
-	const root = state.workspace?.root;
+	const root = snapshot(state).workspace?.root;
 	if (root) remember(outlineKey(root), formatOutlineActive(outlineMemory.active));
 }
 export function resetOutlineActive() {
@@ -116,7 +117,7 @@ export function loadPlanPaletteMemory(root: string | undefined) {
 }
 export function recordPlanPaletteActive(active: boolean, before?: SideSnapshot | null) {
 	planPaletteMemory = active ? { active: true, before: before !== undefined ? before : planPaletteMemory.before } : observeOutlineState(false, planPaletteMemory);
-	const root = state.workspace?.root;
+	const root = snapshot(state).workspace?.root;
 	if (root) remember(planPaletteKey(root), formatOutlineActive(planPaletteMemory.active));
 }
 export function resetPlanPaletteActive() {
@@ -124,7 +125,8 @@ export function resetPlanPaletteActive() {
 }
 
 export function showPanel(id: PanelId) {
-	const side = sideOf(id);
+	const cur = snapshot(state);
+	const side = sideOfFrom(cur, id);
 	// In narrow layout, right-docked panels open cleanly inside the left island slot without mutating dock settings.
 	if (side === "right" && narrowPanels()) {
 		if (id === "objects" && isPanelAvailable("objects")) recordOutlineActive(true);
@@ -133,15 +135,19 @@ export function showPanel(id: PanelId) {
 		else if (narrowHosted() === "palette" && isPlanChartActive()) recordPlanPaletteActive(false, null);
 		setNarrowHosted(id);
 		setLastShown("left");
-		setState("rightView", id);
-		setState("settings", "layout", "left", true);
+		setState((s) => {
+			s.rightView = id;
+			s.settings.layout.left = true;
+		});
 		setTimeout(() => focusPanel(id), 0);
 		return;
 	}
 	setNarrowHosted(null);
 	setLastShown(side);
-	setState(viewKey(side), id);
-	setState("settings", "layout", side, true);
+	setState((s) => {
+		s[viewKey(side)] = id;
+		s.settings.layout[side] = true;
+	});
 	// Once the panel is drawn. Asking for a panel that is already showing still takes the keyboard to it.
 	setTimeout(() => focusPanel(id), 0);
 }
@@ -178,10 +184,13 @@ export const panelOn = (side: Side): PanelId | null =>
  * went: then it goes to the editor. A side that is open but has no room is brought back, not shut.
  */
 export function toggleSide(side: Side) {
+	const cur = snapshot(state);
 	if (side === "right" && narrowPanels()) {
-		if (narrowHosted() && state.settings.layout.left && !crowdedOut("left")) {
+		if (narrowHosted() && cur.settings.layout.left && !crowdedOut("left")) {
 			setNarrowHosted(null);
-			setState("settings", "layout", "left", false);
+			setState((s) => {
+				s.settings.layout.left = false;
+			});
 			queueMicrotask(() => (!document.activeElement || document.activeElement === document.body) && focusEditor());
 			return;
 		}
@@ -189,28 +198,43 @@ export function toggleSide(side: Side) {
 		if (target) showPanel(target);
 		return;
 	}
-	if (side === "left" && narrowPanels() && narrowHosted() && state.settings.layout.left && !crowdedOut("left")) {
+	if (side === "left" && narrowPanels() && narrowHosted() && cur.settings.layout.left && !crowdedOut("left")) {
 		setNarrowHosted(null);
 		return;
 	}
-	if (state.settings.layout[side] && !crowdedOut(side)) {
-		setState("settings", "layout", side, false);
+	if (cur.settings.layout[side] && !crowdedOut(side)) {
+		setState((s) => {
+			s.settings.layout[side] = false;
+		});
 		queueMicrotask(() => (!document.activeElement || document.activeElement === document.body) && focusEditor());
 		return;
 	}
 	setLastShown(side);
-	setState("settings", "layout", side, true);
+	setState((s) => {
+		s.settings.layout[side] = true;
+	});
 }
 
 export function togglePanel(id: PanelId) {
-	if (isShown(id)) {
-		if (narrowPanels() && narrowHosted() === id) {
+	const cur = snapshot(state);
+	const side = sideOfFrom(cur, id);
+	const hosted = narrowHosted();
+	const shown =
+		narrowPanels() && hosted
+			? hosted === id && cur.settings.layout.left && !crowdedOut("left")
+			: cur.settings.layout[side] && cur[viewKey(side)] === id && !crowdedOut(side);
+	if (shown) {
+		if (narrowPanels() && hosted === id) {
 			if (id === "objects" && isPanelAvailable("objects")) recordOutlineActive(false, null);
 			if (id === "palette" && isPlanChartActive()) recordPlanPaletteActive(false, null);
 			setNarrowHosted(null);
-			setState("settings", "layout", "left", false);
+			setState((s) => {
+				s.settings.layout.left = false;
+			});
 		} else {
-			setState("settings", "layout", sideOf(id), false);
+			setState((s) => {
+				s.settings.layout[side] = false;
+			});
 		}
 	} else {
 		showPanel(id);
@@ -219,15 +243,18 @@ export function togglePanel(id: PanelId) {
 
 export function movePanel(id: PanelId) {
 	if (narrowHosted() === id) setNarrowHosted(null);
-	const from = sideOf(id);
+	const cur = snapshot(state);
+	const from = sideOfFrom(cur, id);
 	const to: Side = from === "left" ? "right" : "left";
-	const wasShown = state[viewKey(from)] === id;
-	setState("settings", "layout", "dock", (dock) => ({ ...(dock ?? {}), [id]: to }));
-	// The side it left shows another of its panels, or closes.
-	if (wasShown) {
-		const next = PANELS.find((p) => p.id !== id && sideOf(p.id) === from && isPanelAvailable(p.id));
-		if (next) setState(viewKey(from), next.id);
-		else setState("settings", "layout", from, false);
-	}
+	const wasShown = cur[viewKey(from)] === id;
+	const next = wasShown ? PANELS.find((p) => p.id !== id && sideOfFrom(cur, p.id) === from && isPanelAvailable(p.id)) : undefined;
+	setState((s) => {
+		s.settings.layout.dock = { ...(s.settings.layout.dock ?? {}), [id]: to };
+		// The side it left shows another of its panels, or closes.
+		if (wasShown) {
+			if (next) s[viewKey(from)] = next.id;
+			else s.settings.layout[from] = false;
+		}
+	});
 	showPanel(id);
 }

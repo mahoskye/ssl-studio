@@ -2,17 +2,19 @@
 // five-state code status breakdown, open questions/suggestions, flowchart test
 // walkthroughs, and spec status. Answers and accepted suggestions are undoable
 // text edits on the plan (ADR 0002).
-import { createEffect, createMemo, createResource, createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, onSettled, Show, untrack } from "solid-js";
+import { createDraft } from "../draft";
+import { createAsyncQuery } from "../asyncQuery";
 import { Icon } from "../Icon";
-import { agent, currentModel } from "../agent/store";
+import { agent, currentModel, resume } from "../agent/store";
 import { choose } from "../dialogs";
 import { showPanel } from "../panels/registry";
 import { promoteToKnowledge } from "../projectDocs";
 import { documents, openFile, state } from "../state";
 import { baseName, joinPath } from "../../shared/paths";
-import { buildDriftAgentDraft, buildPlanAgentDraft, buildTestsAgentDraft, decisionsOf, describeSuggestion, planHash, planTargetsOf, type Decision } from "./assist";
+import { buildDriftAgentDraft, buildPlanAgentDraft, buildTestsAgentDraft, decisionsOf, describeSuggestion, planHashMatches, planTargetsOf, testsHashMatches, type Decision } from "./assist";
 import { planTestsOf, type Plan, type PlanNode, type PlanTestInput, type PlanTestPatch } from "./model";
-import { scriptOf, unbuiltNodes } from "./build";
+import { modelCostNote, unbuiltNodes, unitsToReview } from "./build";
 import { anyChanges, builtOf, chartChanges, journeyDraft, pathSummary, planPaths, type BuiltUnit, type Drift, type PlanPath } from "./built";
 import { CODE_INDICATOR_WORDS, type CodeIndicator } from "./chart";
 import { recheckPlan } from "./check";
@@ -72,6 +74,28 @@ export function resolveDriftOpenAction(
 	return null;
 }
 
+/** Local draft input for decided answers so unrelated plan edits never overwrite in-progress typing, while unchanged commits snap back after flush. */
+function DraftAnswerInput(props: { value: string; ariaLabel: string; onCommit: (value: string) => void }) {
+	const [draft, setDraft] = createDraft(() => props.value);
+	return (
+		<input
+			value={draft()}
+			aria-label={props.ariaLabel}
+			onInput={(e) => setDraft(e.currentTarget.value)}
+			onChange={(e) => {
+				const el = e.currentTarget;
+				props.onCommit(el.value);
+				onSettled(() => {
+					if (!el.isConnected) return;
+					const cur = untrack(() => props.value);
+					setDraft(cur);
+					if (el.value !== cur) el.value = cur;
+				});
+			}}
+		/>
+	);
+}
+
 /** Mounted while its plan shows, and hidden when collapsed: a build under way is not lost from sight for good. */
 export function PlanAssistant(props: {
 	path: string;
@@ -111,12 +135,10 @@ export function PlanAssistant(props: {
 	let draftSeq = 0;
 	const customTests = createMemo(() => planTestsOf(props.plan));
 
-	onMount(() => void loadRun(props.path));
-
 	const run = () => a().run;
 	const STATUS = { pending: "Waiting", running: "Building", passed: "Passed", stuck: "Stuck", skipped: "Waiting on a stuck unit", kept: "Untouched" } as const;
 	/** A run of an earlier version of the chart: it cannot be reviewed against this one. */
-	const stale = () => Boolean(run() && run()!.planHash !== planHash(props.plan));
+	const stale = () => Boolean(run() && !planHashMatches(run()!.planHash, props.plan));
 	const built = () => builtOf(props.plan);
 	const changes = () => chartChanges(props.plan, run());
 	const uri = () => documents.get(props.path)?.model.uri.toString();
@@ -129,21 +151,34 @@ export function PlanAssistant(props: {
 	const closed = () => allDecisions().filter((d) => Boolean(d.answer?.trim()));
 	const inputCount = () => open().length + a().suggestions.length;
 
-	// Clear any pending journey test draft when collapsing the Tests card or switching plans.
-	createEffect(() => {
-		props.path;
-		setDraftReq(null);
-	});
-	createEffect(() => {
-		if (!testsOpen()) setDraftReq(null);
-	});
+	// Load any saved build run and clear pending journey test drafts when mounting or switching plans.
+	const planPath = createMemo(() => props.path);
+	createEffect(
+		() => planPath(),
+		(p) => {
+			setDraftReq(null);
+			untrack(() => {
+				void loadRun(p);
+			});
+		},
+	);
+	createEffect(
+		() => testsOpen(),
+		(isOpen) => {
+			if (!isOpen) setDraftReq(null);
+		},
+	);
 
 	// Auto-open "Needs your input" whenever questions or suggestions arrive.
-	createEffect(() => {
-		if (inputCount() > 0) setInputOpen(true);
-	});
+	const inputTotal = createMemo(() => inputCount());
+	createEffect(
+		() => inputTotal(),
+		(count) => {
+			if (count > 0) setInputOpen(true);
+		},
+	);
 
-	const [spec] = createResource(
+	const [spec] = createAsyncQuery(
 		() => [props.path, props.text, a().specVersion] as const,
 		([path]) => specState(path),
 	);
@@ -153,17 +188,19 @@ export function PlanAssistant(props: {
 	const discard = async () => {
 		const r = run();
 		if (!r) return;
-		const done = r.units.filter((u) => u.status === "passed" && !r.accepted.includes(scriptOf(u, props.plan))).length;
+		// The units that passed and have not been given to their script: a script can be accepted and still have one waiting.
+		const done = unitsToReview(r, props.plan).length;
 		const spent = `${r.tokens.toLocaleString()} tokens${r.cost ? `, cost ${r.cost.toFixed(2)}` : ""}`;
 		const what = done ? `${done} built ${done === 1 ? "unit" : "units"} not yet accepted (${spent})` : `its progress (${spent})`;
 		if ((await choose(`Discard this build? It throws away ${what}, and that cannot be brought back. Code already accepted stays.`, [DISCARD], { danger: DISCARD })) === DISCARD) discardRun(props.path);
 	};
 
 	const specHint = createUniqueId();
-	const isLocal = () => {
-		const model = agent.models.find((m) => `${m.providerID}/${m.id}` === currentModel());
-		return model ? model.local : true;
-	};
+	// What is known of the chosen model's cost: said even before opencode has listed its models (`modelCostNote`).
+	const costNote = () => modelCostNote(agent.models, currentModel(), state.settings.agentOwnModels);
+	// The list is read here when opencode is already running (a reloaded page, a second window), so the note is of
+	// what is so. It is not started for this: the build starts it before it asks about the cost.
+	onSettled(() => void resume());
 
 	const Node = (p: { id?: string }) => (
 		<Show when={p.id && props.plan.nodes.some((n) => n.id === p.id)}>
@@ -186,13 +223,22 @@ export function PlanAssistant(props: {
 	};
 
 	// Keep legacy onPath prop synced when running standalone (without shared PlanView path index).
-	createEffect(() => {
-		if (props.onSetActivePathIndex) return;
-		const at = localPath();
-		const path = at === null ? undefined : paths().paths[at];
-		if (at !== null && !path) return void setLocalPath(null);
-		props.onPath?.(path ? path.steps.map((step) => step.id) : null);
-	});
+	createEffect(
+		() => {
+			if (props.onSetActivePathIndex) return { skip: true as const };
+			const at = localPath();
+			const path = at === null ? undefined : paths().paths[at];
+			return { skip: false as const, at, path };
+		},
+		(res) => {
+			if (res.skip) return;
+			if (res.at !== null && !res.path) {
+				setLocalPath(null);
+				return;
+			}
+			props.onPath?.(res.path ? res.path.steps.map((step) => step.id) : null);
+		},
+	);
 	onCleanup(() => {
 		if (!props.onSetActivePathIndex) props.onPath?.(null);
 	});
@@ -203,7 +249,7 @@ export function PlanAssistant(props: {
 		const changed = anyChanges(changes());
 		const testCount = paths().paths.length;
 		const testsFile = built()?.tests;
-		const testsCurrent = Boolean(testsFile && testsFile.hash === planHash(props.plan));
+		const testsCurrent = Boolean(testsFile && testsHashMatches(testsFile.hash, props.plan));
 		return [
 			{
 				name: "Plan doc",
@@ -259,7 +305,7 @@ export function PlanAssistant(props: {
 	};
 
 	return (
-		<aside class="plan-assist" classList={{ "in-palette": Boolean(props.inPalette) }} id={props.id} hidden={props.hidden} aria-label="Plan assistant">
+		<aside class={["plan-assist", { "in-palette": Boolean(props.inPalette) }]} id={props.id} hidden={props.hidden} aria-label="Plan assistant">
 			{/* 1. Workflow Header & Primary Actions Card */}
 			<section class="pa-card pa-hero" aria-label="Plan workflow and actions">
 				<div class="pa-hero-actions">
@@ -311,15 +357,15 @@ export function PlanAssistant(props: {
 
 				{/* 2x2 Pipeline Status Strip */}
 				<ol class="pa-pipeline" aria-label="Where the plan stands">
-					<For each={stages()}>
+					<For each={stages()} keyed={(stage) => stage.name}>
 						{(stage) => (
-							<li class={`pa-stage ${stage.state}`} title={`${stage.name}: ${stage.words}`}>
+							<li class={`pa-stage ${stage().state}`} title={`${stage().name}: ${stage().words}`}>
 								<span class="pa-stage-icon" aria-hidden="true">
-									<Icon name={stage.state === "done" ? "check" : stage.state === "warn" ? "warning" : "circle-outline"} />
+									<Icon name={stage().state === "done" ? "check" : stage().state === "warn" ? "warning" : "circle-outline"} />
 								</span>
 								<span class="pa-stage-body">
-									<span class="pa-stage-name">{stage.name}</span>
-									<span class="pa-stage-words">{stage.words}</span>
+									<span class="pa-stage-name">{stage().name}</span>
+									<span class="pa-stage-words">{stage().words}</span>
 								</span>
 							</li>
 						)}
@@ -330,7 +376,14 @@ export function PlanAssistant(props: {
 					<button type="button" class="link" title="Choose the model in the Agent panel" onClick={() => showPanel("agent")}>
 						{currentModel() || "Choose model in Agent panel"}
 					</button>
-					<Show when={!isLocal()}> · paid model</Show>
+					<Show when={costNote()}>
+						{(note) => (
+							<>
+								{" "}
+								· <span title={note().why}>{note().words}</span>
+							</>
+						)}
+					</Show>
 					<Show when={a().tokens}>
 						{" "}
 						· {a().tokens.toLocaleString()} tokens
@@ -355,11 +408,11 @@ export function PlanAssistant(props: {
 
 			{/* 2. Needs Your Input Card (Questions, Suggestions, Decisions) */}
 			<section class="pa-card" aria-label="Questions and suggestions">
-				<button type="button" class="pa-card-head" aria-expanded={inputOpen()} onClick={() => setInputOpen((o) => !o)}>
+				<button type="button" class="pa-card-head" aria-expanded={inputOpen() ? "true" : "false"} onClick={() => setInputOpen((o) => !o)}>
 					<Icon name={inputOpen() ? "chevron-down" : "chevron-right"} />
 					<span class="pa-card-title">Needs your input</span>
 					<span class="spacer" />
-					<span class="pa-card-meta" classList={{ accent: inputCount() > 0 }}>
+					<span class={["pa-card-meta", { accent: inputCount() > 0 }]}>
 						{inputCount() > 0 ? `${inputCount()} open` : closed().length ? `${closed().length} decided` : "None"}
 					</span>
 				</button>
@@ -372,17 +425,17 @@ export function PlanAssistant(props: {
 
 						<Show when={open().length}>
 							<h4 class="pa-subhead">{open().length === 1 ? "A question for you" : `${open().length} questions for you`}</h4>
-							<For each={open()}>
+							<For each={open()} keyed={(q) => q.question}>
 								{(q) => (
 									<div class="plan-question">
 										<p>
-											{q.question} <Node id={q.node} />
+											{q().question} <Node id={q().node} />
 										</p>
-										<Show when={q.suggested?.length}>
+										<Show when={q().suggested?.length}>
 											<div class="plan-answers">
-												<For each={q.suggested}>
+												<For each={q().suggested}>
 													{(s) => (
-														<button type="button" onClick={() => answer(props.path, q.question, s)}>
+														<button type="button" onClick={() => answer(props.path, q().question, s)}>
 															{s}
 														</button>
 													)}
@@ -391,12 +444,12 @@ export function PlanAssistant(props: {
 										</Show>
 										<input
 											placeholder="Your answer"
-											aria-label={q.question}
+											aria-label={q().question}
 											onKeyDown={(e) => {
-												if (e.key === "Enter" && e.currentTarget.value.trim()) answer(props.path, q.question, e.currentTarget.value);
+												if (e.key === "Enter" && e.currentTarget.value.trim()) answer(props.path, q().question, e.currentTarget.value);
 											}}
 											onChange={(e) => {
-												if (e.currentTarget.value.trim()) answer(props.path, q.question, e.currentTarget.value);
+												if (e.currentTarget.value.trim()) answer(props.path, q().question, e.currentTarget.value);
 											}}
 										/>
 										<div class="pa-promote-row">
@@ -406,7 +459,7 @@ export function PlanAssistant(props: {
 												title="Save this open question to docs/knowledge/questions/"
 												onClick={() =>
 													void promoteToKnowledge("questions", {
-														title: q.question,
+														title: q().question,
 														body: `Raised while refining plan "${props.plan.title || "Plan"}".`,
 														ticket: typeof props.plan.ticket === "string" ? props.plan.ticket : undefined,
 													})
@@ -448,18 +501,22 @@ export function PlanAssistant(props: {
 						</Show>
 
 						<Show when={closed().length}>
-							<button type="button" class="pa-subtoggle" aria-expanded={decidedOpen()} onClick={() => setDecidedOpen((o) => !o)}>
+							<button type="button" class="pa-subtoggle" aria-expanded={decidedOpen() ? "true" : "false"} onClick={() => setDecidedOpen((o) => !o)}>
 								<Icon name={decidedOpen() ? "chevron-down" : "chevron-right"} />
 								<span>What you decided ({closed().length})</span>
 							</button>
 							<Show when={decidedOpen()}>
-								<For each={closed()}>
+								<For each={closed()} keyed={(q) => q.question}>
 									{(q) => (
 										<div class="plan-question decided">
 											<p class="hint">
-												{q.question} <Node id={q.node} />
+												{q().question} <Node id={q().node} />
 											</p>
-											<input value={q.answer} aria-label={q.question} onChange={(e) => answer(props.path, q.question, e.currentTarget.value)} />
+											<DraftAnswerInput
+												value={q().answer ?? ""}
+												ariaLabel={q().question}
+												onCommit={(val) => answer(props.path, q().question, val)}
+											/>
 											<div class="pa-promote-row">
 												<button
 													type="button"
@@ -467,9 +524,9 @@ export function PlanAssistant(props: {
 													title="Promote this settled answer to a numbered Decision ADR in docs/knowledge/decisions/"
 													onClick={() =>
 														void promoteToKnowledge("decisions", {
-															title: q.question.replace(/\?+$/, ""),
-															body: `Question from plan "${props.plan.title || "Plan"}": ${q.question}`,
-															decision: q.answer,
+															title: q().question.replace(/\?+$/, ""),
+															body: `Question from plan "${props.plan.title || "Plan"}": ${q().question}`,
+															decision: q().answer,
 															sourcePlan: props.path,
 															ticket: typeof props.plan.ticket === "string" ? props.plan.ticket : undefined,
 														})
@@ -489,7 +546,7 @@ export function PlanAssistant(props: {
 
 			{/* 3. Build & Code Sync Card */}
 			<section class="pa-card" aria-label="Build and code status">
-				<button type="button" class="pa-card-head" aria-expanded={buildOpen()} onClick={() => setBuildOpen((o) => !o)}>
+				<button type="button" class="pa-card-head" aria-expanded={buildOpen() ? "true" : "false"} onClick={() => setBuildOpen((o) => !o)}>
 					<Icon name={buildOpen() ? "chevron-down" : "chevron-right"} />
 					<span class="pa-card-title">Build &amp; code</span>
 					<span class="spacer" />
@@ -513,8 +570,7 @@ export function PlanAssistant(props: {
 													<Show when={count() > 0 || kind === "green" || kind === "grey"}>
 														<button
 															type="button"
-															class={`pa-code-pill ${kind}`}
-															classList={{ active: active(), empty: count() === 0 }}
+															class={[`pa-code-pill ${kind}`, { active: active(), empty: count() === 0 }]}
 															disabled={count() === 0}
 															title={`${CODE_INDICATOR_WORDS[kind].label}: ${CODE_INDICATOR_WORDS[kind].detail}`}
 															onClick={() => setPickedCodeState((cur) => (cur === kind ? null : kind))}
@@ -546,10 +602,10 @@ export function PlanAssistant(props: {
 						<Show when={anyChanges(changes())}>
 							<div class="pa-subsection">
 								<h4 class="pa-subhead">Since it was built</h4>
-								<For each={[...changes().changed.map((id) => ({ id, what: "Changed" })), ...changes().added.map((id) => ({ id, what: "New" }))]}>
+								<For each={[...changes().changed.map((id) => ({ id, what: "Changed" })), ...changes().added.map((id) => ({ id, what: "New" }))]} keyed={(c) => `${c.what}:${c.id}`}>
 									{(c) => (
 										<p class="plan-change">
-											{c.what}: <Node id={c.id} />
+											{c().what}: <Node id={c().id} />
 										</p>
 									)}
 								</For>
@@ -596,33 +652,36 @@ export function PlanAssistant(props: {
 											<Show when={r().status === "budget"}> · stopped at its budget</Show>
 											<Show when={r().status === "stopped" && !a().running}> · stopped</Show>
 										</p>
-										<For each={r().units.filter((u) => u.status !== "kept")}>
+										<Show when={r().status === "budget" && !a().running}>
+											<p class="hint">Carry on building asks first how much more it may spend. What has passed is kept, and is not built again.</p>
+										</Show>
+										<For each={r().units.filter((u) => u.status !== "kept")} keyed={(u) => u.name}>
 											{(unit) => (
-												<div class={`plan-unit ${unit.status}`}>
+												<div class={`plan-unit ${unit().status}`}>
 													<p>
-														<strong>{unit.name}</strong>{" "}
+														<strong>{unit().name}</strong>{" "}
 														<span class="hint">
-															{STATUS[unit.status]}
-															{unit.change ? ", an edit" : ""}
-															{unit.attempts > 1 && unit.status !== "pending" ? `, try ${unit.attempts}` : ""}
+															{STATUS[unit().status]}
+															{unit().change ? ", an edit" : ""}
+															{unit().attempts > 1 && unit().status !== "pending" ? `, try ${unit().attempts}` : ""}
 														</span>
 													</p>
-													<Show when={unit.problems?.length}>
+													<Show when={unit().problems?.length}>
 														<ul class="plan-problems">
-															<For each={unit.problems}>{(p) => <li>{p}</li>}</For>
+															<For each={unit().problems}>{(p) => <li>{p}</li>}</For>
 														</ul>
 													</Show>
-													<Show when={unit.status === "stuck" && unit.question && !unit.answer}>
+													<Show when={unit().status === "stuck" && unit().question && !unit().answer}>
 														<input
 															placeholder="Your answer"
-															aria-label={unit.question}
+															aria-label={unit().question}
 															onKeyDown={(e) => {
-																if (e.key === "Enter") answerUnit(props.path, unit.name, e.currentTarget.value);
+																if (e.key === "Enter") answerUnit(props.path, unit().name, e.currentTarget.value);
 															}}
 														/>
 													</Show>
-													<Show when={unit.status === "stuck" && !a().running && !(unit.question && !unit.answer)}>
-														<button type="button" onClick={() => retryUnit(props.path, unit.name)}>
+													<Show when={unit().status === "stuck" && !a().running && !(unit().question && !unit().answer)}>
+														<button type="button" onClick={() => retryUnit(props.path, unit().name)}>
 															Try again
 														</button>
 													</Show>
@@ -677,20 +736,21 @@ export function PlanAssistant(props: {
 										{(d) => {
 											const openAction = () => resolveDriftOpenAction(d, built()?.units ?? [], planTargets(), nodeIdSet());
 											return (
-												<p class="plan-drift" classList={{ warning: d.severity === "warning" }}>
+												<p class={["plan-drift", { warning: d.severity === "warning" }]}>
 													{d.message}{" "}
-													<Show when={openAction()} keyed>
+													<Show when={openAction()}>
 														{(action) => (
 															<button
 																type="button"
 																class="link"
 																onClick={() => {
-																	if (action.kind === "unit") void openProcedure(uri(), action.unit);
-																	else if (action.kind === "script") void openScript(action.script);
-																	else props.onSelect(action.nodeId);
+																	const act = action();
+																	if (act.kind === "unit") void openProcedure(uri(), act.unit);
+																	else if (act.kind === "script") void openScript(act.script);
+																	else props.onSelect(act.nodeId);
 																}}
 															>
-																{action.kind === "node" ? "Show step" : "Open"}
+																{action().kind === "node" ? "Show step" : "Open"}
 															</button>
 														)}
 													</Show>
@@ -717,11 +777,11 @@ export function PlanAssistant(props: {
 
 			{/* 4. Tests & Scenarios Card (Always Visible — Business Test Cases + Flowchart Journeys) */}
 			<section class="pa-card" aria-label="Flowchart tests">
-				<button type="button" class="pa-card-head" aria-expanded={testsOpen()} onClick={() => setTestsOpen((o) => !o)}>
+				<button type="button" class="pa-card-head" aria-expanded={testsOpen() ? "true" : "false"} onClick={() => setTestsOpen((o) => !o)}>
 					<Icon name={testsOpen() ? "chevron-down" : "chevron-right"} />
 					<span class="pa-card-title">Tests</span>
 					<span class="spacer" />
-					<span class="pa-card-meta" classList={{ accent: shownPath() !== null || customTests().length > 0 }}>
+					<span class={["pa-card-meta", { accent: shownPath() !== null || customTests().length > 0 }]}>
 						{customTests().length ? `${customTests().length} ${customTests().length === 1 ? "test" : "tests"} · ` : ""}
 						{paths().paths.length}
 						{paths().truncated ? "+" : ""} {paths().paths.length === 1 ? "journey" : "journeys"}
@@ -859,7 +919,7 @@ export function PlanAssistant(props: {
 										<button type="button" class="link" onClick={() => state.workspace && void openFile(joinPath(state.workspace.root, tests().script))}>
 											{tests().script}
 										</button>
-										{tests().hash === planHash(props.plan) ? "" : " was written before the chart last changed."}
+										{testsHashMatches(tests().hash, props.plan) ? "" : " was written before the chart or its test cases last changed."}
 									</p>
 								)}
 							</Show>
@@ -870,7 +930,7 @@ export function PlanAssistant(props: {
 
 			{/* 5. Plan Doc Card */}
 			<section class="pa-card" aria-label="Plan doc">
-				<button type="button" class="pa-card-head" aria-expanded={specOpen()} onClick={() => setSpecOpen((o) => !o)}>
+				<button type="button" class="pa-card-head" aria-expanded={specOpen() ? "true" : "false"} onClick={() => setSpecOpen((o) => !o)}>
 					<Icon name={specOpen() ? "chevron-down" : "chevron-right"} />
 					<span class="pa-card-title">Plan doc</span>
 					<span class="spacer" />

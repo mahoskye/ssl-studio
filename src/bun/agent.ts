@@ -9,7 +9,8 @@
 import { randomBytes } from "node:crypto";
 import type { Subprocess } from "bun";
 import type { AgentModel, AgentReply, AgentStatus } from "../shared/protocol";
-import { compareVersions, OPENCODE_RANGE, opencodeCommand } from "./tools";
+import { compareVersions, OPENCODE_RANGE, opencodeCommand, verbatim } from "./tools";
+import { isLocalModelRef, LOCAL_PROVIDERS, parseModelRef } from "../shared/agentModels";
 
 /**
  * opencode 2.2.5 gave a model no tools of its own, only code mode; 2.3 gives
@@ -32,7 +33,6 @@ const NO_TOOLS_OF_ITS_OWN = ["read", "glob", "grep", "subagent", "skill"];
  */
 const DENY = ["shell", "webfetch", "websearch", "external_directory", "question", "edit", "browser", "experimental_image_generate", "opencode_list_mcp_resources", "opencode_read_mcp_resource", "opencode_watch_mcp_event", ...NO_TOOLS_OF_ITS_OWN];
 /** Providers that run on the user's own machines. Anything else may bill. */
-const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama.cpp", "llamacpp", "local"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 const TURN_TIMEOUT_MS = 15 * 60_000;
 const API_TIMEOUT_MS = 60_000;
@@ -78,6 +78,8 @@ type Waiter = {
 	overLimit?: boolean;
 	/** Why the turn failed, when opencode says so on the event and not on a message. */
 	failure?: string;
+	/** The session's messages as they were before the turn's prompt was sent: what is new after them is the turn's. */
+	before?: { seen: ReadonlySet<string>; count: number };
 };
 
 /**
@@ -124,30 +126,8 @@ export function validateAgentServerUrl(rawUrl: string, requireLoopback = false):
 	return `${url.origin}${path}`;
 }
 
-/** Parses and normalizes a `"providerID/modelID"` reference, trimming whitespace and requiring both halves. */
-export function parseModelRef(raw: string | undefined): { providerID: string; id: string; normalized: string } | null {
-	if (typeof raw !== "string") return null;
-	const trimmed = raw.trim();
-	const slash = trimmed.indexOf("/");
-	if (slash <= 0) return null;
-	const providerID = trimmed.slice(0, slash).trim();
-	const id = trimmed.slice(slash + 1).trim();
-	if (!providerID || !id) return null;
-	return { providerID, id, normalized: `${providerID.toLowerCase()}/${id.toLowerCase()}` };
-}
-
-/** True when a `"providerID/modelID"` reference names a local provider or a user-allowlisted own model. */
-export function isLocalModelRef(raw: string | undefined, ownModels?: readonly string[]): boolean {
-	const parsed = parseModelRef(raw);
-	if (!parsed) return false;
-	if (LOCAL_PROVIDERS.has(parsed.providerID.toLowerCase())) return true;
-	if (!ownModels?.length) return false;
-	for (const entry of ownModels) {
-		const own = parseModelRef(entry);
-		if (own && own.normalized === parsed.normalized) return true;
-	}
-	return false;
-}
+// Which models are local is the view's to know too: the rule is in src/shared/agentModels.ts.
+export { isLocalModelRef, parseModelRef };
 
 /**
  * The reason on a failed turn's event, in words. opencode puts it in different
@@ -350,7 +330,8 @@ export class Agent {
 				const password = randomBytes(24).toString("base64url");
 				const env: Record<string, string> = { ...(process.env as Record<string, string>), OPENCODE_PASSWORD: password };
 				if (this.options.serverConfig) env.OPENCODE_CONFIG_CONTENT = this.options.serverConfig;
-				const proc = Bun.spawn(this.command, { env, stdin: "pipe", stdout: "pipe", stderr: "pipe", cwd: this.root() ?? undefined });
+				// The npm shim under a path with a space is a line written out for cmd.exe: Windows is given it as written.
+				const proc = Bun.spawn(this.command, { env, stdin: "pipe", stdout: "pipe", stderr: "pipe", cwd: this.root() ?? undefined, windowsVerbatimArguments: verbatim(this.command) });
 				spawned = proc;
 				if (stale()) {
 					killQuietly(proc);
@@ -518,6 +499,7 @@ export class Agent {
 					throw new Error(`opencode GET /api/event: ${response.status}`);
 				}
 				resolveReady();
+				void this.catchUp(epoch);
 
 				const decoder = new TextDecoder();
 				let buffer = "";
@@ -584,6 +566,34 @@ export class Agent {
 		})();
 
 		return ready;
+	}
+
+	/**
+	 * What the turns that are waiting missed while there was no stream. The stream does not replay: a turn that
+	 * was asked for while it was down, and ended before it was back, waited for an event that had been sent to
+	 * no one, until its own time ran out (fifteen minutes). With the stream up again the server is asked: a
+	 * session's messages end with an `idle` message, which has the outcome, once its turn is over. A turn that is
+	 * still running has none, and its end comes over the stream.
+	 */
+	private async catchUp(epoch: number) {
+		for (const [sessionID, waiter] of [...this.waiters]) {
+			// Nothing was sent for it yet, so nothing can have ended.
+			if (!waiter.before) continue;
+			try {
+				const messages = ((await this.api("GET", `/api/session/${encodeURIComponent(sessionID)}/message?limit=50&order=desc`))?.data ?? []) as any[];
+				if (epoch !== this.startEpoch || this.waiters.get(sessionID) !== waiter) continue;
+				const idle = extractNewMessages(messages, waiter.before.seen, waiter.before.count)
+					.reverse()
+					.find((m) => m?.type === "idle");
+				const outcome = /^(succeeded|failed|interrupted)$/.exec(String(idle?.outcome))?.[1] as AgentReply["outcome"] | undefined;
+				if (!outcome) continue;
+				if (outcome === "failed") waiter.failure = failureText(idle);
+				waiter.resolve(outcome);
+				this.waiters.delete(sessionID);
+			} catch {
+				// The server did not answer: the turn goes on waiting, and a stream that drops again fails it.
+			}
+		}
 	}
 
 	private dispatch(event: { type: string; data?: any }) {
@@ -772,6 +782,8 @@ export class Agent {
 				if (typeof m?.id === "string" && m.id) seenIds.add(m.id);
 			}
 			const beforeCount = beforeMessages.length;
+			// A copy: the session's own set grows with the turn's messages once it is over.
+			waiter.before = { seen: new Set(seenIds), count: beforeCount };
 
 			const turnTimeout = input.timeoutMs ?? TURN_TIMEOUT_MS;
 			turnTimer = setTimeout(() => waiter.resolve("timeout"), turnTimeout);

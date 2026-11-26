@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
-import { reconcile } from "solid-js/store";
+import { flush } from "solid-js";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tabLabels } from "../src/view/editor/tabs";
@@ -18,14 +18,18 @@ if (typeof (globalThis as any).localStorage === "undefined") {
 if (typeof (globalThis as any).window === "undefined") {
 	(globalThis as any).window = {
 		Error,
+		Map,
+		Set,
 		innerHeight: 900,
 		addEventListener() {},
 		removeEventListener() {},
 		location: { href: "http://localhost/", protocol: "http:", host: "127.0.0.1:5190" },
 		matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
 	};
-} else if (!(globalThis as any).window.Error) {
-	(globalThis as any).window.Error = Error;
+} else {
+	if (!(globalThis as any).window.Error) (globalThis as any).window.Error = Error;
+	if (!(globalThis as any).window.Map) (globalThis as any).window.Map = Map;
+	if (!(globalThis as any).window.Set) (globalThis as any).window.Set = Set;
 }
 if (typeof (globalThis as any).document === "undefined") {
 	(globalThis as any).document = {
@@ -427,14 +431,17 @@ function resetAppState() {
 	clearEditorViewStates();
 	askAnswer = null;
 	chooseAnswer = null;
-	setState("workspace", { root: "/ws", name: "ws" });
-	setState("groups", [{ tabs: [], active: null }]);
-	setState("activeGroup", 0);
-	setState("dirty", reconcile({}));
-	setState("conflicts", reconcile({}));
-	setState("messages", []);
-	setState("lsp", { state: "stopped" });
-	setState("info", null);
+	setState((s) => {
+		s.workspace = { root: "/ws", name: "ws" };
+		s.groups = [{ tabs: [], active: null }];
+		s.activeGroup = 0;
+		s.dirty = {};
+		s.conflicts = {};
+		s.messages = [];
+		s.lsp = { state: "stopped" };
+		s.info = null;
+	});
+	flush();
 }
 
 // =============================================================================
@@ -522,11 +529,14 @@ describe("EditorGroup.tsx & opener.ts — group resolution and viewState helpers
 		const ed1 = { getDomNode: () => null } as any;
 		editors[0] = ed0;
 		editors[1] = ed1;
-		setState("groups", [
-			{ tabs: ["/ws/a.ssl"], active: "/ws/a.ssl" },
-			{ tabs: ["/ws/b.ssl"], active: "/ws/b.ssl" },
-		]);
-		setState("activeGroup", 0);
+		setState((s) => {
+			s.groups = [
+				{ tabs: ["/ws/a.ssl"], active: "/ws/a.ssl" },
+				{ tabs: ["/ws/b.ssl"], active: "/ws/b.ssl" },
+			];
+			s.activeGroup = 0;
+		});
+		flush();
 		rpcHandler = (method) => {
 			if (method === "read") return { text: ":PROCEDURE Foo;\n:ENDPROC;\n", mtime: 100, encoding: "utf-8" };
 			return null;
@@ -569,11 +579,15 @@ describe("state.ts — lifecycle & race-condition repairs", () => {
 		const untitledDoc = documents.get(untitledPath)!;
 		untitledDoc.model.setEOL(1); // CRLF
 		untitledDoc.model.setValue("NEW\r\nCONTENT");
-		setState("conflicts", "/ws/target.ssl", true);
+		setState((s) => {
+			s.conflicts["/ws/target.ssl"] = true;
+		});
+		flush();
 
 		askAnswer = "target.ssl";
 		chooseAnswer = "Overwrite";
 		const saved = await save(untitledPath);
+		flush();
 		expect(saved).toBe(true);
 
 		// Existing Doc & Monaco model are reused and updated in place, with no duplicate content listener.
@@ -607,8 +621,11 @@ describe("state.ts — lifecycle & race-condition repairs", () => {
 			return null;
 		};
 
-		setState("workspace", { root: "/wsA", name: "wsA" });
-		setState("groups", [{ tabs: [], active: null }]);
+		setState((s) => {
+			s.workspace = { root: "/wsA", name: "wsA" };
+			s.groups = [{ tabs: [], active: null }];
+		});
+		flush();
 		const restoringA = restoreTabs();
 
 		// Wait until read("/wsA/slow.ssl") is in flight
@@ -616,9 +633,12 @@ describe("state.ts — lifecycle & race-condition repairs", () => {
 		expect(typeof resolveSlowRead).toBe("function");
 
 		// Switch workspace mid-restore to /wsB (still empty before B restores)
-		setState("workspace", { root: "/wsB", name: "wsB" });
-		setState("groups", [{ tabs: [], active: null }]);
-		setState("leftView", "search");
+		setState((s) => {
+			s.workspace = { root: "/wsB", name: "wsB" };
+			s.groups = [{ tabs: [], active: null }];
+			s.leftView = "search";
+		});
+		flush();
 
 		// Now Workspace A's slow read resolves
 		resolveSlowRead({ text: "A", mtime: 1, encoding: "utf-8" });
@@ -671,26 +691,40 @@ describe("state.ts — lifecycle & race-condition repairs", () => {
 		};
 
 		// 1. Workspace switch mid-read
-		setState("workspace", { root: "/wsA", name: "wsA" });
+		setState((s) => {
+			s.workspace = { root: "/wsA", name: "wsA" };
+		});
+		flush();
 		const staleOpen = openFile("/ws/stale.ssl");
 		await new Promise((r) => setTimeout(r, 10));
-		setState("workspace", { root: "/wsB", name: "wsB" });
+		setState((s) => {
+			s.workspace = { root: "/wsB", name: "wsB" };
+		});
+		flush();
 		resolveA({ text: "STALE", mtime: 1, encoding: "utf-8" });
 		await staleOpen;
+		flush();
 		expect(state.groups[0]!.tabs).toEqual([]);
 		expect(documents.has("/ws/stale.ssl")).toBe(false);
 
 		// 2. Group 1 closed mid-read -> clamps safely to group 0 instead of throwing
-		setState("groups", [
-			{ tabs: ["/ws/one.ssl"], active: "/ws/one.ssl" },
-			{ tabs: ["/ws/two.ssl"], active: "/ws/two.ssl" },
-		]);
+		setState((s) => {
+			s.groups = [
+				{ tabs: ["/ws/one.ssl"], active: "/ws/one.ssl" },
+				{ tabs: ["/ws/two.ssl"], active: "/ws/two.ssl" },
+			];
+		});
+		flush();
 		const clampOpen = openFile("/ws/clamped.ssl", { group: 1 });
 		await new Promise((r) => setTimeout(r, 10));
-		setState("groups", [{ tabs: ["/ws/one.ssl"], active: "/ws/one.ssl" }]);
-		setState("activeGroup", 0);
+		setState((s) => {
+			s.groups = [{ tabs: ["/ws/one.ssl"], active: "/ws/one.ssl" }];
+			s.activeGroup = 0;
+		});
+		flush();
 		resolveClamp({ text: "CLAMPED", mtime: 2, encoding: "utf-8" });
 		await clampOpen;
+		flush();
 		expect(state.groups[0]!.tabs).toContain("/ws/clamped.ssl");
 		expect(state.groups[0]!.active).toBe("/ws/clamped.ssl");
 	});

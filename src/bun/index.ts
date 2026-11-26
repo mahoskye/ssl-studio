@@ -53,9 +53,13 @@ const rpc = BrowserView.defineRPC<Schema>({
 	handlers: {
 		requests: {
 			// Not "call": the request proxy is a function, and .call is Function.prototype.call.
-			invoke: (params: unknown) => {
+			invoke: async (params: unknown) => {
 				const { method, args } = params as { method: string; args: unknown[] };
-				return dispatch(backend.api, method, args);
+				try {
+					return await dispatch(backend.api, method, args);
+				} catch (err) {
+					throw err instanceof Error ? err : new Error(String(err));
+				}
 			},
 		},
 	},

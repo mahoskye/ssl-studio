@@ -1,7 +1,8 @@
 // App commands: the command list shows them, the keyboard runs them.
 // A command's keys are in DEFAULT_KEYS and nowhere else; the user's own are
 // in the `keys` setting.
-import { ask, choose, quickPick } from "./dialogs";
+import { snapshot } from "solid-js";
+import { ask, browseWorkspaceFile, choose, quickPick, type QuickPickOption } from "./dialogs";
 import { activeEditor, lastActiveMarkdownPath } from "./editor/EditorGroup";
 import { formatFenceInModel, formatNonSslModel, hadRecentFormatError, languageName } from "./editor/languages";
 import { pickLanguageMode } from "./editor/languagePicker";
@@ -11,10 +12,11 @@ import { folderParts } from "../shared/docSections";
 import { canFormatNonSsl } from "../shared/format";
 import { isCatalog, registryTitle, statusChoices, toneOf } from "../shared/projectDocs";
 import { generateMermaidErDiagram, parseCreateTables, type SqlTableDef } from "../shared/sqlSchema";
+import { textOrWhy, unreadFilesSaid, type UnreadFile } from "../shared/tablePower";
 import { workspaceTags } from "../shared/tags";
 import { docsGoverningFile } from "../shared/workContext";
 import { runMonacoMarkdownAction } from "./editor/markdownKeys";
-import { backend, inApp } from "./backend";
+import { backend, fileExists, inApp } from "./backend";
 import { monaco } from "./editor/monaco";
 import { session } from "./lsp/session";
 import { symbols } from "./panels/Objects";
@@ -29,6 +31,7 @@ import { startTidy } from "./agent/tidy";
 import { baseName, dirName, isInside, joinPath, relativePath, relativeTo } from "../shared/paths";
 import { defaultLayout, type DocFile, type Settings } from "../shared/protocol";
 import { menuForLetter, replaceErDiagramBlock, shouldLetEditorHandleKey } from "../shared/menuBar";
+import { resolveMarkdownMode, resolvePlanMode, resolveTableTextMode } from "../shared/viewModes";
 import { installRecentTabs, stepRecent } from "./recentTabs";
 import { goAlong } from "./navigation";
 import { isPlanPath, newPlan, printPlan, type Plan } from "./plan/model";
@@ -89,13 +92,11 @@ import {
 	heldFromBefore,
 	isUntitled,
 	keepTab,
-	markdownMode,
 	nextTab,
 	notify,
 	openFile,
 	openFolder,
 	openToSide,
-	planMode,
 	previousTab,
 	reopenClosedTab,
 	restartLsp,
@@ -112,21 +113,27 @@ import {
 	split,
 	state,
 	syncLivePreviewMode,
-	tableTextMode,
 	togglePin,
 	type PanelId,
 } from "./state";
+
+const activePathNow = () => {
+	const cur = snapshot(state);
+	return cur.groups[cur.activeGroup]?.active ?? null;
+};
 
 /** `label` is a verb phrase; `detail` is the quieter second line that explains it. */
 export type Command = { id: string; label: string; detail?: string; run: () => void };
 
 const toggle = (key: "bottom") => {
-	if (!state.workspace) return notify("Open a folder first.");
-	setState("settings", "layout", key, (v) => !v);
+	if (!snapshot(state).workspace) return notify("Open a folder first.");
+	setState((s) => {
+		s.settings.layout[key] = !s.settings.layout[key];
+	});
 };
 /** Shows or hides a side of the window. A side no panel is docked on has nothing to show, and says so. */
 function toggleSideOf(side: "left" | "right") {
-	if (!state.workspace) return;
+	if (!snapshot(state).workspace) return;
 	if (!panelOn(side)) return notify(`No panel is docked on the ${side}. Right-click a panel's button to move it there.`);
 	toggleSide(side);
 }
@@ -136,28 +143,35 @@ function toggleSideOf(side: "left" | "right") {
  * Showing the bar saves a setting; what comes back from a save leaves the layout on screen alone (state.ts).
  */
 function resetLayout() {
-	setState("bottomMaximized", false);
+	const cur = snapshot(state);
+	setState((s) => {
+		s.bottomMaximized = false;
+		s.settings.layout = { ...defaultLayout(), dock: {} };
+	});
 	resetOutlineActive();
 	resetPlanPaletteActive();
-	setState("settings", "layout", { ...defaultLayout(), dock: {} });
-	if (state.settings.menuBar === false) void switchSetting("menuBar", true, (settings) => settings.menuBar !== false);
+	if (cur.settings.menuBar === false) void switchSetting("menuBar", true, (settings) => settings.menuBar !== false);
 }
 function toggleMaximizeBottom() {
-	if (!state.workspace) return;
-	if (!state.settings.layout.bottom) {
-		setState("settings", "layout", "bottom", true);
-		setState("bottomMaximized", true);
-		return;
-	}
-	setState("bottomMaximized", (m) => !m);
+	if (!snapshot(state).workspace) return;
+	setState((s) => {
+		if (!s.settings.layout.bottom) {
+			s.settings.layout.bottom = true;
+			s.bottomMaximized = true;
+			return;
+		}
+		s.bottomMaximized = !s.bottomMaximized;
+	});
 }
 const showBottom = (view: "problems" | "output") => {
-	if (!state.workspace) return notify("Open a folder first.");
-	setState("bottomView", view);
-	setState("settings", "layout", "bottom", true);
+	if (!snapshot(state).workspace) return notify("Open a folder first.");
+	setState((s) => {
+		s.bottomView = view;
+		s.settings.layout.bottom = true;
+	});
 };
 const showWorkspacePanel = (id: PanelId) => {
-	if (!state.workspace) return notify("Open a folder first.");
+	if (!snapshot(state).workspace) return notify("Open a folder first.");
 	showPanel(id);
 };
 /** Puts text on the clipboard: by the app's own way where there is one, by the web view's otherwise. */
@@ -206,11 +220,12 @@ function runMarkdownEdit(id: string) {
 
 /** Obsidian Ctrl+E: toggles a Markdown document between Live Preview (or Source) and Read view in the active group. */
 function toggleMarkdownMode() {
-	const path = activePath();
+	const cur = snapshot(state);
+	const g = cur.activeGroup;
+	const path = cur.groups[g]?.active ?? null;
 	if (!path || !isMarkdown(path)) return;
-	const g = state.activeGroup;
-	const currentMode = markdownMode(path, g);
-	const next = currentMode === "read" ? (state.settings.livePreview === false ? "source" : "live") : "read";
+	const currentMode = resolveMarkdownMode(cur.groups[g]?.mdMode, cur.mdViewMode, cur.settings.livePreview);
+	const next = currentMode === "read" ? (cur.settings.livePreview === false ? "source" : "live") : "read";
 	if (currentMode === "source" && next !== "source") {
 		const editor = activeEditor();
 		if (editor?.getModel()) {
@@ -287,22 +302,22 @@ const zoom = (by: 1 | -1 | 0) => void saveSetting({ uiScale: by ? stepScale(stat
 export const commands: Command[] = [
 	// Files and tabs
 	{ id: "open-folder", label: "Open folder…", run: () => void openFolderCommand() },
-	{ id: "quick-open", label: "Go to file…", run: () => setState("quickPick", "files") },
-	{ id: "quick-outline", label: "Go to symbol in file…", detail: "Procedures, regions, headings, or sections in the active file", run: () => (activePath() ? setState("quickPick", "outline") : notify("Open a file first.")) },
-	{ id: "symbols", label: "Go to symbol…", detail: "Anywhere in the workspace", run: () => setState("quickPick", "symbols") },
-	{ id: "command-palette", label: "Show all commands", run: () => setState("quickPick", "commands") },
+	{ id: "quick-open", label: "Go to file…", run: () => setState((s) => { s.quickPick = "files"; }) },
+	{ id: "quick-outline", label: "Go to symbol in file…", detail: "Procedures, regions, headings, or sections in the active file", run: () => (activePathNow() ? setState((s) => { s.quickPick = "outline"; }) : notify("Open a file first.")) },
+	{ id: "symbols", label: "Go to symbol…", detail: "Anywhere in the workspace", run: () => setState((s) => { s.quickPick = "symbols"; }) },
+	{ id: "command-palette", label: "Show all commands", run: () => setState((s) => { s.quickPick = "commands"; }) },
 	{ id: "new-untitled", label: "New untitled file", detail: "A floating buffer that stays in memory until saved", run: () => void newUntitled() },
 	{ id: "new-file", label: "New file or folder…", detail: "In the Explorer's folder, or beside the open file", run: () => void explorerNewFile() },
 	{ id: "rename-file", label: "Rename…", detail: "The Explorer's file, or the open one", run: () => void explorerRename() },
 	{ id: "trash-file", label: "Move to trash…", detail: "The Explorer's file, or the open one", run: () => void explorerDelete() },
 	{ id: "save", label: "Save", run: () => void save() },
 	{ id: "save-all", label: "Save all", run: () => void saveAll() },
-	{ id: "revert", label: "Revert file", detail: "Back to what is on disk", run: () => activePath() && void revert(activePath()!) },
-	{ id: "close", label: "Close tab", run: () => activePath() && void closeTab(activePath()!) },
+	{ id: "revert", label: "Revert file", detail: "Back to what is on disk", run: () => { const p = activePathNow(); if (p) void revert(p); } },
+	{ id: "close", label: "Close tab", run: () => { const p = activePathNow(); if (p) void closeTab(p); } },
 	{ id: "close-others", label: "Close other tabs", detail: "The pinned ones stay", run: () => void closeOtherTabs() },
 	{ id: "close-right", label: "Close tabs to the right", run: () => void closeTabsToRight() },
 	{ id: "close-all", label: "Close all tabs", detail: "The pinned ones stay", run: () => void closeAllTabs() },
-	{ id: "keep-tab", label: "Keep tab open", detail: "A tab opened for a look by one click, in italics: it stays when the next file is clicked", run: () => activePath() && keepTab(activePath()!, state.activeGroup) },
+	{ id: "keep-tab", label: "Keep tab open", detail: "A tab opened for a look by one click, in italics: it stays when the next file is clicked", run: () => { const cur = snapshot(state); const p = cur.groups[cur.activeGroup]?.active; if (p) keepTab(p, cur.activeGroup); } },
 	{ id: "pin-tab", label: "Pin or unpin tab", detail: "A pinned tab stays first, and is not closed with the others", run: () => togglePin() },
 	{ id: "reopen-tab", label: "Reopen closed tab", run: () => void reopenClosedTab() },
 	{ id: "recent-tab", label: "Go to the tab used before", detail: "And with Ctrl held, on through the ones before that", run: () => stepRecent(1) },
@@ -319,7 +334,7 @@ export const commands: Command[] = [
 	{ id: "copy-relative-path", label: "Copy path in the project", detail: "The open file's path from the project's folder", run: () => void copyPath("relative") },
 	{ id: "copy-file-name", label: "Copy file name", detail: "The open file's name, without its folder", run: () => void copyPath("name") },
 	{ id: "word-wrap", label: "Toggle word wrap", detail: "Long lines wrapped at the editor's edge, or not", run: () => void switchSetting("wordWrap", !state.settings.wordWrap, (settings) => Boolean(settings.wordWrap)) },
-	{ id: "live-preview", label: "Toggle Markdown live preview", detail: "A document drawn as it is written, or as its plain text", run: () => { const next = state.settings.livePreview === false; syncLivePreviewMode(next); void switchSetting("livePreview", next, (settings) => settings.livePreview !== false); } },
+	{ id: "live-preview", label: "Toggle Markdown live preview", detail: "A document drawn as it is written, or as its plain text", run: () => { const next = snapshot(state).settings.livePreview === false; syncLivePreviewMode(next); void switchSetting("livePreview", next, (settings) => settings.livePreview !== false); } },
 	{ id: "toggle-markdown-reading-highlight", label: "Toggle Markdown reading highlight", detail: "Subtly dim lines below the active cursor or mouse pointer in Markdown Live and Read views", run: () => void switchSetting("markdownReadingHighlight", state.settings.markdownReadingHighlight === false, (settings) => settings.markdownReadingHighlight !== false) },
 	{ id: "toggle-markdown-mode", label: "Toggle Markdown Live / Read view", detail: "Switch a Markdown note between Live Preview editing and Reading view", run: toggleMarkdownMode },
 	{ id: "split-markdown-read", label: "Markdown: Split Read preview to side", detail: "Keep editing in this group while previewing Read view side-by-side", run: () => void splitMarkdownRead() },
@@ -358,7 +373,7 @@ export const commands: Command[] = [
 	{ id: "wrap-region", label: "Wrap in region…", detail: "The selected lines", run: () => void wrapInRegion() },
 	{ id: "insert-banner", label: "Insert file banner", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "banner")!) },
 	{ id: "insert-procedure", label: "Insert procedure", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "procedure")!) },
-	{ id: "editor-commands", label: "Show editor commands…", detail: "The text editor's own list", run: () => (activeLiveEditor() ? setState("quickPick", "commands") : activeEditor()?.trigger("app", "editor.action.quickCommand", null)) },
+	{ id: "editor-commands", label: "Show editor commands…", detail: "The text editor's own list", run: () => (activeLiveEditor() ? setState((s) => { s.quickPick = "commands"; }) : activeEditor()?.trigger("app", "editor.action.quickCommand", null)) },
 	// The project
 	{ id: "setup-project", label: "Set up project", detail: "Settings, README, AGENTS", run: () => void setUpProject() },
 	{ id: "undo-setup-project", label: "Undo set up project", detail: "Removes what it created and nobody has changed since", run: () => void undoSetUp() },
@@ -400,7 +415,7 @@ export const commands: Command[] = [
 	{ id: "release-readiness", label: "Docs: Release Readiness Overview…", detail: "Review ticket completion, approvals, test runs, and deployment readiness across the project", run: () => void runProjectDocAction("openReleaseReadiness") },
 	{ id: "clone-ticket", label: "Ticket: Clone Ticket…", detail: "Clone an existing ticket's template, checklist, and metadata under a new key", run: () => void runProjectDocAction("cloneTicket") },
 	{ id: "split-ticket", label: "Ticket: Split Checklist into Sub-Ticket…", detail: "Extract checked or selected checklist items from a ticket into a linked child sub-ticket", run: () => void runProjectDocAction("splitTicketSubticket") },
-	{ id: "import-mermaid-plan", label: "Plan: Import Mermaid Flowchart as Plan…", detail: "Convert a Mermaid flowchart from the active document or clipboard into a .plan.json chart", run: () => void importMermaidPlanCommand() },
+	{ id: "import-mermaid-plan", label: "Plan: Import Mermaid Flowchart as Plan…", detail: "Convert a Mermaid flowchart from the open document, the clipboard or a file into a .plan.json chart", run: () => void importMermaidPlanCommand() },
 	{ id: "git-blame-line", label: "Git: Show Line Commit & Ticket (Blame)", detail: "Show the commit, author, date, and ticket that last modified the current line", run: () => void gitBlameLineCommand() },
 	{ id: "git-switch-branch", label: "Git: Switch Branch…", detail: "Switch to another local Git branch", run: () => void gitSwitchBranchCommand() },
 	{ id: "git-stash", label: "Git: Stash Changes / Pop Stash…", detail: "Stash working tree changes, pop the latest stash, or inspect saved stashes", run: () => void gitStashCommand() },
@@ -462,15 +477,15 @@ export const commands: Command[] = [
 	{ id: "palette", label: "Show Palette", detail: "Templates, process shapes and graph controls", run: () => showWorkspacePanel("palette") },
 	{ id: "reference", label: "Show Reference", detail: "Built-in functions, classes and keywords", run: () => showWorkspacePanel("reference") },
 	{ id: "search", label: "Show Search", run: () => showWorkspacePanel("search") },
-	{ id: "replace-in-files", label: "Replace in files…", detail: "In Search: what would change is shown first, and nothing is written until it is confirmed", run: () => (!state.workspace ? notify("Open a folder first.") : void import("./panels/Search").then((search) => search.showReplace())) },
+	{ id: "replace-in-files", label: "Replace in files…", detail: "In Search: what would change is shown first, and nothing is written until it is confirmed", run: () => (!snapshot(state).workspace ? notify("Open a folder first.") : void import("./panels/Search").then((search) => search.showReplace())) },
 	{ id: "git", label: "Show Source control", detail: "What has changed since the last commit, and the next commit", run: () => showWorkspacePanel("git") },
 	{ id: "history", label: "Show History", detail: "Local snapshots on save and Git commit history", run: () => showWorkspacePanel("history") },
 	{ id: "health", label: "Show Health", detail: "The script against the house style", run: () => showWorkspacePanel("health") },
 	{ id: "agent", label: "Show Agent", run: () => showWorkspacePanel("agent") },
 	{ id: "problems", label: "Show Problems", run: () => showBottom("problems") },
 	{ id: "output", label: "Show Output", run: () => showBottom("output") },
-	{ id: "graph", label: "Show Call graph", detail: "Again to go back to the editors", run: () => (!state.workspace ? notify("Open a folder first.") : setState("centerView", state.centerView === "graph" ? "editors" : "graph")) },
-	{ id: "projects", label: "Show Projects", detail: "Switch to another recent folder, or go back to the editors", run: () => state.workspace && setState("centerView", state.centerView === "welcome" ? "editors" : "welcome") },
+	{ id: "graph", label: "Show Call graph", detail: "Again to go back to the editors", run: () => (!snapshot(state).workspace ? notify("Open a folder first.") : setState((s) => { s.centerView = s.centerView === "graph" ? "editors" : "graph"; })) },
+	{ id: "projects", label: "Show Projects", detail: "Switch to another recent folder, or go back to the editors", run: () => snapshot(state).workspace && setState((s) => { s.centerView = s.centerView === "welcome" ? "editors" : "welcome"; }) },
 	{ id: "toggle-sidebar", label: "Toggle side bar", run: () => toggleSideOf("left") },
 	{ id: "toggle-panel", label: "Toggle bottom panel", run: () => toggle("bottom") },
 	{ id: "toggle-panel-maximize", label: "Toggle maximized panel", detail: "Expand the bottom panel to fill the center pane, or restore its size", run: toggleMaximizeBottom },
@@ -478,16 +493,16 @@ export const commands: Command[] = [
 	{ id: "reset-layout", label: "Reset the layout", detail: "Every panel back on its own side and at its first size", run: resetLayout },
 	{ id: "menu-bar", label: "Focus the menu bar", detail: "Then the arrow keys. Alt and a menu's first letter opens that menu", run: () => void (openMenu() || notify(MENU_HIDDEN)) },
 	{ id: "toggle-menu-bar", label: "Toggle menu bar", detail: "File, Edit, Selection, View, Go and Help across the top of the window", run: () => void toggleMenuBar() },
-	{ id: "move-panel", label: "Move left panel to the right", detail: "The one that is open", run: () => state.workspace && state.settings.layout.left && movePanel(state.leftView) },
-	{ id: "move-panel-back", label: "Move right panel to the left", detail: "The one that is open", run: () => state.workspace && state.settings.layout.right && movePanel(state.rightView) },
+	{ id: "move-panel", label: "Move left panel to the right", detail: "The one that is open", run: () => { const cur = snapshot(state); if (cur.workspace && cur.settings.layout.left) movePanel(cur.leftView); } },
+	{ id: "move-panel-back", label: "Move right panel to the left", detail: "The one that is open", run: () => { const cur = snapshot(state); if (cur.workspace && cur.settings.layout.right) movePanel(cur.rightView); } },
 	// The agent
 	{ id: "agent-ask", label: "Ask the agent…", detail: "About the selection", run: () => void askCommand() },
-	{ id: "attach-file-to-agent", label: "Agent: Attach active file to Agent", detail: "Attach the open workspace file to the next Agent turn context", run: () => { const p = activePath(); if (!p) return notify("Open a file first."); attachFileToAgent(p); } },
-	{ id: "show-in-explorer", label: "Explorer: Reveal active file in Explorer", detail: "Highlight and scroll to the open file in the Explorer tree", run: () => { const p = activePath(); if (!p) return notify("Open a file first."); showInExplorer(p); } },
-	{ id: "tidy", label: "Tidy file with the agent", run: () => (!state.workspace ? notify("Open a folder first.") : (startTidy(), showPanel("agent"))) },
+	{ id: "attach-file-to-agent", label: "Agent: Attach active file to Agent", detail: "Attach the open workspace file to the next Agent turn context", run: () => { const p = activePathNow(); if (!p) return notify("Open a file first."); attachFileToAgent(p); } },
+	{ id: "show-in-explorer", label: "Explorer: Reveal active file in Explorer", detail: "Highlight and scroll to the open file in the Explorer tree", run: () => { const p = activePathNow(); if (!p) return notify("Open a file first."); showInExplorer(p); } },
+	{ id: "tidy", label: "Tidy file with the agent", run: () => (!snapshot(state).workspace ? notify("Open a folder first.") : (startTidy(), showPanel("agent"))) },
 	// The IDE
 	{ id: "style-profile", label: "Edit style profile…", detail: "How the language server formats and checks", run: () => openStyleProfile() },
-	{ id: "lsp-restart", label: "Restart language server", run: () => (!state.workspace ? notify("Open a folder first.") : void restartLsp()) },
+	{ id: "lsp-restart", label: "Restart language server", run: () => (!snapshot(state).workspace ? notify("Open a folder first.") : void restartLsp()) },
 	{ id: "zoom-in", label: "Zoom in", detail: "A larger interface", run: () => zoom(1) },
 	{ id: "zoom-out", label: "Zoom out", detail: "A smaller interface", run: () => zoom(-1) },
 	{ id: "zoom-reset", label: "Reset zoom", run: () => zoom(0) },
@@ -607,13 +622,24 @@ async function wrapInRegion() {
 
 /** Blocks for a script; for a plan toggles Chart/Text, for Markdown toggles Live/Read, for a table toggles Table/Text. */
 function toggleVisual() {
-	const path = activePath();
-	if (!state.workspace || !path) return;
-	const g = state.activeGroup;
-	if (isPlanPath(path)) setPlanMode(path, planMode(path, g) === "chart" ? "text" : "chart", g);
-	else if (isMarkdown(path)) toggleMarkdownMode();
-	else if (isTable(path)) setTableTextMode(path, !tableTextMode(path, g), g);
-	else setState("groups", g, "mode", (m) => (m === "blocks" ? "text" : "blocks"));
+	const cur = snapshot(state);
+	const path = cur.groups[cur.activeGroup]?.active ?? null;
+	if (!cur.workspace || !path) return;
+	const g = cur.activeGroup;
+	if (isPlanPath(path)) {
+		const curPlanMode = resolvePlanMode(cur.groups[g]?.planMode, cur.planViewMode);
+		setPlanMode(path, curPlanMode === "chart" ? "text" : "chart", g);
+	} else if (isMarkdown(path)) {
+		toggleMarkdownMode();
+	} else if (isTable(path)) {
+		const curTableText = resolveTableTextMode(cur.groups[g]?.tableText, cur.tableTextDefault);
+		setTableTextMode(path, !curTableText, g);
+	} else {
+		setState((s) => {
+			const grp = s.groups[g];
+			if (grp) grp.mode = grp.mode === "blocks" ? "text" : "blocks";
+		});
+	}
 }
 
 async function openProjectSettings() {
@@ -635,10 +661,7 @@ async function newPlanCommand() {
 	const path = joinPath(startRoot, ...planDir, `${safeStem}.plan.json`);
 	if (await heldFromBefore(path)) return;
 	if (state.workspace?.root !== startRoot) return;
-	const exists = await backend.read(path).then(
-		() => true,
-		() => false,
-	);
+	const exists = await fileExists(path);
 	if (state.workspace?.root !== startRoot) return;
 	if (!exists) {
 		// A plan started from a ticket, or from a document that is for one, is for that ticket.
@@ -649,7 +672,7 @@ async function newPlanCommand() {
 			return notify(String(e?.message ?? e), "error");
 		}
 		if (state.workspace?.root !== startRoot) return;
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 	}
 	await openFile(path);
 }
@@ -734,10 +757,8 @@ async function findReferencesInDocs() {
 		query = baseName(path).replace(/\.[^.]+$/, "");
 	}
 	if (!query) return notify("Open a file or select a symbol to search in Docs.");
-	const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
-	const include = docsRel && docsRel !== "." ? `${docsRel}/**` : "**/*.md";
-	const { searchFor } = await import("./panels/Search");
-	searchFor(query, { include });
+	const { docsFolderGlob, searchFor } = await import("./panels/Search");
+	searchFor(query, { include: docsFolderGlob() });
 }
 
 /** Copies a Markdown code citation `[file#L10-L25](path#L10-L25)` (and optional fenced code excerpt) relative to the last active Markdown doc or workspace root. */
@@ -863,13 +884,20 @@ async function generateErDiagramCommand() {
 		relativeTo(wsRoot, a).localeCompare(relativeTo(wsRoot, b), undefined, { numeric: true, sensitivity: "base" }),
 	);
 	const sqlChunks: string[] = [];
+	// The files that are there and could not be read (too large to open, or not text). They were taken for empty
+	// files, and the diagram was drawn without their tables as if it were whole.
+	const unread: UnreadFile[] = [];
 	for (const p of orderedPaths) {
 		const open = documents.get(canonical(p));
-		const text = open ? open.model.getValue() : await backend.read(p).then((r) => (r.binary ? "" : r.text), () => "");
+		const rel = relativeTo(wsRoot, p);
+		const got = open ? { text: open.model.getValue() } : await textOrWhy(() => backend.read(p), rel, wsRoot);
 		if (state.workspace?.root !== wsRoot) return;
-		if (text.trim()) sqlChunks.push(text.trimEnd());
+		if ("why" in got) unread.push({ file: rel, why: got.why });
+		else if (got.text.trim()) sqlChunks.push(got.text.trimEnd());
 	}
-	if (!sqlChunks.length) return notify("No readable SQL content was found in the selected files.");
+	const unreadSaid = unread.length ? `${unreadFilesSaid(unread)} ` : "";
+	const unreadKind = unread.length ? "error" : "info";
+	if (!sqlChunks.length) return notify(`${unreadSaid}No readable SQL content was found in the selected files.`, unreadKind);
 
 	const parsedTables = parseCreateTables(sqlChunks.join("\n;\n"), { includeStandaloneAlter: true });
 	// Deduplicate by table name while keeping the most complete/latest definition if a table was re-created across files.
@@ -900,7 +928,10 @@ async function generateErDiagramCommand() {
 		}
 	}
 	const tables = [...mergedByName.values()];
-	if (!tables.length) return notify("No CREATE TABLE definitions were found in the SQL files.");
+	if (!tables.length) return notify(`${unreadSaid}No CREATE TABLE definitions were found in the SQL files${unread.length ? " that could be read" : ""}.`, unreadKind);
+	// Said before the diagram is offered, and it stays until it is dismissed: what is copied or saved next is not
+	// the whole schema.
+	if (unread.length) notify(`${unreadSaid}The diagram is drawn without ${unread.length === 1 ? "that file" : "those files"}.`, "error");
 
 	const diagram = generateMermaidErDiagram(tables);
 	const canInsert = Boolean(active && isMarkdown(active) && (activeLiveEditor() || activeEditor()?.getDomNode()?.offsetParent));
@@ -949,9 +980,18 @@ async function generateErDiagramCommand() {
 	const dest = joinPath(wsRoot, ...schemaParts, "database", "ER-Diagram.md");
 	const destKey = canonical(dest);
 	const openDest = documents.get(destKey);
-	const existing = openDest
-		? openDest.model.getValue()
-		: await backend.read(dest).then((r) => (r.binary ? null : r.text), () => null);
+	let existing: string | null = null;
+	if (openDest) {
+		existing = openDest.model.getValue();
+	} else {
+		const destRel = relativeTo(wsRoot, dest);
+		const got = await textOrWhy(() => backend.read(dest), destRel, wsRoot);
+		if (state.workspace?.root !== wsRoot) return;
+		if ("text" in got) existing = got.text;
+		// A file that is there and could not be read (a text too large to open) was taken for no file: the diagram
+		// was written over the whole of it, with nothing asked and nothing kept of what it held.
+		else if (await fileExists(dest)) return notify(`${unreadFilesSaid([{ file: destRel, why: got.why }])} The diagram was not saved: nothing was written.`, "error");
+	}
 	if (state.workspace?.root !== wsRoot) return;
 
 	let nextText = `# Database ER Diagram\n\n${diagram}\n`;
@@ -995,7 +1035,7 @@ async function generateErDiagramCommand() {
 		return notify(String(e?.message ?? e), "error");
 	}
 	if (state.workspace?.root !== wsRoot) return;
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	await openFile(dest);
 	notify(`${modeNote} ${relativeTo(wsRoot, dest)}.`);
 }
@@ -1282,61 +1322,86 @@ function findMermaidBlocks(markdown: string): { code: string; startLine: number;
 	return out;
 }
 
+/** One row of the list "Import Mermaid flowchart as Plan…" opens: where the flowchart is taken from. */
+export type FlowchartPick =
+	| { from: "text"; source: string; name: string }
+	| { from: "clipboard" }
+	| { from: "file" }
+	/** A place that was looked in and holds no flowchart: picking it says so. */
+	| { from: "nothing"; why: string };
+
+/**
+ * What the command has at hand before it asks: the open document, and the clipboard's text. For the clipboard,
+ * null is a read that was refused and undefined one that has no answer yet (`answeredSoon`).
+ */
+export type FlowchartSources = {
+	document?: { name: string; text: string; selection: string; cursorLine: number };
+	clipboard: string | null | undefined;
+};
+
+const flowchartStart = (source: string) => (source.trim().split(/\r?\n/)[0] ?? "").trim().slice(0, 48);
+
+/**
+ * The rows of that list. The flowchart used to be asked for in the one-line prompt, with the clipboard's text or
+ * an example as its value: a one-line box drops the line breaks, the parser wants `flowchart TD` on a line of its
+ * own, and so nothing typed or pasted there was ever imported. A flowchart has several lines and is not typed into
+ * a prompt: it is taken from where it already is. The places that hold one come first, the one the cursor is in
+ * before the others; the open document and the clipboard are listed when they hold none too, and say so, so that
+ * it is plain why they are not the answer; a file of the workspace can always be chosen. `holds` is the parser's
+ * own word on whether a text is a flowchart.
+ */
+export function flowchartSourceRows(at: FlowchartSources, holds: (source: string) => boolean): QuickPickOption<FlowchartPick>[] {
+	const found: QuickPickOption<FlowchartPick>[] = [];
+	const without: QuickPickOption<FlowchartPick>[] = [];
+	const doc = at.document;
+	if (doc) {
+		const name = doc.name.replace(/\.[^.]+$/, "") || doc.name;
+		if (doc.selection.trim() && holds(doc.selection)) found.push({ label: `Selected text in ${doc.name}`, value: { from: "text", source: doc.selection, name }, detail: flowchartStart(doc.selection), icon: "edit" });
+		if (isMarkdown(doc.name)) {
+			const blocks = findMermaidBlocks(doc.text).filter((b) => holds(b.code));
+			const atCursor = (b: { startLine: number; endLine: number }) => doc.cursorLine >= b.startLine && doc.cursorLine <= b.endLine;
+			for (const b of [...blocks.filter(atCursor), ...blocks.filter((b) => !atCursor(b))])
+				found.push({ label: `Flowchart in ${doc.name}, lines ${b.startLine}–${b.endLine}`, value: { from: "text", source: b.code, name }, detail: flowchartStart(b.code), icon: "graph" });
+			if (!blocks.length) without.push({ label: doc.name, value: { from: "nothing", why: `${doc.name} holds no Mermaid flowchart block.` }, description: "Holds no Mermaid flowchart block", icon: "file" });
+		} else if (/\.(mmd|mermaid)$/i.test(doc.name)) {
+			if (holds(doc.text)) found.push({ label: `The whole of ${doc.name}`, value: { from: "text", source: doc.text, name }, detail: flowchartStart(doc.text), icon: "graph" });
+			else without.push({ label: doc.name, value: { from: "nothing", why: `${doc.name} holds no Mermaid flowchart.` }, description: "Holds no flowchart", icon: "file" });
+		}
+	}
+	if (at.clipboard === undefined) without.push({ label: "Clipboard", value: { from: "clipboard" }, description: "Not read yet: waiting for permission", icon: "copy" });
+	else if (at.clipboard === null) without.push({ label: "Clipboard", value: { from: "clipboard" }, description: "This window was not allowed to read the clipboard", icon: "copy" });
+	else if (holds(at.clipboard)) found.push({ label: "Clipboard", value: { from: "clipboard" }, detail: flowchartStart(at.clipboard), icon: "copy" });
+	else without.push({ label: "Clipboard", value: { from: "clipboard" }, description: "The clipboard holds no flowchart", icon: "copy" });
+	return [...found, ...without, { label: "Choose a file…", value: { from: "file" }, detail: "A .mmd or .md file of the workspace", icon: "folder", divide: true }];
+}
+
+/** The clipboard's text, or null when this window may not read it: a web view can refuse, or have no way to. */
+function clipboardText(): Promise<string | null> {
+	try {
+		const reading = navigator.clipboard?.readText?.();
+		return reading ? reading.then((text) => (typeof text === "string" ? text : null), () => null) : Promise.resolve(null);
+	} catch {
+		return Promise.resolve(null);
+	}
+}
+
+/**
+ * The answer to a read of the clipboard, or undefined when there is none yet. A web view that asks the user before
+ * it lets a page read the clipboard holds the read open until they answer: the list of places is not kept back
+ * behind that question, and a command that waited on it did nothing that could be seen.
+ */
+const answeredSoon = (reading: Promise<string | null>) => Promise.race([reading, new Promise<undefined>((done) => setTimeout(() => done(undefined), 400))]);
+
+const CLIPBOARD_REFUSED = "This window was not allowed to read the clipboard. Select the flowchart in an editor, or save it as a .mmd file, and import it from there.";
+const CLIPBOARD_WAITING = "The clipboard was not read: this window is still waiting to be allowed to read it. Allow it and run the command again, or import the flowchart from a file.";
+
 async function importMermaidPlanCommand() {
 	const wsRoot = state.workspace?.root;
 	if (!wsRoot) return notify("Open a folder first.");
-
-	let mermaidSource = "";
-	const p = activePath();
-	const doc = activeDoc();
-	const cursorLine = activeLiveEditor()?.getPosition().lineNumber ?? activeEditor()?.getPosition()?.lineNumber ?? state.cursor.line ?? 1;
-
-	if (p && doc && !doc.binary) {
-		const raw = doc.model.getValue();
-		if (isMarkdown(p)) {
-			const blocks = findMermaidBlocks(raw);
-			const atCursor = blocks.find((b) => cursorLine >= b.startLine && cursorLine <= b.endLine);
-			if (atCursor) {
-				mermaidSource = atCursor.code;
-			} else if (blocks.length === 1) {
-				mermaidSource = blocks[0]!.code;
-			} else if (blocks.length > 1) {
-				const PASTE = "__paste__";
-				const picked = await quickPick<string>({
-					title: `Import Mermaid flowchart from ${displayName(p)}`,
-					placeholder: "Choose a Mermaid block…",
-					items: [
-						...blocks.map((b, idx) => ({
-							label: `Diagram ${idx + 1} (lines ${b.startLine}–${b.endLine})`,
-							value: b.code,
-							detail: (b.code.split("\n")[0] ?? "").trim().slice(0, 48),
-							icon: "graph" as const,
-						})),
-						{ label: "Paste Mermaid flowchart source…", value: PASTE, icon: "edit", divide: true },
-					],
-				});
-				if (!picked) return;
-				if (picked !== PASTE) mermaidSource = picked;
-			}
-		} else if (/\.(mmd|mermaid)$/i.test(p)) {
-			mermaidSource = raw.trim();
-		}
-	}
-
-	if (!mermaidSource) {
-		const clip = (await navigator.clipboard?.readText().catch(() => ""))?.trim() ?? "";
-		const clipHasFlow = /^\s*(?:flowchart|graph)\s+(?:TD|TB|BT|RL|LR)\b/im.test(clip);
-		const entered = await ask(
-			"Mermaid flowchart source to import as a .plan.json",
-			clipHasFlow ? clip : "flowchart TD\n  A([Start]) --> B[Step]\n  B --> C([End])",
-		);
-		if (!entered?.trim()) return;
-		mermaidSource = entered.trim();
-	}
-
-	const defaultTitle = p ? baseName(p).replace(/\.[^.]+$/, "") : "Imported Plan";
-	const title = (await ask("Name of the imported plan", defaultTitle))?.trim();
-	if (!title) return;
+	const elsewhere = () => state.workspace?.root !== wsRoot;
+	// Asked for before anything else, while the key or the click that ran the command still counts as the user's:
+	// a web view may refuse a read of the clipboard that comes later.
+	const clipboardRead = clipboardText();
 
 	const assist = (await import("./plan/assist")) as unknown as {
 		mermaidToPlan?: (source: string, title?: string) => Plan | { plan: Plan; warnings?: string[] } | null;
@@ -1345,40 +1410,151 @@ async function importMermaidPlanCommand() {
 		notify("Mermaid flowchart import is not available in this build.", "error");
 		return;
 	}
-	const converted = assist.mermaidToPlan(mermaidSource, title);
-	const wrappedPlan =
-		converted && typeof converted === "object" && "plan" in converted && (converted as { plan?: unknown }).plan
-			? ((converted as { plan: Plan }).plan)
-			: null;
-	const plan: Plan | null =
-		wrappedPlan && Array.isArray(wrappedPlan.nodes)
-			? wrappedPlan
-			: converted && typeof converted === "object" && "nodes" in converted && Array.isArray((converted as Plan).nodes)
-				? (converted as Plan)
+	const planOf = (source: string, title?: string): Plan | null => {
+		const converted = assist.mermaidToPlan!(source, title);
+		const wrappedPlan =
+			converted && typeof converted === "object" && "plan" in converted && (converted as { plan?: unknown }).plan
+				? ((converted as { plan: Plan }).plan)
 				: null;
-	if (!plan || !Array.isArray(plan.nodes) || !plan.nodes.length) {
-		return notify("Could not parse a Mermaid flowchart from that source.", "error");
+		const plan: Plan | null =
+			wrappedPlan && Array.isArray(wrappedPlan.nodes)
+				? wrappedPlan
+				: converted && typeof converted === "object" && "nodes" in converted && Array.isArray((converted as Plan).nodes)
+					? (converted as Plan)
+					: null;
+		return plan && Array.isArray(plan.nodes) && plan.nodes.length ? plan : null;
+	};
+	const holds = (source: string) => planOf(source) !== null;
+
+	const p = activePath();
+	const doc = activeDoc();
+	const live = activeLiveEditor();
+	const editor = activeEditor();
+	let selection = "";
+	if (p && doc && !doc.binary) {
+		if (live && live.path === p) selection = live.getSelectedText();
+		else if (editor && editor.getModel() === doc.model) {
+			const range = editor.getSelection();
+			if (range && !range.isEmpty()) selection = doc.model.getValueInRange(range);
+		}
 	}
+	const cursorLine = live?.getPosition().lineNumber ?? editor?.getPosition()?.lineNumber ?? state.cursor.line ?? 1;
+	const clipboard = await answeredSoon(clipboardRead);
+	if (elsewhere()) return;
+
+	const rows = flowchartSourceRows({ ...(p && doc && !doc.binary ? { document: { name: displayName(p), text: doc.model.getValue(), selection, cursorLine } } : {}), clipboard }, holds);
+	const anyHolds = rows.some((row) => row.value.from === "text" || (row.value.from === "clipboard" && !row.description));
+	const picked = await quickPick<FlowchartPick>({
+		title: "Import Mermaid flowchart as Plan",
+		placeholder: anyHolds ? "Choose where the flowchart is…" : "No flowchart open or copied: choose a file…",
+		items: rows,
+	});
+	if (!picked || elsewhere()) return;
+
+	let mermaidSource = "";
+	let defaultTitle = "Imported Plan";
+	if (picked.from === "nothing") return notify(picked.why);
+	if (picked.from === "text") {
+		mermaidSource = picked.source;
+		defaultTitle = picked.name;
+	} else if (picked.from === "clipboard") {
+		// Read again when the first read gave nothing to import: picking the row is the user's own act, which a web
+		// view that refused the first read may allow, and the clipboard may have been filled since. A text that
+		// was read is not given up for a second read that is refused or unanswered.
+		let text = clipboard;
+		if (typeof text !== "string" || !holds(text)) {
+			const again = await answeredSoon(clipboardText());
+			if (typeof again === "string" || typeof text !== "string") text = again;
+		}
+		if (elsewhere()) return;
+		if (text === undefined) return notify(CLIPBOARD_WAITING);
+		if (text === null) return notify(CLIPBOARD_REFUSED);
+		if (!holds(text)) return notify("The clipboard holds no Mermaid flowchart.");
+		mermaidSource = text;
+	} else {
+		const mermaidFiles = (await backend.files().catch(() => [] as string[])).filter((f) => /\.(mmd|mermaid)$/i.test(f) && isInside(wsRoot, f));
+		if (elsewhere()) return;
+		const chosen = await browseWorkspaceFile({
+			title: "Import Mermaid flowchart from a .mmd or .md file",
+			root: wsRoot,
+			...(p && !isUntitled(p) && isInside(wsRoot, p) ? { initialDir: dirName(p) } : {}),
+			pinned: mermaidFiles.slice(0, 8).map((f) => ({ path: f, rel: relativeTo(wsRoot, f).replace(/\\/g, "/") })),
+			pinnedLabel: "Mermaid",
+		});
+		if (!chosen || elsewhere()) return;
+		const rel = relativeTo(wsRoot, chosen.path).replace(/\\/g, "/");
+		const open = documents.get(canonical(chosen.path));
+		const got = open && !open.binary ? { text: open.model.getValue() } : await textOrWhy(() => backend.read(chosen.path), rel, wsRoot);
+		if (elsewhere()) return;
+		if ("why" in got) return notify(unreadFilesSaid([{ file: rel, why: got.why }]), "error");
+		if (isMarkdown(chosen.path)) {
+			const blocks = findMermaidBlocks(got.text).filter((b) => holds(b.code));
+			if (!blocks.length) return notify(`${rel} holds no Mermaid flowchart block.`);
+			mermaidSource = blocks[0]!.code;
+			if (blocks.length > 1) {
+				const block = await quickPick<string>({
+					title: `Import Mermaid flowchart from ${baseName(chosen.path)}`,
+					placeholder: "Choose a flowchart…",
+					items: blocks.map((b) => ({ label: `Flowchart at lines ${b.startLine}–${b.endLine}`, value: b.code, detail: flowchartStart(b.code), icon: "graph" as const })),
+				});
+				if (!block || elsewhere()) return;
+				mermaidSource = block;
+			}
+		} else {
+			if (!holds(got.text)) return notify(`${rel} holds no Mermaid flowchart.`);
+			mermaidSource = got.text;
+		}
+		defaultTitle = baseName(chosen.path).replace(/\.[^.]+$/, "") || defaultTitle;
+	}
+
+	const title = (await ask("Name of the imported plan", defaultTitle))?.trim();
+	if (!title || elsewhere()) return;
+	const plan = planOf(mermaidSource, title);
+	if (!plan) return notify("Could not parse a Mermaid flowchart from that source.", "error");
 	const ticket = ticketAtHand();
 	const finalPlan: Plan = ticket && !plan.ticket ? { ...plan, ticket } : plan;
 
 	const planDir = folderParts(state.project?.plans ?? "design");
 	const safeStem = title.replace(/\.plan\.json$/i, "").replace(/[\\/:*?"<>|]+/g, "-").trim() || "imported-plan";
 	const dest = joinPath(wsRoot, ...planDir, `${safeStem}.plan.json`);
-	const exists = await backend.read(dest).then(
-		() => true,
-		() => false,
-	);
+	const destKey = canonical(dest);
+	const destRel = relativeTo(wsRoot, dest);
+	const openNow = () => {
+		const open = documents.get(destKey);
+		return open && !open.model.isDisposed() ? open : undefined;
+	};
+	// A plan of that name that is open counts as there, on disk or not; and one with changes not yet saved is asked
+	// about as that. The file used to be written under its tab: the tab kept the old plan with its unsaved changes,
+	// the disk held the new one, and the next save put the one over the other.
+	const unsaved = Boolean(openNow() && state.dirty[destKey]);
+	const exists = Boolean(openNow()) || (await fileExists(dest));
+	if (elsewhere()) return;
 	if (exists) {
 		const OVERWRITE = "Overwrite existing plan";
-		const answer = await choose(`${relativeTo(wsRoot, dest)} already exists. Overwrite it?`, [OVERWRITE], { danger: OVERWRITE });
-		if (answer !== OVERWRITE) return;
-		await backend.historyKeep(dest).catch(() => {});
+		const answer = await choose(unsaved ? `${destRel} is open with unsaved changes. Overwrite it with the imported plan?` : `${destRel} already exists. Overwrite it?`, [OVERWRITE], { danger: OVERWRITE });
+		if (answer !== OVERWRITE || elsewhere()) return;
 	}
-	await backend.write(dest, printPlan(finalPlan));
-	setState("treeVersion", (v) => v + 1);
+	const text = printPlan(finalPlan);
+	// An open plan is given the import as one edit of its document, and saved when it had nothing unsaved before.
+	// One that had is left unsaved, as it was: the file on disk is not touched until the user saves.
+	let saved = true;
+	try {
+		const open = openNow();
+		if (open) {
+			const wasClean = !state.dirty[destKey];
+			if (!applyText(destKey, text)) throw new Error(`${destRel} could not be updated because its editor was closed.`);
+			saved = wasClean ? await save(destKey, { format: false }) : false;
+		} else {
+			if (exists) await backend.historyKeep(dest).catch(() => {});
+			await backend.write(dest, text);
+		}
+	} catch (e: any) {
+		return notify(`The plan was not imported: ${String(e?.message ?? e)}`, "error");
+	}
+	if (elsewhere()) return;
+	setState((s) => { s.treeVersion += 1; });
 	await openFile(dest, { keep: true });
-	notify(`Imported Mermaid flowchart to ${relativeTo(wsRoot, dest)} (${finalPlan.nodes.length} nodes).`);
+	notify(`Imported Mermaid flowchart to ${destRel} (${finalPlan.nodes.length} nodes).${saved ? "" : " It is open with the plan in it, and not saved yet."}`);
 }
 
 async function gitBlameLineCommand() {
@@ -1484,7 +1660,7 @@ async function gitSwitchBranchCommand() {
 	const res = await backend.gitCheckout(picked).catch((e: any) => ({ ok: false, message: String(e?.message ?? e) }));
 	const { refreshGit } = await import("./git");
 	await refreshGit();
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	notify(res.message || (res.ok ? `Switched to branch ${picked}.` : `Could not switch to branch ${picked}.`), res.ok ? "info" : "error");
 }
 
@@ -1527,14 +1703,14 @@ async function gitStashCommand() {
 		if (msg === null) return;
 		const res = await backend.gitStash("push", msg.trim() || undefined).catch((e: any) => ({ ok: false, message: String(e?.message ?? e) }));
 		await refreshGit();
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(res.message || (res.ok ? "Stashed working changes." : "Could not stash changes."), res.ok ? "info" : "error");
 		return;
 	}
 	if (action === "pop") {
 		const res = await backend.gitStash("pop").catch((e: any) => ({ ok: false, message: String(e?.message ?? e) }));
 		await refreshGit();
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(res.message || (res.ok ? "Popped latest stash." : "Could not pop stash."), res.ok ? "info" : "error");
 		return;
 	}

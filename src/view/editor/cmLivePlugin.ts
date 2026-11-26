@@ -7,7 +7,7 @@
 // - FoldService (`markdownFoldService`): heading section & nested list folding.
 import { foldGutter, foldService, syntaxTree } from "@codemirror/language";
 import { getSearchQuery, searchPanelOpen } from "@codemirror/search";
-import { EditorSelection, EditorState, StateField, Transaction, type ChangeSpec, type Extension, type Range, type Text } from "@codemirror/state";
+import { EditorSelection, EditorState, StateField, Transaction, type ChangeSpec, type Extension, type Range, type SelectionRange, type Text } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { fenced } from "../../shared/catalog";
 import { isFenceClose, normalizeFenceLang, parseFenceOpen, stripQuotePrefix } from "../../shared/codeTokens";
@@ -16,7 +16,7 @@ import { hrefWritten, linkFile, linkLeads } from "../../shared/docLinks";
 import { headingAnchor } from "../../shared/docTables";
 import { frontMatter } from "../../shared/frontMatter";
 import { closedHtmlCommentSpans, commentBlockHideLines, isStandaloneHtmlComment } from "../../shared/htmlComments";
-import { parseCalloutHeader, parseImageExpression, type ParsedImageSpec } from "../../shared/markdownEdit";
+import { lineSegments, parseCalloutHeader, parseImageExpression, type ParsedImageSpec } from "../../shared/markdownEdit";
 import { parseMarkdownTable, parseTableRaw } from "../../shared/markdownTables";
 import { docByName, namedLink, nameFor } from "../../shared/namedLinks";
 import { baseName, dirName, isInside, relativeTo, resolvePath } from "../../shared/paths";
@@ -53,7 +53,7 @@ import {
 } from "./cmLiveShared";
 import { TableWidget } from "./cmLiveTable";
 import { parseListLine } from "../../shared/listIndent";
-import { IMAGE_FILE_RE, loadImageUrl } from "./imageResolve";
+import { IMAGE_FILE_RE, loadImageUrl, pictureDrawnAgain, pictureWasMissing } from "./imageResolve";
 
 export {
 	liveCallbacksFacet,
@@ -129,11 +129,17 @@ function calloutShouldStayRaw(state: EditorState, from: number, to: number, star
 	return false;
 }
 
-/** Tracks non-overlapping `Decoration.replace` spans so CM6 never throws on overlap. */
+/**
+ * Tracks non-overlapping `Decoration.replace` spans so CM6 never throws on overlap. Given the document (the
+ * inline plugin gives it), it also refuses a span that runs over a line break: a plugin may not replace one, and
+ * the throw comes from CodeMirror's own update, where nothing here can catch it.
+ */
 class ReplaceGuard {
 	private spans: [number, number][] = [];
+	constructor(private readonly oneLineIn?: EditorState["doc"]) {}
 	canAdd(from: number, to: number): boolean {
 		if (from > to) return false;
+		if (this.oneLineIn && to > this.oneLineIn.lineAt(from).to) return false;
 		for (const [a, b] of this.spans) {
 			if (from < b && to > a) return false;
 			if (from === to && from >= a && from <= b) return false;
@@ -259,28 +265,56 @@ class HrWidget extends WidgetType {
 	}
 }
 
+const activeImageResizeCleanup = new WeakMap<HTMLElement, () => void>();
+
+/**
+ * Where a drawn widget's source stands in the document now: from where its element is drawn, for as long as the
+ * source is. A widget that is the same but for where it stands keeps the element it was drawn in (its `eq` does
+ * not ask where it stands), so what the element's listeners do, they do where it stands when they run, and not
+ * where it stood when it was drawn.
+ */
+export function widgetRangeNow(view: Pick<EditorView, "posAtDOM" | "state">, dom: HTMLElement, length: number): { from: number; to: number } {
+	const end = view.state.doc.length;
+	const from = Math.min(view.posAtDOM(dom), end);
+	return { from, to: Math.min(from + length, end) };
+}
+
 class ImageWidget extends WidgetType {
+	/**
+	 * How many times the picture has had cause to be drawn again when this widget was made (`pictureDrawnAgain`):
+	 * its file was not found and the workspace's files have changed since, or the file it was read from changed.
+	 */
+	private readonly again: number;
+	/** `sourceLength` is how long the picture's Markdown is: where it stands is not kept (see `eq`). */
 	constructor(
 		private readonly spec: ParsedImageSpec,
-		private readonly from: number,
-		private readonly to: number,
+		private readonly sourceLength: number,
 		private readonly filePath: string,
 		private readonly readMode: boolean,
 		private readonly inline = false,
 	) {
 		super();
+		this.again = pictureDrawnAgain(spec.src, filePath);
 	}
+	/**
+	 * Where the picture stands is not part of what it is. It was: a letter typed on a line above moved every
+	 * picture below it, each was then another widget, and its element was thrown away and drawn again from
+	 * nothing, blank until the picture was loaded once more, at every keystroke. That drawing again was also the
+	 * only thing that ever asked a second time for a picture that had not been found: with it gone, "Image not
+	 * found" stayed when the file was put there. So `again` is part of what the picture is, and nothing typed
+	 * changes it.
+	 */
 	eq(other: ImageWidget) {
 		return (
 			other.spec.src === this.spec.src &&
 			other.spec.alt === this.spec.alt &&
 			other.spec.width === this.spec.width &&
 			other.spec.height === this.spec.height &&
-			other.from === this.from &&
-			other.to === this.to &&
+			other.sourceLength === this.sourceLength &&
 			other.filePath === this.filePath &&
 			other.readMode === this.readMode &&
-			other.inline === this.inline
+			other.inline === this.inline &&
+			other.again === this.again
 		);
 	}
 	toDOM(view: EditorView) {
@@ -288,6 +322,11 @@ class ImageWidget extends WidgetType {
 		const cb = view.state.facet(liveCallbacksFacet);
 		const wrap = document.createElement(this.inline ? "span" : "div");
 		wrap.className = this.inline ? "cm-md-image-wrap is-inline" : "cm-md-image-wrap";
+		const range = () => widgetRangeNow(view, wrap, this.sourceLength);
+		const resize = (width: number | null) => {
+			const at = range();
+			cb?.onResizeImage(at.from, at.to, width);
+		};
 
 		const frame = document.createElement(this.inline ? "span" : "div");
 		frame.className = "cm-md-image-frame";
@@ -331,13 +370,13 @@ class ImageWidget extends WidgetType {
 			);
 
 			if (!isRead) {
-				tools.appendChild(makeBtn("320", "Resize image width to 320px", this.spec.width === 320, () => cb?.onResizeImage(this.from, this.to, 320)));
-				tools.appendChild(makeBtn("520", "Resize image width to 520px", this.spec.width === 520, () => cb?.onResizeImage(this.from, this.to, 520)));
-				tools.appendChild(makeBtn("Full", "Use natural full width", !this.spec.width, () => cb?.onResizeImage(this.from, this.to, null)));
+				tools.appendChild(makeBtn("320", "Resize image width to 320px", this.spec.width === 320, () => resize(320)));
+				tools.appendChild(makeBtn("520", "Resize image width to 520px", this.spec.width === 520, () => resize(520)));
+				tools.appendChild(makeBtn("Full", "Use natural full width", !this.spec.width, () => resize(null)));
 				tools.appendChild(
 					makeBtn("Edit", "Edit Markdown image syntax", false, () => {
 						view.focus();
-						view.dispatch({ selection: EditorSelection.cursor(Math.min(this.from, view.state.doc.length)), scrollIntoView: true });
+						view.dispatch({ selection: EditorSelection.cursor(range().from), scrollIntoView: true });
 					}),
 				);
 
@@ -356,6 +395,7 @@ class ImageWidget extends WidgetType {
 					if (e.button !== 0) return;
 					e.preventDefault();
 					e.stopPropagation();
+					activeImageResizeCleanup.get(wrap)?.();
 					const startX = e.clientX;
 					const startW = Math.round(img.getBoundingClientRect().width || this.spec.width || 320);
 					const maxW = Math.max(240, Math.round(wrap.getBoundingClientRect().width || 760));
@@ -364,22 +404,41 @@ class ImageWidget extends WidgetType {
 					widthBadge.hidden = false;
 					widthBadge.textContent = `${startW}px`;
 
+					const cleanup = () => {
+						window.removeEventListener("mousemove", onMove);
+						window.removeEventListener("mouseup", onUp);
+						window.removeEventListener("blur", onCancel);
+						if (activeImageResizeCleanup.get(wrap) === cleanup) {
+							activeImageResizeCleanup.delete(wrap);
+						}
+						frame.classList.remove("is-resizing");
+						widthBadge.hidden = true;
+					};
 					const onMove = (ev: MouseEvent) => {
+						if (!wrap.isConnected) {
+							cleanup();
+							return;
+						}
 						nextW = Math.max(80, Math.min(maxW, Math.round(startW + (ev.clientX - startX))));
 						img.style.width = `${nextW}px`;
 						widthBadge.textContent = `${nextW}px`;
 					};
+					const onCancel = () => {
+						cleanup();
+						img.style.width = this.spec.width ? `${this.spec.width}px` : "";
+					};
 					const onUp = () => {
-						window.removeEventListener("mousemove", onMove);
-						window.removeEventListener("mouseup", onUp);
-						frame.classList.remove("is-resizing");
-						widthBadge.hidden = true;
+						const connected = wrap.isConnected;
+						cleanup();
+						if (!connected) return;
 						if (nextW !== startW) {
-							cb?.onResizeImage(this.from, this.to, nextW);
+							resize(nextW);
 						}
 					};
+					activeImageResizeCleanup.set(wrap, cleanup);
 					window.addEventListener("mousemove", onMove);
 					window.addEventListener("mouseup", onUp);
+					window.addEventListener("blur", onCancel);
 				});
 				frame.appendChild(handle);
 			}
@@ -395,18 +454,29 @@ class ImageWidget extends WidgetType {
 			wrap.appendChild(cap);
 		}
 
+		const showMissing = () => {
+			img.remove();
+			const err = document.createElement(this.inline ? "span" : "div");
+			err.className = "cm-md-image-missing";
+			err.textContent = `Image not found: ${this.spec.src}`;
+			frame.prepend(err);
+			return err;
+		};
+		// Not found the last time it was asked for: drawn as not found until the answer says otherwise (see pictureWasMissing).
+		let missing = pictureWasMissing(this.spec.src, this.filePath) ? showMissing() : null;
 		void loadImageUrl(this.spec.src, this.filePath).then((loaded) => {
 			if (!wrap.isConnected) return;
 			if (loaded) {
 				resolvedUrl = loaded.url;
 				resolvedPath = loaded.filePath;
+				if (missing) {
+					missing.remove();
+					missing = null;
+					frame.prepend(img);
+				}
 				img.src = loaded.url;
-			} else {
-				img.remove();
-				const err = document.createElement(this.inline ? "span" : "div");
-				err.className = "cm-md-image-missing";
-				err.textContent = `Image not found: ${this.spec.src}`;
-				frame.prepend(err);
+			} else if (!missing) {
+				missing = showMissing();
 			}
 		});
 
@@ -418,9 +488,12 @@ class ImageWidget extends WidgetType {
 				return;
 			}
 			view.focus();
-			view.dispatch({ selection: EditorSelection.cursor(Math.min(this.from, view.state.doc.length)), scrollIntoView: true });
+			view.dispatch({ selection: EditorSelection.cursor(range().from), scrollIntoView: true });
 		});
 		return wrap;
+	}
+	destroy(dom: HTMLElement) {
+		activeImageResizeCleanup.get(dom)?.();
 	}
 	ignoreEvent() {
 		return true;
@@ -970,13 +1043,31 @@ class TransclusionWidget extends WidgetType {
 	}
 }
 
-/** Remembered open/closed state for `<details>` blocks so toggling survives Live <-> Read & edits elsewhere. */
-const DETAILS_OPEN_STATE_MAX = 200;
-const detailsOpenState = new Map<string, boolean>();
+/**
+ * What is remembered of one `<details>` block: whether it was open, and the text under its summary when that was
+ * last known. The text is what tells it from another block with the same summary.
+ */
+export type FoldKept = { open: boolean; body: string };
 
-function setDetailsOpen(key: string, open: boolean) {
+/**
+ * Remembered open/closed state for `<details>` blocks so toggling survives Live <-> Read & edits elsewhere: under
+ * the file and the summary, a list with a place for each block of that summary, in the document's order.
+ */
+const DETAILS_OPEN_STATE_MAX = 200;
+/**
+ * How many blocks that are not in the document now are still remembered under one summary. Enough for every block
+ * below a code fence that is being typed: until the fence is closed, none of them is read as a block.
+ */
+const DETAILS_AWAY_MAX = 64;
+const detailsOpenState = new Map<string, (FoldKept | undefined)[]>();
+const detailsOpenKey = (filePath: string, summaryMd: string) => `${filePath}\n${summaryMd}`;
+
+function setDetailsOpen(filePath: string, summaryMd: string, nth: number, body: string, open: boolean) {
+	const key = detailsOpenKey(filePath, summaryMd);
+	const kept = detailsOpenState.get(key) ?? [];
+	kept[nth] = { open, body };
 	detailsOpenState.delete(key);
-	detailsOpenState.set(key, open);
+	detailsOpenState.set(key, kept);
 	while (detailsOpenState.size > DETAILS_OPEN_STATE_MAX) {
 		const oldest = detailsOpenState.keys().next().value;
 		if (oldest === undefined) break;
@@ -984,15 +1075,77 @@ function setDetailsOpen(key: string, open: boolean) {
 	}
 }
 
+/**
+ * What is remembered for the `<details>` blocks of one summary, put where each block stands now: `kept[n]` is what
+ * was remembered for the n-th of them, `bodies[n]` the text of the n-th of them in the document as it is.
+ *
+ * Which block of a summary one is was told by its number alone, so what was remembered for one went to its
+ * neighbour whenever a block with that summary was added or removed above it: with two "Notes" and the second
+ * open, a third written above them opened the first and closed the second. Now a block is known by its text:
+ *
+ * 1. one that stands where it stood, with the text it had, keeps what is there;
+ * 2. one that has the text it had and stood elsewhere takes it from there (blocks were added or removed above it);
+ * 3. one whose text was edited keeps what is at its place, unless that belongs to a block whose text is still in
+ *    the document: a neighbour's is never taken, the block is then as its Markdown says;
+ * 4. what was remembered for a block that is not here (cut to be pasted, or its closing tag half-typed) stays, at
+ *    its place if that is free and after the others if not, for the block to find when it is back.
+ *
+ * Two blocks with the same summary and the same text can only be told apart by their order.
+ */
+export function settleFolds(kept: readonly (FoldKept | undefined)[], bodies: readonly string[]): (FoldKept | undefined)[] {
+	const out: (FoldKept | undefined)[] = [];
+	const given = new Set<number>();
+	bodies.forEach((body, n) => {
+		if (kept[n]?.body !== body) return;
+		out[n] = kept[n];
+		given.add(n);
+	});
+	bodies.forEach((body, n) => {
+		if (out[n]) return;
+		const from = kept.findIndex((was, at) => was?.body === body && !given.has(at));
+		if (from < 0) return;
+		out[n] = kept[from];
+		given.add(from);
+	});
+	bodies.forEach((body, n) => {
+		const was = kept[n];
+		if (out[n] || !was || given.has(n) || bodies.includes(was.body)) return;
+		out[n] = { open: was.open, body };
+		given.add(n);
+	});
+	let after = bodies.length;
+	kept.forEach((was, at) => {
+		if (!was || given.has(at) || bodies.includes(was.body)) return;
+		if (at >= bodies.length && !out[at]) out[at] = was;
+		else {
+			while (out[after]) after++;
+			out[after] = was;
+		}
+	});
+	if (out.length > bodies.length + DETAILS_AWAY_MAX) out.length = bodies.length + DETAILS_AWAY_MAX;
+	return out;
+}
+
+/** Settles what is remembered for a file's `<details>` blocks of one summary on the blocks the document has now. */
+function settleDetailsOpen(filePath: string, summaryMd: string, bodies: readonly string[]) {
+	const key = detailsOpenKey(filePath, summaryMd);
+	const kept = detailsOpenState.get(key);
+	// Set under a name that is there already: the order the names are dropped in does not change.
+	if (kept) detailsOpenState.set(key, settleFolds(kept, bodies));
+}
+
 /** Collapsible `<details><summary>...</summary>...</details>` block widget for Live & Read modes. */
 class DetailsWidget extends WidgetType {
+	/**
+	 * `sourceLength` is how long the block's Markdown is, and `nth` which of the document's blocks with this summary
+	 * it is (0 the first). Where it stands is not kept (see `eq`).
+	 */
 	constructor(
 		private readonly summaryMd: string,
 		private readonly bodyMd: string,
 		private readonly defaultOpen: boolean,
-		private readonly from: number,
-		private readonly to: number,
-		private readonly startLine: number,
+		private readonly sourceLength: number,
+		private readonly nth: number,
 		private readonly filePath: string,
 		private readonly readOnly: boolean,
 		private readonly themeVer: number,
@@ -1000,18 +1153,41 @@ class DetailsWidget extends WidgetType {
 		super();
 	}
 
+	/**
+	 * Where the block stands is not part of what it is, nor of the name its open state is kept under. Both were:
+	 * a line added above made it another widget, drawn again from nothing, and what was kept for it was kept under
+	 * the line it had stood on, so a block that had been opened was drawn closed.
+	 */
 	eq(other: DetailsWidget): boolean {
 		return (
 			other.summaryMd === this.summaryMd &&
 			other.bodyMd === this.bodyMd &&
 			other.defaultOpen === this.defaultOpen &&
-			other.from === this.from &&
-			other.to === this.to &&
-			other.startLine === this.startLine &&
+			other.sourceLength === this.sourceLength &&
+			other.nth === this.nth &&
 			other.filePath === this.filePath &&
 			other.readOnly === this.readOnly &&
 			other.themeVer === this.themeVer
 		);
+	}
+
+	/** The name of the place the block's open state is kept at: its file, its summary, and which block with that summary it is. */
+	get openStateKey(): string {
+		return `${this.filePath}:${this.nth}:${this.summaryMd}`;
+	}
+
+	/**
+	 * Whether the block is drawn open: as it was last left, and as its Markdown says when nothing is remembered for
+	 * it. The place read is this block's own: what is remembered was settled on the document when the widget was made.
+	 */
+	get drawnOpen(): boolean {
+		const kept = detailsOpenState.get(detailsOpenKey(this.filePath, this.summaryMd))?.[this.nth];
+		return kept ? kept.open : this.defaultOpen;
+	}
+
+	/** Remembers the block as it was left, with the text it has: what the element's `toggle` does. */
+	leftOpen(open: boolean) {
+		setDetailsOpen(this.filePath, this.summaryMd, this.nth, this.bodyMd, open);
 	}
 
 	toDOM(view: EditorView): HTMLElement {
@@ -1021,16 +1197,14 @@ class DetailsWidget extends WidgetType {
 
 		const details = document.createElement("details");
 		details.className = "cm-md-details";
-		const stateKey = `${this.filePath}:${this.startLine}:${this.summaryMd}`;
-		details.open = detailsOpenState.has(stateKey) ? detailsOpenState.get(stateKey)! : this.defaultOpen;
+		details.open = this.drawnOpen;
 		details.addEventListener("toggle", () => {
-			setDetailsOpen(stateKey, details.open);
+			this.leftOpen(details.open);
 		});
 
 		const enterRaw = () => {
 			if (this.readOnly) return;
-			const curFrom = Math.min(this.from, view.state.doc.length);
-			const curTo = Math.min(this.to, view.state.doc.length);
+			const { from: curFrom, to: curTo } = widgetRangeNow(view, card, this.sourceLength);
 			view.focus();
 			view.dispatch({
 				selection: EditorSelection.cursor(curFrom),
@@ -1539,6 +1713,9 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 	}
 
 	// 2c. Collapsible `<details><summary>...</summary>...</details>` and block display math (`$$...$$`).
+	// The `<details>` blocks met so far, by summary, each with its text: how many there are tells two with one
+	// summary apart, and the texts are what the remembered open states are settled on below.
+	const detailsSeen = new Map<string, string[]>();
 	for (let n = startLineNum; n <= state.doc.lines; n++) {
 		const line = state.doc.line(n);
 		if (inFence(line.from) || handledTables.has(n) || handledCallouts.has(n) || handledComments.has(n)) continue;
@@ -1568,6 +1745,13 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 				const from = line.from;
 				const to = state.doc.line(endLineNum).to;
 				const parsed = parseDetailsBlock(state.sliceDoc(from, to));
+				// Counted whether or not the block is drawn now, so that the cursor in one block does not rename the next.
+				const sameSummary = parsed ? (detailsSeen.get(parsed.summaryMd) ?? []) : [];
+				const nth = sameSummary.length;
+				if (parsed) {
+					sameSummary.push(parsed.bodyMd);
+					detailsSeen.set(parsed.summaryMd, sameSummary);
+				}
 				if (
 					parsed &&
 					!isRawEditing(state, from, to) &&
@@ -1581,9 +1765,8 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 								parsed.summaryMd,
 								parsed.bodyMd,
 								parsed.defaultOpen,
-								from,
-								to,
-								n,
+								to - from,
+								nth,
 								filePath,
 								isRead,
 								currentThemeVersion(),
@@ -1638,6 +1821,8 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 			}
 		}
 	}
+	// Before any of them is drawn: a block added or removed above another with its summary has renumbered it.
+	for (const [summaryMd, bodies] of detailsSeen) settleDetailsOpen(filePath, summaryMd, bodies);
 
 	// 3. Standalone image lines (`![alt|400](src)` or `![[image.png|Caption|300]]`) & note transclusions (`![[note]]`, `![[note#Heading]]`).
 	const transclusionVer = (rawEmbed: string): number => {
@@ -1682,7 +1867,7 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 			if (cleanSpec.src && !searchMatchesBlock(state, line.from, line.to) && guard.canAdd(line.from, line.to)) {
 				decos.push(
 					Decoration.replace({
-						widget: new ImageWidget(cleanSpec, line.from, line.to, filePath, isRead, false),
+						widget: new ImageWidget(cleanSpec, line.to - line.from, filePath, isRead, false),
 						block: true,
 					}).range(line.from, line.to),
 				);
@@ -1724,7 +1909,7 @@ export const liveBlockField = StateField.define<DecorationSet>({
 function buildInlineDecorations(view: EditorView): DecorationSet {
 	const state = view.state;
 	const decos: Range<Decoration>[] = [];
-	const guard = new ReplaceGuard();
+	const guard = new ReplaceGuard(state.doc);
 	const cb = state.facet(liveCallbacksFacet);
 	const filePath = cb?.filePath() ?? "";
 	const here = canonical(filePath);
@@ -1769,8 +1954,12 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 		if (from >= to) return;
 		if (revealed) {
 			decos.push(syntaxMark.range(from, to));
-		} else if (guard.canAdd(from, to)) {
-			decos.push(Decoration.replace({}).range(from, to));
+			return;
+		}
+		// A plugin may not replace a line break (CodeMirror throws, and the throw takes the editor with it), so
+		// syntax that runs over one is hidden a line at a time. A link whose `(url "title")` wraps is the case.
+		for (const [segFrom, segTo] of lineSegments(from, to, (pos) => state.doc.lineAt(pos).to)) {
+			if (guard.canAdd(segFrom, segTo)) decos.push(Decoration.replace({}).range(segFrom, segTo));
 		}
 	};
 
@@ -1903,6 +2092,16 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 						decos.push(Decoration.mark({ class: "cm-md-code" }).range(contentFrom, contentTo));
 					}
 					for (const [mf, mt] of marks) hideOrDim(mf, mt, revealed);
+					return false;
+				}
+
+				// A backslash escape (`1\.`, `\*`, `\#`): the backslash is syntax like any other mark, hidden until the
+				// cursor is at it. It was drawn, so a document from Word, whose import escapes every sign Markdown would
+				// read (`1\. Not a list item`), showed its backslashes in Live and in Read. Not in a table being edited
+				// as text, where `\|` beside the cell's own pipes has to be seen for what it is.
+				if (node.name === "Escape") {
+					for (let up = node.node.parent; up; up = up.parent) if (up.name === "Table") return false;
+					if (!isSkipped(node.from, node.to)) hideOrDim(node.from, node.from + 1, selectionTouches(state, node.from, node.to));
 					return false;
 				}
 
@@ -2110,7 +2309,7 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 					if (!selectionTouches(state, mFrom, mTo) && guard.canAdd(mFrom, mTo)) {
 						decos.push(
 							Decoration.replace({
-								widget: new ImageWidget(cleanSpec, mFrom, mTo, filePath, state.facet(readOnlyModeFacet), true),
+								widget: new ImageWidget(cleanSpec, mTo - mFrom, filePath, state.facet(readOnlyModeFacet), true),
 							}).range(mFrom, mTo),
 						);
 					}
@@ -2358,7 +2557,65 @@ const liveExtraBaseTheme = EditorView.baseTheme({
 	".cm-md-fn-def-read:hover": {
 		textDecoration: "underline",
 	},
+	// The mark at the end of a table row that has more cells than the table has columns (extraCellsNote in cmLiveTable).
+	".cm-tbl-extra": {
+		display: "inline-block",
+		marginLeft: "6px",
+		padding: "0 5px",
+		borderRadius: "999px",
+		border: "1px solid color-mix(in srgb, var(--editor-fg, var(--fg)) 22%, transparent)",
+		backgroundColor: "color-mix(in srgb, var(--editor-fg, var(--fg)) 6%, transparent)",
+		color: "var(--editor-muted, var(--muted))",
+		fontFamily: "var(--ui-font)",
+		fontSize: "0.78em",
+		fontWeight: "600",
+		lineHeight: "1.45",
+		whiteSpace: "nowrap",
+		cursor: "help",
+		userSelect: "none",
+	},
 });
+
+/**
+ * Whether a change is the document's own text arriving in this editor, and not something done in it. The model
+ * holds the document: what the Info panel writes to the front matter, an undo or a redo, and a file read again
+ * from disk are changes of the model, and the editor is given each with `addToHistory` off (the model listener in
+ * MarkdownLiveEditor). Where there is no model, the editor's own history undoes and redoes.
+ */
+const changeFromOutside = (tr: Transaction): boolean =>
+	tr.annotation(Transaction.addToHistory) === false || tr.isUserEvent("undo") || tr.isUserEvent("redo");
+
+/**
+ * What a change made in the editor would do to the front matter while it is hidden (Live and Read draw nothing
+ * for it; it is edited in the Info panel):
+ *
+ * - `kept`: the block is as it was, or there is no hidden block with a body under it to keep;
+ * - `unended`: the block is as it was, but the line break after it went with the body (Delete Line on the only
+ *   line of the body) and the document would end in the closing fence, where the next letter typed joins it;
+ * - `changed`: anything else. Text went into the block or came out of it, or the closing fence is no longer one.
+ *
+ * Only Replace, Backspace and a move of the cursor were looked at, each by its own user event. Move Line Up on
+ * the first line of the body swapped it with the closing `---`: the line was gone from view and read as a
+ * property, what was typed next edited the YAML, and with the key held the line went up through the block and
+ * out above it, which left the document without front matter. Transpose Characters there, and Backspace with a
+ * second cursor there, joined the line to the fence. So the question is asked of the document the change leaves,
+ * not of the command: the block has to have the lines it had, end where it ended, and say what it said. A change
+ * that reaches into it and leaves it so (the whole document written again for a mended link, Delete Line on the
+ * first line of the body) is none of its business.
+ *
+ * A document that is its front matter and nothing more is not looked at: there is no body to keep things in,
+ * and the cursor's clamp below has always stood aside there too.
+ */
+function hiddenFrontMatterAfter(tr: Transaction): "kept" | "unended" | "changed" {
+	const before = tr.startState.doc;
+	const fm = frontmatterRange(tr.startState);
+	if (!fm || fm.to >= before.length || searchMatchesBlock(tr.startState, fm.from, fm.to)) return "kept";
+	if (!tr.changes.touchesRange(fm.from, fm.to)) return "kept";
+	const doc = tr.newDoc;
+	if (getDocFrontMatter(doc).lines !== fm.lines || doc.line(fm.lines).to !== fm.to) return "changed";
+	if (doc.sliceString(0, fm.to) !== before.sliceString(0, fm.to)) return "changed";
+	return doc.length > fm.to ? "kept" : "unended";
+}
 
 export const liveInteractionExtension: Extension = [
 	liveExtraBaseTheme,
@@ -2400,24 +2657,48 @@ export const liveInteractionExtension: Extension = [
 				if (prev.empty && prev.head <= bodyStart) return [];
 			}
 		}
-		if (tr.docChanged || !tr.selection) return tr;
-		const fm = frontmatterRange(tr.state);
-		if (!fm || searchMatchesBlock(tr.state, fm.from, fm.to)) return tr;
-		const bodyStart = Math.min(tr.state.doc.length, fm.to + 1);
-		if (bodyStart <= fm.to) return tr;
-		const main = tr.selection.main;
-		if (main.anchor <= fm.to || main.head <= fm.to) {
-			return [
-				tr,
-				{
-					selection: EditorSelection.range(
-						Math.max(main.anchor, bodyStart),
-						Math.max(main.head, bodyStart),
-					),
-				},
-			];
+		// Whatever was done, by whatever key or command: see hiddenFrontMatterAfter. (Replace has cut its own
+		// changes back above, and may write in the block while the YAML editor is open.)
+		if (tr.docChanged && !tr.isUserEvent("input.replace") && !changeFromOutside(tr)) {
+			const after = hiddenFrontMatterAfter(tr);
+			if (after === "changed") return [];
+			if (after === "unended") {
+				const end = tr.newDoc.length;
+				return [tr, { changes: { from: end, insert: "\n" }, selection: EditorSelection.cursor(end + 1), sequential: true }];
+			}
 		}
-		return tr;
+		// The selection the transaction leaves. A change of the document can put a cursor in the block as a move of
+		// the cursor can, and was not looked at: the model's text arriving after the Info panel wrote a property
+		// keeps the cursor's number, the undo of such a write puts the cursor where the write was, and a document
+		// written again whole (a mended link) leaves it at the top. What was typed next went into the YAML.
+		const sel = tr.selection ?? (tr.docChanged ? tr.newSelection : undefined);
+		if (!sel) return tr;
+		// Where the block ends in the document the transaction leaves: read from its text, which the block field
+		// reads next anyway, so that no state is worked out here for a change that puts no cursor in the block.
+		const doc = tr.newDoc;
+		const fmLines = getDocFrontMatter(doc).lines;
+		if (!fmLines || fmLines > doc.lines) return tr;
+		const fmTo = doc.line(fmLines).to;
+		const bodyStart = Math.min(doc.length, fmTo + 1);
+		if (bodyStart <= fmTo) return tr;
+		if (!sel.ranges.some((range) => range.from <= fmTo)) return tr;
+		if (searchMatchesBlock(tr.state, 0, fmTo)) return tr;
+		const main = sel.main;
+		if (main.from <= fmTo) {
+			return [tr, { selection: EditorSelection.range(Math.max(main.anchor, bodyStart), Math.max(main.head, bodyStart)), sequential: true }];
+		}
+		// Only the main range was looked at: with it in the body, another could be in the block, where Select Next
+		// Occurrence and Select All Occurrences put one on a word that a property has too, and what was typed over
+		// the selections replaced the hidden one as well. A selection wholly in the block has nothing left to
+		// select and goes; one that reaches into it is cut at the body's start; a cursor stops there.
+		const kept: SelectionRange[] = [];
+		let mainIndex = 0;
+		sel.ranges.forEach((range, i) => {
+			if (range.to <= fmTo && !range.empty) return;
+			if (i === sel.mainIndex) mainIndex = kept.length;
+			kept.push(range.from <= fmTo ? EditorSelection.range(Math.max(range.anchor, bodyStart), Math.max(range.head, bodyStart)) : range);
+		});
+		return [tr, { selection: EditorSelection.create(kept, mainIndex), sequential: true }];
 	}),
 	EditorView.domEventHandlers({
 	mousedown(event, view) {

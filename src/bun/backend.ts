@@ -5,10 +5,10 @@ import { basename, dirname, extname, isAbsolute, join, relative, sep } from "nod
 import { lstatSync, statSync } from "node:fs";
 import type { BackendApi, BackendEvents, Info, LspState, Workspace } from "../shared/protocol";
 import { linkWritten } from "../shared/docLinks";
-import { htmlToMarkdown } from "../shared/htmlToMarkdown";
+import { htmlToMarkdown, openTags } from "../shared/htmlToMarkdown";
 import { markdownToDocx, parseDocxToMarkdown } from "./docx";
 import { decode } from "./encoding";
-import { History } from "./history";
+import { copyNotKept, History, historyNotKept } from "./history";
 import { LspProcess } from "./lsp";
 import { catalogFilesOf, docAudit, docsTruncated, EXPORT_TYPES, fileManifest, linksTo, listDocs, namesIn, readExport, readProject, setupProject, tomlProblem, undoSetup } from "./project";
 import { recent, SettingsStore } from "./settings";
@@ -20,6 +20,11 @@ import { formatDocument } from "./format";
 
 const IMPORT_MAX_BYTES = 20 * 1024 * 1024;
 const ALLOWED_IMPORT_EXTS = new Set([".docx", ".html", ".htm", ".md", ".markdown"]);
+/**
+ * How long the view has to answer a close that only text being typed stands in the way of, in milliseconds. It
+ * answers in a few (it counts the unsaved files, or closes the app): one that has not by now will not.
+ */
+export const VIEW_ANSWERS_WITHIN = 2000;
 
 /** Parses `SSL_STUDIO_OPENCODE` as a JSON string array when it starts with `[` (supporting spaces in paths), falling back to space-splitting. */
 export function parseOpencodeCommandEnv(raw: string | undefined): string[] | undefined {
@@ -135,8 +140,40 @@ export function createBackend(host: Host, initial?: string) {
 			throw err;
 		}
 	};
+	/** What keeping local history last failed with, so that it is said once and not at every save; null while it works. */
+	let historyFailed: string | null = null;
+	/**
+	 * Local history of a file that has just been written. The file is on disk by then, and that is what the save
+	 * answers: where the snapshot could not be kept (the history folder full, or not to be written), the save was
+	 * reported as failed with the file written, and its tab stayed unsaved. The failure goes to the log, and to the
+	 * person as a notice: with the log alone nobody at the window knew that the copies a discard or a look at the
+	 * History panel counts on were not being made. Once for a cause, and again when it comes back after history was
+	 * kept in between.
+	 */
+	const keepWritten = async (hist: History, full: string, text: string) => {
+		try {
+			// A snapshot that was written shows the folder takes them again. One that was passed over (the same text as
+			// the last, a text too large to keep) wrote nothing, and shows nothing.
+			if (await hist.record(full, text)) historyFailed = null;
+		} catch (e: any) {
+			const why = String(e?.code ?? e?.message ?? e);
+			if (why !== historyFailed) {
+				console.error(`Local history is not being kept (${full} was saved, its snapshot was not): ${e?.message ?? e}`);
+				host.emit("notice", { kind: "error", text: historyNotKept(hist.base, basename(full), String(e?.message ?? e)) });
+			}
+			historyFailed = why;
+		}
+	};
 	/** How many open files have edits that are not on disk, as the view last said. */
 	let unsaved = 0;
+	/**
+	 * Whether a view is open that may hold text still being typed, as the view last said (a table's open cell, a
+	 * field of a plan step). That text is in no document until the view puts it there, so the count above is 0 for
+	 * it: the window closed at once on that count, and the text went with it, unasked.
+	 */
+	let typing = false;
+	/** When the view was asked about a close that only such text stood in the way of, and has said nothing since; 0 otherwise. */
+	let askedOfTyping = 0;
 
 	async function loadInfo(): Promise<Info> {
 		const seq = ++infoSeq;
@@ -174,14 +211,20 @@ export function createBackend(host: Host, initial?: string) {
 		});
 
 		let startedLsp: LspProcess | null = null;
+		// From here the folder is open: the files, the history and the watcher are the new folder's and the old one's
+		// are closed. So nothing below fails the open, unless a later open has overtaken it. Each step that can fail
+		// says so in its own place (the log, the language server's state), and the view is told of the folder the
+		// backend is on. The list of recent folders used to fail it: where the list could not be written (a state
+		// folder that is full, or read-only) the view stayed on the old folder with the backend on the new one, every
+		// save "outside the workspace".
 		try {
-			await recent(nextFiles.root);
+			await recent(nextFiles.root).catch((e) => console.error(`The list of recent folders was not written: ${e?.message ?? e}`));
 			if (isStale()) {
 				nextFiles.close();
 				return { root: nextFiles.root, name: basename(nextFiles.root) };
 			}
 			if (restartSeq === lspRestartSeq) {
-				const { lsp: status } = await loadInfo();
+				const { lsp: status } = await loadInfo().catch((e): Pick<Info, "lsp"> => ({ lsp: { ok: false, message: `The language server was not looked for: ${e?.message ?? e}` } }));
 				if (isStale()) {
 					nextFiles.close();
 					return { root: nextFiles.root, name: basename(nextFiles.root) };
@@ -206,7 +249,7 @@ export function createBackend(host: Host, initial?: string) {
 					}
 				}
 			}
-			await agent.workspaceChanged();
+			await agent.workspaceChanged().catch((e) => console.error(`The agent's sessions of the folder before were not ended: ${e?.message ?? e}`));
 			if (isStale()) {
 				nextFiles.close();
 				startedLsp?.stop();
@@ -217,8 +260,12 @@ export function createBackend(host: Host, initial?: string) {
 			if (isStale()) {
 				nextFiles.close();
 				startedLsp?.stop();
+				throw e;
 			}
-			throw e;
+			// What is left to fail is the start of the language server: said as its state, with the folder open.
+			console.error(e);
+			if (lsp === startedLsp) emitLspState({ state: "failed", message: `The language server was not started: ${(e as any)?.message ?? e}` });
+			return { root: nextFiles.root, name: basename(nextFiles.root) };
 		}
 	}
 
@@ -255,7 +302,7 @@ export function createBackend(host: Host, initial?: string) {
 			const full = ws.inside(path);
 			return ws.alone(full, async (writeNow) => {
 				const result = await writeNow(text, asText);
-				await hist.record(full, text);
+				await keepWritten(hist, full, text);
 				return result;
 			});
 		},
@@ -269,7 +316,8 @@ export function createBackend(host: Host, initial?: string) {
 			const hist = history!;
 			const full = ws.inside(path);
 			const now = await ws.read(full);
-			if (!now.binary) await hist.record(full, now.text);
+			// Kept whatever its size: this is asked for before something writes over the file, and is then its way back.
+			if (!now.binary) await hist.keep(full, now.text);
 		},
 		gitStatus: async () => (files ? git().status() : null),
 		gitBase: async (path, from) => {
@@ -310,15 +358,26 @@ export function createBackend(host: Host, initial?: string) {
 			const full = ws.inside(path);
 			rejectRoot(ws, full, "discard");
 			await ws.alone(full, async () => {
-				// What is about to go is kept first, where it is text: a discard by mistake has a way back.
+				// A file git does not follow has nothing to go back to: it goes to the trash, not out of existence.
+				const followed = await git().follows(full);
+				// What is about to go is kept first, where it is text and whatever its size: a discard by mistake has a
+				// way back. For a file git follows that copy is the only way back, so where it cannot be made nothing is
+				// discarded: the discard used to go on without it, having said that the file is kept. A file that goes
+				// to the trash is still there, and goes whether or not its copy was made.
+				let text: string | null = null;
 				try {
 					const now = await ws.read(full);
-					if (!now.binary) await hist.record(full, now.text);
-				} catch {
+					if (!now.binary) text = now.text;
+				} catch (e: any) {
 					// Not there to read (it was removed): there is nothing of it to keep.
+					if (followed && e?.code !== "ENOENT") throw new Error(copyNotKept(basename(full), String(e?.message ?? e)));
 				}
-				// A file git does not follow has nothing to go back to: it goes to the trash, not out of existence.
-				if (await git().follows(full)) await git().discard(full);
+				if (text !== null) {
+					await hist.keep(full, text).catch((e: any) => {
+						if (followed) throw new Error(copyNotKept(basename(full), String(e?.message ?? e)));
+					});
+				}
+				if (followed) await git().discard(full);
 				else await host.trash(full);
 			});
 		},
@@ -329,30 +388,34 @@ export function createBackend(host: Host, initial?: string) {
 			await ws.alone(full, () => host.trash(full));
 		},
 		search: (query, options) => need().search(query, options),
+		searchScan: (query, options, open) => need().searchScan(query, options, open),
 		replace: async (query, replacement, options, paths) => {
 			const ws = need();
 			const hist = history!;
-			const done: { path: string; count: number; error?: string; skippedProtected?: number; invalidJson?: boolean }[] = [];
+			const done: { path: string; count: number; error?: string; skippedProtected?: number; invalidJson?: boolean; changed?: boolean }[] = [];
 			for (const path of paths) {
 				// One file that cannot be written (its encoding has no way to write the replacement, say) does not
 				// stop the others: it is left as it was, and says why.
 				try {
 					const full = ws.inside(path);
 					// Read and written as one step: a save of the file that landed between the two would have been
-					// written away by text worked out from the file as it was before it.
+					// written away by text worked out from the file as it was before it. Whether the file is still the
+					// text that was searched (`asSearched`) is looked at in the same step, for the same reason.
 					const outcome = await ws.alone(full, async (write) => {
 						const change = await ws.replaced(path, query, replacement, options);
 						if (!change) return null;
+						if (change.changed) return { count: 0, changed: true };
 						if (change.invalidJson || !change.count) {
 							return { count: 0, skippedProtected: change.skippedProtected, invalidJson: change.invalidJson };
 						}
 						// The file as it was goes into local history first, so that there is a way back.
-						await hist.record(full, change.before);
+						await hist.keep(full, change.before);
 						await write(change.after, false);
-						await hist.record(full, change.after);
+						await keepWritten(hist, full, change.after);
 						return { count: change.count, skippedProtected: change.skippedProtected, invalidJson: false };
 					});
-					if (outcome && (outcome.count || outcome.skippedProtected || outcome.invalidJson)) {
+					if (outcome && "changed" in outcome) done.push({ path: full, count: 0, changed: true });
+					else if (outcome && (outcome.count || outcome.skippedProtected || outcome.invalidJson)) {
 						done.push({
 							path: full,
 							count: outcome.count,
@@ -374,7 +437,13 @@ export function createBackend(host: Host, initial?: string) {
 		setupUndo: async () => undoSetup(need().root),
 		unsavedChanged: async (count) => {
 			if (closing) return;
+			askedOfTyping = 0;
 			unsaved = Math.max(0, Number(count) || 0);
+		},
+		typingChanged: async (held) => {
+			if (closing) return;
+			askedOfTyping = 0;
+			typing = held === true;
 		},
 		closeWindow: async () => {
 			closing = true;
@@ -461,7 +530,7 @@ export function createBackend(host: Host, initial?: string) {
 			const destDir = ws.inside(request.destDir);
 			const attachDir = request.attachmentsDir ? ws.inside(request.attachmentsDir) : ws.inside(join(ws.root, "docs", "attachments"));
 			const kind: "docx" | "html" | "md" = ext === ".docx" ? "docx" : ext === ".html" || ext === ".htm" ? "html" : "md";
-			const rawStem = basename(src, ext).replace(/[\\/:*?"<>|]+/g, "-").trim() || "imported";
+			const rawStem = basename(src, extname(src)).replace(/[\\/:*?"<>|]+/g, "-").trim() || "imported";
 			const baseDestPath = ws.inside(join(destDir, `${rawStem}.md`));
 			const mode = request.onConflict ?? "copy";
 
@@ -475,6 +544,11 @@ export function createBackend(host: Host, initial?: string) {
 				reserved?.add(candidate.toLowerCase());
 				return candidate;
 			};
+
+			// A Word document is read before anything is asked or touched. A file that is not one (an old .doc under
+			// the name, one behind a password, half a download) used to import as an empty document, and with
+			// Overwrite it took the place of the Markdown that was there, after a history snapshot nobody asked for.
+			const docx = kind === "docx" ? (parseDocxToMarkdown(new Uint8Array(await Bun.file(src).arrayBuffer()), basename(src)) as ReturnType<typeof parseDocxToMarkdown> & { warnings?: string[] }) : null;
 
 			let destPath = baseDestPath;
 			if (pathTaken(baseDestPath)) {
@@ -495,9 +569,8 @@ export function createBackend(host: Host, initial?: string) {
 
 			const savedImages: string[] = [];
 			const reservedImgs = new Set<string>();
-			if (kind === "docx") {
-				const bytes = new Uint8Array(await Bun.file(src).arrayBuffer());
-				const parsed = parseDocxToMarkdown(bytes) as ReturnType<typeof parseDocxToMarkdown> & { warnings?: string[] };
+			if (docx) {
+				const parsed = docx;
 				let md = parsed.markdown;
 				if (parsed.images.length) {
 					for (const img of parsed.images) {
@@ -518,7 +591,6 @@ export function createBackend(host: Host, initial?: string) {
 			const rawBytes = new Uint8Array(await Bun.file(src).arrayBuffer());
 			const rawText = decode(rawBytes).text;
 			if (kind === "html") {
-				const IMG_TAG_RE = /<img\b[^>]*>/gi;
 				const DATA_SRC_RE =
 					/(\bsrc\s*=\s*)(?:"data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);base64,([^"]+)"|'data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);base64,([^']+)'|data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);base64,([^\s>]+))/i;
 				const EXT_MAP: Record<string, string> = {
@@ -532,9 +604,12 @@ export function createBackend(host: Host, initial?: string) {
 				let rewritten = "";
 				let lastIdx = 0;
 				let imgIdx = 0;
-				for (const m of rawText.matchAll(IMG_TAG_RE)) {
-					const idx = m.index ?? 0;
-					const tag = m[0]!;
+				// Each `<img …>` up to its ">", looked for once. As the pattern `<img\b[^>]*>`, every "<img " of a page with
+				// no ">" left was read to the end of the page: 100 KB of them took seven seconds, 400 KB over a minute,
+				// and a save asked for in that time waited (the backend has one thread).
+				for (const m of openTags(rawText, "img")) {
+					const idx = m.index;
+					const tag = m.tag;
 					rewritten += rawText.slice(lastIdx, idx);
 					const srcMatch = DATA_SRC_RE.exec(tag);
 					if (srcMatch) {
@@ -583,6 +658,9 @@ export function createBackend(host: Host, initial?: string) {
 				return candidate;
 			};
 
+			// Read before anything is asked or touched, as in `importDocFile`: what is not a Word document fails here.
+			const parsed = parseDocxToMarkdown(bytes, request.fileName || "document.docx") as ReturnType<typeof parseDocxToMarkdown> & { warnings?: string[] };
+
 			let destPath = baseDestPath;
 			if (pathTaken(baseDestPath)) {
 				if (mode === "prompt") {
@@ -600,7 +678,6 @@ export function createBackend(host: Host, initial?: string) {
 				}
 			}
 
-			const parsed = parseDocxToMarkdown(bytes) as ReturnType<typeof parseDocxToMarkdown> & { warnings?: string[] };
 			let md = parsed.markdown;
 			const savedImages: string[] = [];
 			const reservedImgs = new Set<string>();
@@ -724,9 +801,21 @@ export function createBackend(host: Host, initial?: string) {
 		 * Asked when the window is about to close. With unsaved edits the answer is
 		 * no, and the view is told to ask the user; it closes the app itself once
 		 * they have saved or chosen to discard (ADR 0009).
+		 *
+		 * The answer is also no while a view may hold text still being typed: this cannot wait for the view, so the
+		 * count it answers from is the one from before that text is in its document. The view puts it there and counts
+		 * again: with nothing unsaved then, it closes the app at once and asks nothing. With no such view open the
+		 * window closes on the count as before, without that detour.
 		 */
 		mayClose: () => {
-			if (closing || !unsaved) return true;
+			if (closing || (!unsaved && !typing)) return true;
+			if (!unsaved) {
+				// Nothing is unsaved by the count, and the view was asked about this a while ago and has said nothing
+				// since: it is not there to answer (it crashed, or hangs). The window is let go on a second request,
+				// as it was on the first before typed text was asked about at all.
+				if (askedOfTyping && Date.now() - askedOfTyping > VIEW_ANSWERS_WITHIN) return true;
+				askedOfTyping ||= Date.now();
+			}
 			host.emit("closeRequested", {});
 			return false;
 		},

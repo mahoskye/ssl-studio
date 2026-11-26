@@ -81,12 +81,53 @@ function stripInlineComment(raw: string): string {
 const TEMPLATE_HEADER_RE = /^\s*<!--\s*template\b[\s\S]*?-->\s*$/i;
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Quotes a YAML scalar value when it contains characters that would corrupt unquoted YAML (`#`, `: `, `[...]`, quotes, leading/trailing spaces). */
+/**
+ * A value between double quotes, as JSON writes a string, with the two separator characters JSON leaves as they
+ * are (U+2028, U+2029) written as escapes. They end a line for a regular expression's dot and for older YAML
+ * readers: left bare in a value, the line no longer read as `key: value` and the key was gone on the next read.
+ * So are the other characters JSON leaves and a YAML reader does not take as they are, between quotes or not:
+ * U+0085 is a line end to YAML 1.1 (it came back as a space), the rest of that range and DEL are refused.
+ */
+const jsonQuoted = (value: string) =>
+	JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029\ufeff\ufffe\uffff]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+
+/** Where a bare value stops being its own words for YAML: a mark it opens with, a colon that ends a key, a comment, a quote, a line end. */
+const YAML_MARKED = /^[#[\]{},!&*?|>'\"%@`-]|:\s|:$|\s#|[\r\n"\u2028\u2029]/;
+
+/** Quotes a YAML scalar value when it contains characters that would corrupt unquoted YAML (`#`, `: `, `[...]`, quotes, leading/trailing spaces, a line or paragraph separator). */
 export function quoteYamlScalar(value: string): string {
 	const v = value.trim();
 	if (!v) return '""';
-	if (/^[#[\]{},!&*?|>'\"%@`-]|:\s|:$|\s#|[\r\n"]/.test(v)) return JSON.stringify(v);
+	if (YAML_MARKED.test(v)) return jsonQuoted(v);
 	return v;
+}
+
+/**
+ * What a YAML reader takes for something other than text where it stands bare, whole: the words for true, false
+ * and nothing (YAML 1.1's too: yes, no, on, off, y, n, in any capitals), the two marks 1.1 gives a meaning of
+ * their own, and a number or a date. A number is taken widely, as anything that opens with a digit and holds only
+ * what a number or a date is spelled with (1.2's `1e3` and `0o17`, 1.1's `1_000`, `0b1`, `017` and `2026-11-25`):
+ * readers differ in how much of that they take (one reads `1-2` as 1), and quotes cost such a value nothing.
+ */
+const YAML_TYPED = /^(?:~|null|true|false|yes|no|on|off|y|n|=|<<|[-+]?(?:0b[01_]+|0o[0-7_]+|0x[0-9a-f_]+|\.?[0-9][0-9_.e+-]*|\.inf)|\.nan)$/i;
+/**
+ * What ends or splits a bare value in a list on one line (`[a, b]`), or anywhere for a reader stricter than this
+ * file's; a tab or a control character, which no reader takes bare; and three dots, which end a document.
+ */
+const YAML_TEXT_MARKED = /[:#[\]{}"',\u0000-\u001f\u007f-\u009f\ufeff\ufffe\uffff]|^\.\.\./;
+
+/**
+ * A value that is text (a ticket's key, a title, a name), as it is written after `key: ` or as an item of a list
+ * on one line, so that it reads back as the same text: by this file's reader and by a YAML reader. Bare where
+ * that is safe, between double quotes otherwise. It quotes all that `quoteYamlScalar` does, by asking it, so the
+ * two cannot come apart again: the templates had a rule of their own, which left `@x`, `*x`, `- x` and their like
+ * bare (an error or nothing to a YAML reader), and `NO`, `NULL`, `12`, `1E3` (false, nothing and numbers).
+ */
+export function quoteYamlText(value: string): string {
+	const v = value.trim();
+	const written = quoteYamlScalar(v);
+	if (written !== v) return written;
+	return YAML_TEXT_MARKED.test(v) || YAML_TYPED.test(v) ? jsonQuoted(v) : v;
 }
 
 function leadingTemplateLines(lines: readonly string[]): number {
@@ -106,12 +147,13 @@ export function frontMatter(text: string): FrontMatter {
 	let listKey = "";
 	for (const line of lines.slice(start + 1, end)) {
 		if (!line.trim() || line.trim().startsWith("#")) continue;
-		const item = /^\s*-\s+(.*)$/.exec(line);
+		// `[^\r\n]` and not a dot: a dot stops at U+2028 and U+2029, which are characters of a value here, not line ends.
+		const item = /^\s*-\s+([^\r\n]*)$/.exec(line);
 		if (item && listKey) {
 			(values[listKey] as string[]).push(unquote(stripInlineComment(item[1]!)));
 			continue;
 		}
-		const pair = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line);
+		const pair = /^([A-Za-z0-9_-]+)\s*:\s*([^\r\n]*)$/.exec(line);
 		if (!pair) continue;
 		const key = pair[1]!.toLowerCase();
 		const value = stripInlineComment(pair[2]!);
@@ -261,7 +303,79 @@ function readFrontMatterListValues(text: string, key: string): string[] {
 	return many(val);
 }
 
-const quoteListItem = (v: string) => (/[:#[\]{},&*?|>!'"%@`\r\n]|^-|^\s|\s$/.test(v) ? JSON.stringify(v) : v);
+const quoteListItem = (v: string) => (/[:#[\]{},&*?|>!'"%@`\r\n\u2028\u2029]|^-|^\s|\s$/.test(v) ? jsonQuoted(v) : v);
+
+/**
+ * How far a key's value runs: the index of its last line, the key's own line
+ * when the value is all on it. A value goes on under its key as dashes, as
+ * more-indented lines (a block scalar, a nested map, a scalar that wraps) or
+ * as a flow list or map whose bracket closes on a later line. Blank and
+ * comment lines between two of its lines are part of it; ones after its last
+ * line are not. `dashes` says the value is a plain list, one `- item` to a
+ * line and all at one indent: the only shape over several lines that is
+ * edited a line at a time. A writer that changed the key's line alone would
+ * leave the rest of any other shape behind as broken YAML.
+ */
+function valueExtent(lines: readonly { text: string }[], at: number, close: number): { end: number; dashes: boolean } {
+	const keyLine = lines[at]!.text;
+	const value = keyLine.slice(keyLine.indexOf(":") + 1);
+	const empty = /^\s*(?:#.*)?$/.test(value);
+	// Under a block scalar's mark every more-indented line is its text, one that starts with a hash too.
+	const block = /^\s*[|>][-+0-9]*\s*(?:#.*)?$/.test(value);
+	// A flow list or map left open on the key's line runs to the line that closes it: its items are indented, and
+	// the closing bracket (or a comment) may stand at the margin. Brackets that do not close that way say nothing
+	// (an unquoted title may open with one), and the value is then read as far as its indented lines go.
+	let flowEnd = -1;
+	if (/^\s*[[{]/.test(value)) {
+		let depth = 0;
+		let quote = "";
+		// A quote mark opens a quoted item only where an item starts: the one in `it's` is a letter of its word.
+		let opening = true;
+		scan: for (let j = at; j < close; j++) {
+			const text = j === at ? value : lines[j]!.text;
+			if (j > at && /^[^\s\]}#]/.test(text)) break;
+			for (let i = 0; i < text.length; i++) {
+				const ch = text[i]!;
+				if (quote) {
+					if (quote === '"' && ch === "\\") i++;
+					else if (ch === quote) quote = "";
+					continue;
+				}
+				if (/\s/.test(ch)) continue;
+				if (ch === "#" && (i === 0 || /\s/.test(text[i - 1]!))) break;
+				const starts = opening;
+				opening = ch === "[" || ch === "{" || ch === "," || ch === ":";
+				if ((ch === '"' || ch === "'") && starts) quote = ch;
+				else if (ch === "[" || ch === "{") depth++;
+				else if ((ch === "]" || ch === "}") && --depth <= 0) {
+					flowEnd = j;
+					break scan;
+				}
+			}
+		}
+	}
+	let end = at;
+	let dashes = empty;
+	let indent: string | null = null;
+	for (let j = at + 1; j < close; j++) {
+		const text = lines[j]!.text;
+		if (j <= flowEnd) {
+			end = j;
+			dashes = false;
+			continue;
+		}
+		const trimmed = text.trim();
+		if (!trimmed) continue;
+		const indented = /^\s/.test(text);
+		if (trimmed.startsWith("#") && !(block && indented)) continue;
+		const dash = /^(\s*)-\s+/.exec(text);
+		if (!indented && !(empty && /^-(?:\s|$)/.test(text))) break;
+		end = j;
+		if (!dash || (indent !== null && dash[1] !== indent)) dashes = false;
+		else indent = dash[1]!;
+	}
+	return { end, dashes: dashes && end > at };
+}
 
 function writeFrontMatterRaw(text: string, key: string, serializedVal: string): string | null {
 	const eol = text.includes("\r\n") ? "\r\n" : "\n";
@@ -305,15 +419,9 @@ function writeFrontMatterRaw(text: string, key: string, serializedVal: string): 
 	const keyRe = new RegExp(`^${escapeRegExp(key)}\\s*:`, "i");
 	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && keyRe.test(line.text));
 	if (at < 0) return `${text.slice(0, lines[close]!.start)}${key}: ${serializedVal}${eol}${text.slice(lines[close]!.start)}`;
-	// A list written as dashes under the key is the person's layout: skip blank/comment lines when checking.
-	if (/:\s*(?:#.*)?$/.test(lines[at]!.text)) {
-		for (let j = at + 1; j < close; j++) {
-			const next = lines[j]!.text.trim();
-			if (!next || next.startsWith("#")) continue;
-			if (/^-\s+/.test(next)) return null;
-			break;
-		}
-	}
+	// A value that goes on under its key's line (dashes, a block scalar, a nested map, a flow list closed on a later
+	// line) is the person's layout, and a new value on the key's line would leave its other lines behind: not set here.
+	if (valueExtent(lines, at, close).end > at) return null;
 	return `${text.slice(0, lines[at]!.start)}${lines[at]!.text.slice(0, lines[at]!.text.indexOf(":"))}: ${serializedVal}${text.slice(lines[at]!.end)}`;
 }
 
@@ -321,17 +429,29 @@ function writeFrontMatterRaw(text: string, key: string, serializedVal: string): 
  * The text with one value of its front matter set: the key's own line is
  * changed where it has one, and added at the block's end where it has not.
  * A document with no front matter gets a block. Nothing else is touched, and
- * the file's own line ends are kept. A value that is a list under its key is
- * left alone: null says it could not be set.
+ * the file's own line ends are kept. A value that goes on under its key's
+ * line (a list as dashes, a block scalar, a nested map, a flow list closed on
+ * a later line) is left alone: null says it could not be set.
  */
 export function withFrontMatter(text: string, key: string, value: string): string | null {
 	return writeFrontMatterRaw(text, key, quoteYamlScalar(value));
 }
 
 /**
+ * Why a writer here gave null for `field` of `text`, as the end of a sentence about the document ("Could not
+ * update Due-dates.md: its status: is written over several lines. ..."). A writer refuses a value the document
+ * lays out over several lines, and a block whose opening `---` is never closed.
+ */
+export function frontMatterRefusal(text: string, field: string): string {
+	return frontMatter(text).lines ? `its ${field}: is written over several lines. Change it in the text.` : "its front matter is not closed (no closing ---). Close it in the text.";
+}
+
+/**
  * Adds `item` to a front matter list key (e.g. `specs: [a, b]`, `plans: [...]`, `related: [...]`).
  * Supports BOTH inline arrays (`key: [a, b]`) AND multi-line YAML bullet lists (`key:\n  - a`),
  * preserving the author's list style. If `item` is already present (case-insensitive), returns `text` unchanged.
+ * Any other value over several lines (a flow list broken across lines, a block scalar, a nested map, dash items
+ * that run on) is left alone: null says the item could not be added.
  */
 export function addToFrontMatterList(text: string, key: string, item: string): string | null {
 	const wanted = item.trim();
@@ -358,24 +478,21 @@ export function addToFrontMatterList(text: string, key: string, item: string): s
 	const keyRe = new RegExp(`^${escapeRegExp(key)}\\s*:`, "i");
 	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && keyRe.test(line.text));
 	if (at < 0) return null;
-	let lastItem = at;
-	let indent = "  ";
-	for (let j = at + 1; j < close; j++) {
-		const t = lines[j]!.text;
-		if (!t.trim() || t.trim().startsWith("#")) continue;
-		const m = /^(\s*)-\s+/.exec(t);
-		if (m) {
-			indent = m[1] || "  ";
-			lastItem = j;
-		} else break;
-	}
+	// Only a plain dash list takes one more dash: any other value over several lines is left for the person to edit.
+	const extent = valueExtent(lines, at, close);
+	if (!extent.dashes) return null;
+	// The new item stands where the others do: a list written at the margin has its dashes there, and an indented
+	// dash under one of them would be read as more of that item's text.
+	const lastItem = extent.end;
+	const indent = /^(\s*)-/.exec(lines[lastItem]!.text)?.[1] ?? "  ";
 	const insertAt = lines[lastItem]!.end;
 	return `${text.slice(0, insertAt)}${eol}${indent}- ${quoteListItem(wanted)}${text.slice(insertAt)}`;
 }
 
 /**
  * Removes `item` (case-insensitive) from a front matter list or scalar key.
- * If the key becomes empty, removes the key line(s) cleanly.
+ * If the key becomes empty, removes the key line(s) cleanly. Null when the value runs over several lines and is
+ * not a plain dash list: it cannot be edited a line at a time.
  */
 export function removeFromFrontMatterList(text: string, key: string, item: string): string | null {
 	const target = item.trim().toLowerCase();
@@ -406,24 +523,17 @@ export function removeFromFrontMatterList(text: string, key: string, item: strin
 	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && keyRe.test(line.text));
 	if (at < 0) return text;
 
-	// Check if multi-line bullet list
-	let isMulti = false;
-	let listEnd = at;
-	if (/:\s*(?:#.*)?$/.test(lines[at]!.text)) {
-		for (let j = at + 1; j < close; j++) {
-			const t = lines[j]!.text.trim();
-			if (!t || t.startsWith("#")) continue;
-			if (/^-\s+/.test(t)) {
-				isMulti = true;
-				listEnd = j;
-			} else break;
-		}
-	}
+	// A plain dash list loses the item's own line. Any other value over several lines is not edited here: taking
+	// the key's line out of it would leave its other lines under the key before.
+	const extent = valueExtent(lines, at, close);
+	if (extent.end > at && !extent.dashes) return null;
+	const isMulti = extent.dashes;
+	const listEnd = extent.end;
 	if (isMulti) {
 		if (!kept.length) return `${text.slice(0, lines[at]!.start)}${text.slice(lines[listEnd]!.lineEnd)}`;
 		const toRemove: { start: number; end: number }[] = [];
 		for (let j = at + 1; j <= listEnd; j++) {
-			const m = /^\s*-\s+(.*)$/.exec(lines[j]!.text);
+			const m = /^\s*-\s+([^\r\n]*)$/.exec(lines[j]!.text);
 			if (m && unquote(stripInlineComment(m[1]!)).toLowerCase() === target) {
 				toRemove.push({ start: lines[j]!.start, end: lines[j]!.lineEnd });
 			}
@@ -444,6 +554,7 @@ export function removeFromFrontMatterList(text: string, key: string, item: strin
 /**
  * Replaces `oldItem` (case-insensitive) with `newItem` inside a scalar, inline list,
  * or multi-line YAML bullet list while preserving key position, YAML list style, and all other entries verbatim.
+ * Null when the value runs over several lines and is not a plain dash list.
  */
 export function replaceInFrontMatterList(text: string, key: string, oldItem: string, newItem: string): string | null {
 	const target = oldItem.trim().toLowerCase();
@@ -472,24 +583,18 @@ export function replaceInFrontMatterList(text: string, key: string, oldItem: str
 	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && keyRe.test(line.text));
 	if (at < 0) return text;
 
-	// Check multi-line YAML bullet list
-	let isMulti = false;
-	let listEnd = at;
-	if (/:\s*(?:#.*)?$/.test(lines[at]!.text)) {
-		for (let j = at + 1; j < close; j++) {
-			const t = lines[j]!.text.trim();
-			if (!t || t.startsWith("#")) continue;
-			if (/^-\s+/.test(t)) {
-				isMulti = true;
-				listEnd = j;
-			} else break;
-		}
-	}
+	// A plain dash list has the item's own line rewritten; any other value over several lines is not edited here.
+	const extent = valueExtent(lines, at, close);
+	if (extent.end > at && !extent.dashes) return null;
+	const isMulti = extent.dashes;
+	const listEnd = extent.end;
 	if (isMulti) {
 		const edits: { start: number; end: number; rep: string }[] = [];
-		const alreadyHasNew = vals.some((v) => v.toLowerCase() === next.toLowerCase());
+		// The new item is in the list already only when another line holds it: a change of an item's case alone
+		// finds the item itself, and dropping its line for that would lose it.
+		const alreadyHasNew = vals.some((v) => v.toLowerCase() === next.toLowerCase() && v.toLowerCase() !== target);
 		for (let j = at + 1; j <= listEnd; j++) {
-			const m = /^(\s*-\s+)(.*)$/.exec(lines[j]!.text);
+			const m = /^(\s*-\s+)([^\r\n]*)$/.exec(lines[j]!.text);
 			if (m && unquote(stripInlineComment(m[2]!)).toLowerCase() === target) {
 				if (alreadyHasNew) {
 					const nextLineEnd = j + 1 < lines.length ? lines[j + 1]!.start : text.length;
@@ -523,7 +628,8 @@ export function replaceInFrontMatterList(text: string, key: string, oldItem: str
 }
 
 /**
- * Removes a front matter key (and any indented bullet items beneath it) from the
+ * Removes a front matter key and the whole of its value (dash items, a block
+ * scalar's lines, a nested map, a flow list closed on a later line) from the
  * YAML block, then strips the fences if the block becomes empty.
  */
 export function removeFrontMatterKey(text: string, key: string): string {
@@ -548,15 +654,9 @@ export function removeFrontMatterKey(text: string, key: string): string {
 	const ranges: [number, number][] = [];
 	for (let i = openIdx + 1; i < close; i++) {
 		if (!keyRe.test(lines[i]!.text)) continue;
-		let endIdx = i;
-		if (/:\s*(?:#.*)?$/.test(lines[i]!.text)) {
-			for (let j = i + 1; j < close; j++) {
-				const t = lines[j]!.text.trim();
-				if (!t || t.startsWith("#")) continue;
-				if (/^-\s+/.test(t)) endIdx = j;
-				else break;
-			}
-		}
+		// The whole value goes with its key: lines of a block scalar or a nested map left behind would be read as
+		// more of the key before.
+		const endIdx = valueExtent(lines, i, close).end;
 		ranges.push([lines[i]!.start, lines[endIdx]!.lineEnd]);
 		i = endIdx;
 	}
@@ -639,6 +739,73 @@ export function frontMatterInnerSpan(text: string): { start: number; end: number
 	// Strip the single trailing line break immediately preceding the closing fence.
 	const inner = raw.replace(/\r?\n$/, "").replace(/\r\n/g, "\n");
 	return { start, end, inner, eol };
+}
+
+/**
+ * The first line of a front matter's inner text that would end the block where it stands: three dashes or three
+ * dots on a line of their own, as `frontMatter` reads the closing fence. Null when all of the text would stay
+ * between the two fences. Written in, such a line closes the block there, and every line after it becomes the
+ * document's body.
+ */
+export function innerLineEndingFrontMatter(inner: string): { line: number; text: string } | null {
+	const lines = inner.split(/\r?\n/);
+	const at = lines.findIndex((line) => /^(---|\.\.\.)\s*$/.test(line));
+	return at < 0 ? null : { line: at + 1, text: lines[at]!.trim() };
+}
+
+/** What the raw YAML box does with its text at one moment (`yamlBoxStep`). */
+export type YamlBoxStep = {
+	/** The text to write between the document's two fences, or null: the document is left as it is. */
+	write: string | null;
+	/** Whether the box now has text that the document does not: held back, to be written or said later. */
+	held: boolean;
+	/** What is said under the box, for as long as it holds a line that cannot be written; null when it holds none. */
+	say: string | null;
+	/** What is said once, as a notice, when text the box held is gone unwritten; null otherwise. */
+	lost: string | null;
+};
+
+/** One or two dashes or dots alone on a line: what three of them, the line that ends a front matter, are typed through. */
+const ON_THE_WAY_TO_A_FENCE = /^(?:-{1,2}|\.{1,2})\s*$/;
+
+/** The line of `after` in which the change from `before` ends: where the caret stands once it is typed, pasted or deleted. */
+function lineTyped(before: string, after: string): string {
+	const shorter = Math.min(before.length, after.length);
+	let same = 0;
+	while (same < shorter && before[same] === after[same]) same++;
+	let tail = 0;
+	while (tail < shorter - same && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
+	const caret = after.length - tail;
+	const from = caret > 0 ? after.lastIndexOf("\n", caret - 1) + 1 : 0;
+	const to = after.indexOf("\n", caret);
+	return after.slice(from, to < 0 ? after.length : to);
+}
+
+/**
+ * What the raw YAML box writes, holds and says. `written` is what the document has of the box (the text it last
+ * wrote, or showed when it opened), `after` the text the box has now: after an input that took it there from
+ * `before`, when the box is left with it ("leave": focus goes elsewhere, a save or a change of tab asks for what
+ * is pending), and when that text goes ("close": Escape, the YAML button, another file, or the document's own
+ * front matter shown in the box again after an undo).
+ *
+ * A line of three dashes or dots (`innerLineEndingFrontMatter`) cannot be written: it would end the front matter
+ * where it stands. While the box holds one, nothing in the box is written, the box says so, and when its text
+ * goes it is said that it was not written. The check was once made on each input alone: typed as three keys, `-`
+ * and `--` were each written before `---` was refused, so the document kept a stray `--` line while the notice
+ * said nothing had been written. So the line being typed is not written while it is only one or two dashes or
+ * dots: it may be on its way to three. That is no error, and nothing is said. The whole box is written with the
+ * next key that makes the line something else (`- item`), or leaves it (Enter, an edit of another line), and when
+ * the box is left or closed: a line of one dash is a line like any other then.
+ */
+export function yamlBoxStep(written: string, before: string, after: string, event: "input" | "leave" | "close" = "input"): YamlBoxStep {
+	const ends = innerLineEndingFrontMatter(after);
+	if (ends) {
+		if (event === "close") return { write: null, held: false, say: null, lost: `Line ${ends.line} of the raw YAML was still ${ends.text}: what was typed in the box while that line stood was not written.` };
+		return { write: null, held: true, say: `Line ${ends.line} is ${ends.text}, which would end the front matter there. The box is not written to the document until that line is changed.`, lost: null };
+	}
+	if (after === written) return { write: null, held: false, say: null, lost: null };
+	if (event === "input" && ON_THE_WAY_TO_A_FENCE.test(lineTyped(before, after))) return { write: null, held: true, say: null, lost: null };
+	return { write: after, held: false, say: null, lost: null };
 }
 
 /**

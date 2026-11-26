@@ -1,7 +1,8 @@
 // What the editor area shows while no file is open: the project by name, and
 // the ways into it, each with the keys that do the same. commands.ts imports
 // the editors, so it is loaded here when it is needed, not at the top.
-import { createResource, For, Show } from "solid-js";
+import { For, Show } from "solid-js";
+import { createAsyncQuery } from "./asyncQuery";
 import { baseName } from "../shared/paths";
 import { state } from "./state";
 
@@ -19,7 +20,7 @@ const WAYS_IN: readonly (readonly [id: string, label: string, what: string])[] =
 ];
 
 export function Start() {
-	const [loaded] = createResource(() => import("./commands"));
+	const [loaded] = createAsyncQuery(() => import("./commands"));
 	const ways = () => {
 		const all = loaded();
 		if (!all) return [];

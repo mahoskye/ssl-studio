@@ -1,7 +1,8 @@
 // The style profile editor: the language server's `ssl` settings, per user
 // or per workspace, with the house preset (decisions 0002, 0005, 0006).
 import { Icon } from "./Icon";
-import { createEffect, createResource, createSignal, createUniqueId, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, onSettled, Show, untrack } from "solid-js";
+import { createAsyncQuery } from "./asyncQuery";
 import { getPath, HOUSE_STYLE, SERVER_DEFAULTS, RULE_LEVELS, SECTIONS, setPath, type Field, type PathKey } from "../shared/styleProfile";
 import { backend } from "./backend";
 import { choose } from "./dialogs";
@@ -66,7 +67,18 @@ export function StyleProfile() {
 			setLoadError(String(e?.message ?? e));
 		}
 	};
-	createEffect(() => open() && void reload());
+	createEffect(
+		() => open(),
+		(isOpen) => {
+			if (isOpen) void reload();
+		},
+	);
+	createEffect(
+		() => !state.workspace && scope() === "workspace",
+		(reset) => {
+			if (reset) setScope("user");
+		},
+	);
 	const current = () => layers()[scope()];
 
 	const previewTabSize = () => {
@@ -77,13 +89,12 @@ export function StyleProfile() {
 
 	// What the profile does, shown: the sample is formatted again whenever a setting changes. The wait lets the
 	// change reach the server first (App sends it when the settings change).
-	const [preview] = createResource(
-		() =>
-			open() &&
-			state.lsp.state === "running" &&
-			state.workspace &&
-			([JSON.stringify(state.settings.ssl ?? {}), state.settings.theme, state.settings.themeMaterial ?? "", previewTabSize(), previewInsertSpaces()] as const),
-		async ([, , , tabSize, insertSpaces]) => {
+	const [preview] = createAsyncQuery(
+		() => {
+			if (!open() || state.lsp.state !== "running" || !state.workspace) return false as const;
+			return [state.workspace.root, JSON.stringify(state.settings.ssl ?? {}), state.settings.theme, state.settings.themeMaterial ?? "", previewTabSize(), previewInsertSpaces()] as const;
+		},
+		async ([, , , , tabSize, insertSpaces]) => {
 			await new Promise((done) => setTimeout(done, 150));
 			try {
 				const formatted = await session.formatText(SAMPLE, { tabSize, insertSpaces });
@@ -115,8 +126,11 @@ export function StyleProfile() {
 
 	const set = (path: PathKey, value: unknown) => {
 		const targetScope = scope();
-		const nextSsl = setPath(layers()[targetScope], path, value);
-		setLayers((prev) => ({ ...prev, [targetScope]: nextSsl }));
+		let nextSsl: Record<string, any> = {};
+		setLayers((prev) => {
+			nextSsl = setPath(prev[targetScope], path, value);
+			return { ...prev, [targetScope]: nextSsl };
+		});
 		void enqueueSave(targetScope, { ssl: nextSsl });
 	};
 
@@ -148,6 +162,14 @@ export function StyleProfile() {
 			return getPath(layers().user, path) ?? getPath(userBaseStyle(), path) ?? getPath(SERVER_DEFAULTS, path);
 		}
 		return getPath(layers().workspace, path) ?? getPath(layers().user, path) ?? getPath(effectiveBaseStyle(), path) ?? getPath(state.settings.ssl, path) ?? getPath(SERVER_DEFAULTS, path);
+	};
+
+	/** Fallback value inherited from lower layers, skipping the active scope's own override. */
+	const inheritedValue = (path: PathKey) => {
+		if (scope() === "user") {
+			return getPath(userBaseStyle(), path) ?? getPath(SERVER_DEFAULTS, path);
+		}
+		return getPath(layers().user, path) ?? getPath(effectiveBaseStyle(), path) ?? getPath(SERVER_DEFAULTS, path);
 	};
 
 	/** Non-undefined when viewing user scope and the open workspace overrides this path. */
@@ -190,22 +212,50 @@ export function StyleProfile() {
 		return [...seen].sort();
 	};
 
-	const commitNumber = (el: HTMLInputElement, field: Extract<Field, { kind: "number" }>) => {
-		const raw = el.value.trim();
+	const commitNumber = (rawValue: string, field: Extract<Field, { kind: "number" }>): string => {
+		const raw = rawValue.trim();
 		if (raw === "") {
 			set(field.path, undefined);
-			return;
+			return String(inheritedValue(field.path) ?? "");
 		}
 		const parsed = Number(raw);
 		if (!Number.isFinite(parsed)) {
-			el.value = String(displayed(field.path) ?? "");
-			return;
+			return String(displayed(field.path) ?? "");
 		}
 		let clamped = Math.round(parsed);
 		if (field.min !== undefined) clamped = Math.max(field.min, clamped);
 		if (field.max !== undefined) clamped = Math.min(field.max, clamped);
-		el.value = String(clamped);
 		set(field.path, clamped);
+		return String(clamped);
+	};
+
+	const NumberInput = (props: { field: Extract<Field, { kind: "number" }> }) => {
+		const displayedText = createMemo(() => String(displayed(props.field.path) ?? ""));
+		const [draft, setDraft] = createSignal(untrack(displayedText));
+		createEffect(displayedText, (v) => {
+			setDraft(v);
+		});
+		return (
+			<input
+				type="number"
+				min={props.field.min}
+				max={props.field.max}
+				value={draft()}
+				placeholder={String(getPath(SERVER_DEFAULTS, props.field.path) ?? "server default")}
+				onInput={(e) => {
+					// Unreadable so far ("12e", "-"): the field reports an empty value, and mirroring that into the
+					// draft made the binding wipe the typing. The draft waits for something the field can read.
+					if (!e.currentTarget.validity.badInput) setDraft(e.currentTarget.value);
+				}}
+				onChange={(e) => {
+					const el = e.currentTarget;
+					// Left unreadable: back to what is shown, not read as empty, which would clear the override.
+					const next = el.validity.badInput ? untrack(displayedText) : commitNumber(el.value, props.field);
+					setDraft(next);
+					el.value = next;
+				}}
+			/>
+		);
 	};
 
 	const Input = (props: { field: Field }) => {
@@ -214,8 +264,7 @@ export function StyleProfile() {
 		const wsOverride = () => workspaceOverride(f.path);
 		return (
 			<label
-				class="profile-field"
-				classList={{ own: own() }}
+				class={["profile-field", { own: own() }]}
 				title={wsOverride() !== undefined ? `Overridden in this project (${String(wsOverride())})` : own() ? `Set in ${scope()} settings` : "Inherited"}
 			>
 				<span>
@@ -228,16 +277,20 @@ export function StyleProfile() {
 				{f.kind === "boolean" ? (
 					<input type="checkbox" checked={Boolean(displayed(f.path))} onChange={(e) => set(f.path, e.currentTarget.checked)} />
 				) : f.kind === "number" ? (
-					<input
-						type="number"
-						min={f.min}
-						max={f.max}
-						value={displayed(f.path) ?? ""}
-						placeholder={String(getPath(SERVER_DEFAULTS, f.path) ?? "server default")}
-						onChange={(e) => commitNumber(e.currentTarget, f)}
-					/>
+					<NumberInput field={f} />
 				) : (
-					<select value={displayed(f.path) ?? ""} onChange={(e) => set(f.path, e.currentTarget.value || undefined)}>
+					<select
+						value={displayed(f.path) ?? ""}
+						onChange={(e) => {
+							const el = e.currentTarget;
+							set(f.path, el.value || undefined);
+							onSettled(() => {
+								if (!el.isConnected) return;
+								const next = String(untrack(() => displayed(f.path) ?? ""));
+								if (el.value !== next) el.value = next;
+							});
+						}}
+					>
 						<option value="">server default</option>
 						<For each={f.options}>{(o) => <option value={o}>{o}</option>}</For>
 					</select>
@@ -309,8 +362,7 @@ export function StyleProfile() {
 									const wsOverride = () => workspaceOverride(path);
 									return (
 										<label
-											class="profile-field"
-											classList={{ own: own() }}
+											class={["profile-field", { own: own() }]}
 											title={wsOverride() !== undefined ? `Overridden in this project (${String(wsOverride())})` : own() ? `Set in ${scope()} settings` : "Inherited"}
 										>
 											<span>
@@ -342,7 +394,7 @@ export function StyleProfile() {
 					</h3>
 					<Show when={state.lsp.state === "running" && state.workspace} fallback={<p class="hint">The preview is formatted by the language server, and appears when it is running with a folder open.</p>}>
 						<Show when={!preview()?.error} fallback={<p class="hint">The sample could not be formatted: {preview()?.error}</p>}>
-							<pre class="block-code" style={{ "tab-size": String(previewTabSize()) }} innerHTML={preview.latest?.html ?? ""} />
+							<pre class="block-code" style={{ "tab-size": String(previewTabSize()) }} innerHTML={preview()?.html ?? ""} />
 						</Show>
 					</Show>
 				</section>

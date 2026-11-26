@@ -4,6 +4,12 @@
 # devices Windows has drivers for out of the box (SATA disk, e1000e network).
 # SSH from the host reaches the guest on 127.0.0.1:2222 only.
 #
+# The guest's network is IPv4 only (ipv6=off). QEMU's user network gives a guest
+# an IPv6 address and a router whether or not the host has a way out over IPv6.
+# On a host without one, the guest took IPv6 for working: `hutch install` opened
+# its connections to the package registry over it and waited on them for good
+# (2026-11-25), where a program that tries both, like curl, got through.
+#
 #   tools/windows-vm/vm.sh install <Win11_Enterprise_Eval.iso>   first boot, from the ISO (detached)
 #   tools/windows-vm/vm.sh run                                    later boots (detached)
 #   tools/windows-vm/vm.sh screen                                 a screenshot of the guest, as PNG
@@ -66,7 +72,7 @@ boot() {
 		-drive if=pflash,format=raw,unit=1,file="$VARS" \
 		-chardev socket,id=chrtpm,path="$VM/swtpm.sock" -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-crb,tpmdev=tpm0 \
 		-device ahci,id=ahci -drive file="$DISK",if=none,id=disk0,format=qcow2 -device ide-hd,drive=disk0,bus=ahci.0,bootindex=1 \
-		-netdev user,id=net0,hostfwd=tcp:127.0.0.1:"$SSH_PORT"-:22 -device e1000e,netdev=net0 \
+		-netdev user,id=net0,ipv6=off,hostfwd=tcp:127.0.0.1:"$SSH_PORT"-:22 -device e1000e,netdev=net0 \
 		-device qemu-xhci -device usb-tablet \
 		-vga virtio -display gtk \
 		-monitor unix:"$VM/monitor.sock",server,nowait \

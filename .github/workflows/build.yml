@@ -26,9 +26,12 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      # The Bun the app ships with (Electrobun 2.0.5's toolchain; third-party/README.md), so the tests run on what
+      # a user runs. They ran on 1.3.3, and what differs between the two went unseen here: a root path's file
+      # address on Windows, what is taken for TOML, a file's date to the millisecond.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.3
+          bun-version: 1.4.4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -48,11 +51,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bun scripts/bundle-lsp.ts --download
 
-      - name: Type check and tests
-        run: |
-          bun scripts/assets.ts
-          hutch run check
-          bun test
+      - name: Assets
+        run: bun scripts/assets.ts
+
+      - name: Type check
+        id: check
+        run: hutch run check
+
+      # The tests run when the type check fails too: one failed check hid what the tests do on that system.
+      - name: Tests
+        if: ${{ !cancelled() && steps.check.conclusion != 'skipped' }}
+        run: bun test
 
       - name: Release build
         run: hutch run build

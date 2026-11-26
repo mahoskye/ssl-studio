@@ -1,7 +1,7 @@
 // Reads what the chart is compared with: each built script's procedures and calls, from the
 // server. Run by the plan's check, with no agent and no cost. What it finds is a report only:
 // the code may well be right (ADR 0005).
-import { createStore } from "solid-js/store";
+import { createStore } from "solid-js";
 import { backend } from "../backend";
 import { monaco } from "../editor/monaco";
 import { flatRegions } from "../editor/regions";
@@ -31,9 +31,15 @@ const isDriftCurrent = (uri: string, seq: number, root: string) =>
 
 /** Keyed by the plan's URI, as findings are. */
 export const driftFor = (uri: string | undefined): DriftState => (uri && drifts[uri]) || EMPTY;
+const setDrift = (uri: string, next: DriftState) => {
+	setDrifts((s) => {
+		s[uri] = next;
+	});
+};
+
 export const clearDrift = (uri: string) => {
 	bumpDriftSeq(uri);
-	setDrifts(uri, EMPTY);
+	setDrift(uri, EMPTY);
 };
 
 export const scriptUri = (script: string, root = state.workspace?.root) =>
@@ -78,7 +84,7 @@ export async function readDrift(uri: string, plan: Plan): Promise<Drift[]> {
 	const root = state.workspace?.root;
 	const seq = bumpDriftSeq(uri);
 	if (!root) {
-		setDrifts(uri, EMPTY);
+		setDrift(uri, EMPTY);
 		return [];
 	}
 	const built = builtOf(plan);
@@ -88,7 +94,7 @@ export async function readDrift(uri: string, plan: Plan): Promise<Drift[]> {
 	if (!built?.units.length) {
 		const sslTargets = targets.filter((t) => /\.(ssl|srvscr)$/i.test(t));
 		if (!sslTargets.length) {
-			if (isDriftCurrent(uri, seq, root)) setDrifts(uri, { items: [], moved: {}, checked: true });
+			if (isDriftCurrent(uri, seq, root)) setDrift(uri, { items: [], moved: {}, checked: true });
 			return [];
 		}
 		const existingTargets: string[] = [];
@@ -98,7 +104,7 @@ export async function readDrift(uri: string, plan: Plan): Promise<Drift[]> {
 			if (text !== null) existingTargets.push(script);
 		}
 		if (!existingTargets.length) {
-			setDrifts(uri, { items: [], moved: {}, checked: true });
+			setDrift(uri, { items: [], moved: {}, checked: true });
 			return [];
 		}
 		const readings = new Map<string, Reading | null>();
@@ -119,7 +125,7 @@ export async function readDrift(uri: string, plan: Plan): Promise<Drift[]> {
 			regionInfo.checked.length ? regionInfo.regions : undefined,
 			regionInfo.checked.length ? regionInfo.checked : existingTargets,
 		);
-		setDrifts(uri, { items, moved: {}, checked: true });
+		setDrift(uri, { items, moved: {}, checked: true });
 		return items;
 	}
 
@@ -149,7 +155,7 @@ export async function readDrift(uri: string, plan: Plan): Promise<Drift[]> {
 			if (!isDriftCurrent(uri, seq, root)) return [];
 			if (regionInfo.checked.length) items.push(...stageRegionDrift(plan, regionInfo.regions, regionInfo.checked));
 		}
-		setDrifts(uri, { items, moved: {}, checked: true });
+		setDrift(uri, { items, moved: {}, checked: true });
 		return items;
 	}
 	// A procedure not where it was may have moved rather than gone.
@@ -178,7 +184,7 @@ export async function readDrift(uri: string, plan: Plan): Promise<Drift[]> {
 			items.push(...stageRegionDrift(plan, regionInfo.regions, regionInfo.checked));
 		}
 	}
-	setDrifts(uri, { items, moved, checked: true });
+	setDrift(uri, { items, moved, checked: true });
 	return items;
 }
 

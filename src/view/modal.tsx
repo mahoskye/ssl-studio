@@ -2,8 +2,8 @@
 // style profile. It names the dialog, takes the keyboard when it opens and
 // gives it back when it closes, keeps Tab inside, closes on Escape or a click
 // on the overlay, and makes the rest of the app inert meanwhile.
-import { createSignal, onCleanup, onMount, type JSX } from "solid-js";
-import { Dynamic, Portal } from "solid-js/web";
+import { createSignal, onSettled } from "solid-js";
+import { dynamic, Portal, type JSX } from "@solidjs/web";
 import { rowMenuOpen } from "./panels/RowMenu";
 
 type Open = {
@@ -149,13 +149,14 @@ export function Modal(props: {
 	onKey?: (e: KeyboardEvent) => boolean | void;
 	children: JSX.Element;
 }) {
-	// What had the keyboard before, read before anything of the modal exists.
-	const previous = typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null;
+	let previous: HTMLElement | null = null;
 	let overlay: HTMLDivElement | undefined;
 	let dialog: HTMLElement | undefined;
 	const entry: Open = { overlay: () => overlay, dialog: () => dialog, close: () => props.onClose(), key: (e) => props.onKey?.(e) };
 
-	onMount(() => {
+	onSettled(() => {
+		// Capture what had the keyboard after any outgoing modal's cleanup has restored focus, right before this modal takes it.
+		previous = typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null;
 		stack.push(entry);
 		setDepth(stack.length);
 		syncIsolation();
@@ -163,40 +164,42 @@ export function Modal(props: {
 		const target = dialog?.querySelector<HTMLElement>("[data-autofocus]") ?? (dialog && focusable(dialog)[0]) ?? dialog;
 		target?.focus();
 		if (target instanceof HTMLInputElement && target.dataset.autofocus === "select") target.select();
+		return () => {
+			const at = stack.indexOf(entry);
+			const wasTop = at === stack.length - 1;
+			const containedFocus = Boolean(overlay && typeof document !== "undefined" && overlay.contains(document.activeElement));
+			if (at >= 0) stack.splice(at, 1);
+			setDepth(stack.length);
+			syncIsolation();
+			if (!wasTop && !containedFocus) return;
+			// Back to what had the keyboard; when that is gone or cannot take it, the underlying modal or the editor.
+			if (previous && previous !== document.body && previous.isConnected && !previous.closest("[inert]")) previous.focus();
+			if (!previous || (typeof document !== "undefined" && document.activeElement !== previous)) {
+				const nextTop = stack[stack.length - 1]?.dialog();
+				if (nextTop && nextTop.isConnected) nextTop.focus();
+				else focusFallback();
+			}
+		};
 	});
 
-	onCleanup(() => {
-		const at = stack.indexOf(entry);
-		const wasTop = at === stack.length - 1;
-		const containedFocus = Boolean(overlay && typeof document !== "undefined" && overlay.contains(document.activeElement));
-		if (at >= 0) stack.splice(at, 1);
-		setDepth(stack.length);
-		syncIsolation();
-		if (!wasTop && !containedFocus) return;
-		// Back to what had the keyboard; when that is gone or cannot take it, the underlying modal or the editor.
-		if (previous && previous !== document.body && previous.isConnected && !previous.closest("[inert]")) previous.focus();
-		if (!previous || (typeof document !== "undefined" && document.activeElement !== previous)) {
-			const nextTop = stack[stack.length - 1]?.dialog();
-			if (nextTop && nextTop.isConnected) nextTop.focus();
-			else focusFallback();
-		}
-	});
+	const DialogTag = dynamic(() => (props.onSubmit ? "form" : "div") as "div");
 
 	const renderOverlay = () => (
-		<div class="overlay" classList={{ top: props.top }} ref={overlay} onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
-			<Dynamic
-				component={(props.onSubmit ? "form" : "div") as "div"}
-				ref={(el: HTMLElement) => (dialog = el)}
+		<div class={["overlay", { top: props.top }]} ref={overlay} onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
+			<DialogTag
+				ref={(el: HTMLElement) => {
+					dialog = el;
+				}}
 				class={props.class}
 				role="dialog"
 				aria-modal="true"
 				aria-labelledby={props.labelledBy}
 				aria-label={props.labelledBy ? undefined : props.label}
 				tabindex="-1"
-				onSubmit={props.onSubmit}
+				onSubmit={(e: SubmitEvent) => props.onSubmit?.(e)}
 			>
 				{props.children}
-			</Dynamic>
+			</DialogTag>
 		</div>
 	);
 

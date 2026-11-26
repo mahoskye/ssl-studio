@@ -2,10 +2,10 @@
 // changed, a file as it was, and the steps of making a commit. Only what
 // stays on this machine: nothing here fetches, pulls or pushes, and nothing
 // rewrites what was committed.
-import { lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Subprocess } from "bun";
-import { parseStatus, type GitStatus } from "../shared/gitStatus";
+import { parseStatus, type GitFile, type GitStatus } from "../shared/gitStatus";
 import type { GitActionResult, GitBlameLine, GitBranchesResult, GitBranchInfo, GitCommit, GitStashResult, TicketGitCommit } from "../shared/protocol";
 import { decode, looksBinary } from "./encoding";
 
@@ -20,6 +20,58 @@ const MAX_STDOUT_BYTES = 20 * 1024 * 1024;
 const MAX_STDERR_BYTES = 1 * 1024 * 1024;
 const MAX_SYMLINK_DEPTH = 40;
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
+
+/** What `LC_ALL` sets besides the language of messages. */
+const LOCALE_CATEGORIES = ["LC_CTYPE", "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"];
+
+/**
+ * The environment git is run in: the user's own, with git's messages in English whatever language is the
+ * user's, and nothing asked at the terminal. What git says is read here ("No local changes to save", "unknown
+ * option"), and a git that spoke German said "Keine lokalen Änderungen zum Speichern": a stash that saved
+ * nothing was reported as saved. Only the language of messages is fixed (`LC_MESSAGES=C`). The character set
+ * stays the user's, for git and for what git starts, such as the checks a repository runs on a commit;
+ * `LC_ALL=C` would take that from them too. `LC_ALL` stands above `LC_MESSAGES`, so one that is set is taken
+ * apart into what else it stood for. `LANGUAGE` is gettext's own list of languages, and stands above them all.
+ */
+export function gitEnv(env: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+	const out: Record<string, string | undefined> = { ...env, GIT_TERMINAL_PROMPT: "0" };
+	if (out.LC_ALL) for (const category of LOCALE_CATEGORIES) out[category] = out.LC_ALL;
+	delete out.LC_ALL;
+	delete out.LANGUAGE;
+	out.LC_MESSAGES = "C";
+	return out;
+}
+
+/**
+ * A changed file as the status lists it. `repository` marks an entry that is no file: a folder with a git
+ * repository of its own, which git here does not look into (it names it with a slash at its end, and lists
+ * nothing of what is in it). It came out as one new file among the others, and letting that "file" go sent the
+ * whole folder, with its own history, to the trash.
+ */
+export type GitEntry = GitFile & { repository?: true };
+
+/**
+ * The nearest folder at or above `from` that holds a `.git` (a folder, or the file a worktree has in its place),
+ * as the file system shows it now; null when none does. git is not asked: this is what is looked at, each time
+ * the status is asked for, to tell whether what git once said of the repository may no longer be so.
+ */
+export function nearestDotGit(from: string): string | null {
+	for (let dir = resolve(from); ; ) {
+		if (existsSync(join(dir, ".git"))) return dir;
+		const parent = dirname(dir);
+		if (parent === dir) return null;
+		dir = parent;
+	}
+}
+
+/** Whether a path is a folder with a `.git` of its own in it: a repository of its own, whatever git here has of it. */
+export function holdsOwnRepository(path: string): boolean {
+	try {
+		return lstatSync(path).isDirectory() && existsSync(join(path, ".git"));
+	} catch {
+		return false;
+	}
+}
 
 function concatChunks(chunks: Uint8Array[], total: number): Uint8Array {
 	if (chunks.length === 0) return new Uint8Array(0);
@@ -95,10 +147,43 @@ function resolveRealPath(target: string, origPath: string, depth = 0): string {
 	return resolve(parentReal, basename(target));
 }
 
+/** A path as a commit names it: from the repository's top, with no step up or sideways. A tab or a line break may be in a name, and is not refused. */
 function isSafeRepoPath(p: string): boolean {
-	if (!p || p.startsWith("/") || p.includes("\0") || /[\x00-\x1f\x7f]/.test(p)) return false;
+	if (!p || p.startsWith("/") || p.includes("\0")) return false;
 	const parts = p.split("/");
 	return !parts.some((seg) => seg === ".." || seg === ".");
+}
+
+const C_ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
+
+/**
+ * A name as it is on disk, from how git prints it where it cannot be asked for the bare name (a blame's
+ * `filename`): a name with a quote, a backslash or a control character in it comes between double quotes, with
+ * backslash escapes (`"a\tb.txt"`, `\303\251` for a byte). Any other name is printed as it is, and given back so.
+ */
+export function unquoteGitPath(printed: string): string {
+	if (printed.length < 2 || !printed.startsWith('"') || !printed.endsWith('"')) return printed;
+	const body = printed.slice(1, -1);
+	const bytes: number[] = [];
+	const encoder = new TextEncoder();
+	for (let at = 0; at < body.length; at++) {
+		if (body[at] !== "\\") {
+			// Escapes stand for bytes, so everything is put back as bytes and read as one text at the end.
+			const plain = /^[^\\]+/.exec(body.slice(at))![0];
+			bytes.push(...encoder.encode(plain));
+			at += plain.length - 1;
+			continue;
+		}
+		const octal = /^[0-3][0-7]{2}/.exec(body.slice(at + 1, at + 4))?.[0];
+		if (octal) {
+			bytes.push(Number.parseInt(octal, 8));
+			at += 3;
+			continue;
+		}
+		const next = body[++at] ?? "\\";
+		bytes.push(C_ESCAPES[next] ?? next.charCodeAt(0));
+	}
+	return new TextDecoder().decode(Uint8Array.from(bytes));
 }
 
 function isSafeRangeRef(r: string): boolean {
@@ -217,6 +302,8 @@ export class Git {
 	private prefix = "";
 	/** Single deduplicated initialization promise so concurrent callers never observe `top` before `prefix`. */
 	private repoInit?: Promise<string | null>;
+	/** The nearest folder with a `.git`, as the file system showed it just before git was last asked what the repository is. */
+	private sawDotGit: string | null = null;
 	/** The question git is answering now, or answered last: the next one waits for it. */
 	private last: Promise<unknown> = Promise.resolve();
 	/** Active git child processes killed on `dispose()`. */
@@ -267,7 +354,7 @@ export class Git {
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "pipe",
-			env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+			env: gitEnv(),
 		});
 		this.active.add(proc);
 
@@ -319,10 +406,33 @@ export class Git {
 		return text(ran.out);
 	}
 
-	/** The repository's top folder, or null when the workspace is not in one (or there is no git to ask). */
-	async repository(): Promise<string | null> {
+	/**
+	 * Whether what git said of the repository may no longer be so, by a look at the file system and no question to
+	 * git: the nearest `.git` is another one than when git was asked (one has appeared, or is gone), or one is
+	 * there and git said this was no repository (it was still being made, or there was no git yet to ask).
+	 */
+	private moved(): boolean {
+		const now = nearestDotGit(this.root);
+		return now !== this.sawDotGit || (this.top === null && now !== null);
+	}
+
+	/**
+	 * The repository's top folder, or null when the workspace is not in one (or there is no git to ask).
+	 *
+	 * git is asked once, and its answer kept. With `again`, as the status asks, the answer is first held against the
+	 * file system (`moved`), and git is asked again where it no longer fits. The first answer used to be kept for as
+	 * long as the folder was open: after `git init` in a terminal, or a clone that finished later, the folder stayed
+	 * "not in a git repository" until the app was started again, and a folder whose `.git` was removed stayed one.
+	 */
+	async repository(again = false): Promise<string | null> {
+		if (again && this.top !== undefined && this.moved()) {
+			this.top = undefined;
+			this.repoInit = undefined;
+		}
 		if (this.top !== undefined) return this.top;
 		if (!this.repoInit) {
+			// Looked at before git is asked: a `.git` that appears while git answers is then new the next time.
+			this.sawDotGit = nearestDotGit(this.root);
 			this.repoInit = (async () => {
 				try {
 					const ran = await this.run(["rev-parse", "--show-toplevel"]);
@@ -437,9 +547,12 @@ export class Git {
 		return repoRel;
 	}
 
-	/** What has changed in the workspace's folder, each file by its whole path. Null outside a repository. */
-	async status(): Promise<GitStatus | null> {
-		const top = await this.repository();
+	/**
+	 * What has changed in the workspace's folder, each file by its whole path. Null outside a repository. Each time
+	 * it is asked, whether this is (still) a repository is looked at again (`repository`).
+	 */
+	async status(): Promise<(Omit<GitStatus, "files"> & { files: GitEntry[] }) | null> {
+		const top = await this.repository(true);
 		if (!top) return null;
 		const ran = await this.run(["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all", "--", "."]);
 		if (ran.code !== 0) throw new Error(ran.err.trim() || "git status failed");
@@ -462,14 +575,18 @@ export class Git {
 		return {
 			...status,
 			...(stagedOutside ? { stagedOutside } : {}),
-			files: status.files.map((file) => {
+			files: status.files.map((file): GitEntry => {
 				const crossFrom = !file.from && file.staged === "added" ? crossSubdirRenames.get(file.path) : undefined;
 				const from = file.from ?? crossFrom;
+				// Every new file is listed by its own name (`--untracked-files=all`), so the one name git ends with a
+				// slash is a folder it does not look into: a repository of its own. `whole` drops the slash.
+				const repository = file.unstaged === "untracked" && file.path.endsWith("/");
 				return {
 					...file,
 					...(crossFrom ? { staged: "renamed" as const } : {}),
 					path: whole(file.path),
 					...(from ? { from: whole(from) } : {}),
+					...(repository ? { repository: true as const } : {}),
 				};
 			}),
 		};
@@ -505,30 +622,32 @@ export class Git {
 			String(cap),
 			"--format=%x1e%H%x1f%h%x1f%ct%x1f%an%x1f%s",
 			"--name-only",
+			"-z",
 			"--",
 			relHere,
 		]);
 		if (ran.code !== 0) return [];
 		const commits: GitCommit[] = [];
 		let lastKnownPath = `${this.prefix}${relHere}`;
-		for (const chunk of text(ran.out).split("\x1e")) {
-			const cleanChunk = chunk.replace(/^[\r\n]+|[\r\n]+$/g, "");
-			if (!cleanChunk) continue;
-			const lines = cleanChunk.split(/\r?\n/);
-			const header = lines[0] ?? "";
-			const [sha, shortSha, ct, author, ...subjectParts] = header.split("\x1f");
-			if (!sha || !shortSha) continue;
-			const listedPath = lines.slice(1).find((l) => l.length > 0);
-			const fileInCommit = listedPath || lastKnownPath;
-			lastKnownPath = fileInCommit;
-			commits.push({
-				sha,
-				shortSha,
-				time: (Number(ct) || 0) * 1000,
-				author: author ?? "",
-				subject: subjectParts.join(" "),
-				path: fileInCommit,
-			});
+		// With -z a name is as it is on disk, ended by a NUL. On lines of its own git puts a name that has a quote, a
+		// backslash, a tab or a line break in it between quotes with escapes, and no file in a commit has that name.
+		let commit: GitCommit | undefined;
+		for (const token of text(ran.out).split("\0")) {
+			const header = token.replace(/^[\r\n]+(?=\x1e)/, "");
+			if (header.startsWith("\x1e")) {
+				const [sha, shortSha, ct, author, ...subjectParts] = header.slice(1).split("\x1f");
+				commit = undefined;
+				if (!sha || !shortSha) continue;
+				// Until its own name follows, the file is where the commit after this one had it.
+				commit = { sha, shortSha, time: (Number(ct) || 0) * 1000, author: author ?? "", subject: subjectParts.join(" "), path: lastKnownPath };
+				commits.push(commit);
+				continue;
+			}
+			// One line break stands between a commit's header and its file's name; any after it is the name's own.
+			const listedPath = token.replace(/^\r?\n/, "");
+			if (!listedPath || !commit) continue;
+			commit.path = listedPath;
+			lastKnownPath = listedPath;
 		}
 		return commits;
 	}
@@ -728,8 +847,12 @@ export class Git {
 	/**
 	 * Whether git follows a file, or it is only in the folder. A failure to ask is a failure, and is thrown: it is
 	 * not taken for "not followed", on which a file would be sent to the trash.
+	 *
+	 * A folder with a repository of its own is neither, and is refused: git here has no file of it, so it was "not
+	 * followed", and the whole folder went to the trash with its own history, as one new file would.
 	 */
 	async follows(path: string): Promise<boolean> {
+		if (holdsOwnRepository(path)) throw new Error(`${basename(path)} is a folder with a git repository of its own, not a file: nothing of it is discarded or moved to the trash from here.`);
 		return (await this.done(["ls-files", "-z", "--", await this.here(path)])).length > 0;
 	}
 
@@ -763,7 +886,7 @@ export class Git {
 			if (ln.startsWith("author ")) author = ln.slice("author ".length).trim();
 			else if (ln.startsWith("author-time ")) authorTime = Number(ln.slice("author-time ".length).trim()) || 0;
 			else if (ln.startsWith("summary ")) summary = ln.slice("summary ".length).trim();
-			else if (ln.startsWith("filename ")) filename = ln.slice("filename ".length);
+			else if (ln.startsWith("filename ")) filename = unquoteGitPath(ln.slice("filename ".length));
 		}
 		const date = authorTime > 0 ? new Date(authorTime * 1000).toISOString().slice(0, 10) : "";
 		const ticket = /\b([A-Z]{2,12}-\d+)\b/.exec(summary)?.[1];
@@ -857,9 +980,19 @@ export class Git {
 		}
 		if (action === "push") {
 			const cleanMsg = message?.trim();
-			const args = ["stash", "push", ...(cleanMsg ? ["-m", cleanMsg] : [])];
+			/**
+			 * Below the repository's top a stash takes the workspace's folder and nothing else: without a path it took
+			 * every change in the repository, also in folders the workspace does not show. The path is "." read the
+			 * usual way, not as a literal name: told to read names literally, git 2.43 stashes the folder's changes
+			 * and then throws away the changes outside it. Files git does not follow stay where they are, as before.
+			 */
+			const args = this.prefix
+				? ["--no-literal-pathspecs", "stash", "push", ...(cleanMsg ? ["-m", cleanMsg] : []), "--", "."]
+				: ["stash", "push", ...(cleanMsg ? ["-m", cleanMsg] : [])];
 			const ran = await this.run(args);
 			const out = (text(ran.out) || ran.err).trim();
+			// A folder in which git follows no file has nothing a stash could hold.
+			if (ran.code !== 0 && this.prefix && /did not match any file/i.test(out)) return { ok: false, message: "No local changes to save." };
 			if (ran.code !== 0) return { ok: false, message: out || "git stash push failed." };
 			if (/no local changes to save/i.test(out)) return { ok: false, message: "No local changes to save." };
 			return { ok: true, message: out.split("\n")[0] || "Saved working tree changes to stash." };

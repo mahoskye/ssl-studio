@@ -3,16 +3,25 @@
 // analysts and managers lead with plain process language, while developers can
 // expand once to inspect implementing scripts, functions, called procedures,
 // and live read-only SSL previews (all ranges from starlims-lsp, ADR 0003).
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";
 import { baseName, dirName } from "../../shared/paths";
 import { Icon } from "../Icon";
 import { IconButton } from "../panels/Rows";
+import { holdsPendingEdit } from "../state";
 import { planTargetsOf } from "./assist";
 import { nodeCodeDetails, type BuiltUnit } from "./built";
 import { readProcedurePreview, type ProcedurePreview } from "./drift";
 import type { Plan, PlanNode } from "./model";
+import { pendingField } from "./planBridge";
 
-type PreviewTarget = { name: string; script?: string; hintScript?: string; label: string };
+export type PreviewTarget = { name: string; script?: string; hintScript?: string; label: string };
+
+/** Structural equality for preview targets so unrelated plan edits/drags do not refetch or remount code previews. */
+export function samePreviewTarget(a: PreviewTarget | null | undefined, b: PreviewTarget | null | undefined): boolean {
+	if (a === b) return true;
+	if (!a || !b) return false;
+	return a.name === b.name && a.script === b.script && a.hintScript === b.hintScript && a.label === b.label;
+}
 
 export const sigOf = (u: Pick<BuiltUnit, "name" | "parameters">) =>
 	`${u.name}(${(Array.isArray(u.parameters) ? u.parameters.filter((p): p is string => typeof p === "string") : []).join(", ")})`;
@@ -43,12 +52,15 @@ export function NodeImplementation(props: {
 		return "Not linked";
 	});
 
-	const defaultTarget = createMemo<PreviewTarget | null>(() => {
-		const d = details();
-		if (d.units[0]) return { name: d.units[0].name, script: d.units[0].script, label: d.units[0].name };
-		if (d.primaryRef) return { name: d.primaryRef, label: d.primaryRef };
-		return null;
-	});
+	const defaultTarget = createMemo<PreviewTarget | null>(
+		() => {
+			const d = details();
+			if (d.units[0]) return { name: d.units[0].name, script: d.units[0].script, label: d.units[0].name };
+			if (d.primaryRef) return { name: d.primaryRef, label: d.primaryRef };
+			return null;
+		},
+		{ equals: samePreviewTarget },
+	);
 
 	const [pickedTarget, setPickedTarget] = createSignal<PreviewTarget | null>(null);
 	const [preview, setPreview] = createSignal<ProcedurePreview | null>(null);
@@ -56,35 +68,41 @@ export function NodeImplementation(props: {
 	const [missing, setMissing] = createSignal(false);
 
 	// Reset custom call selection whenever the selected node changes.
-	createEffect(() => {
-		props.node.id;
-		setPickedTarget(null);
-	});
+	const nodeId = createMemo(() => props.node.id);
+	createEffect(
+		() => nodeId(),
+		() => {
+			setPickedTarget(null);
+		},
+	);
 
-	const activeTarget = createMemo(() => pickedTarget() ?? defaultTarget());
+	const activeTarget = createMemo<PreviewTarget | null>(() => pickedTarget() ?? defaultTarget(), { equals: samePreviewTarget });
 
 	let fetchSeq = 0;
-	createEffect(() => {
-		const isOpen = props.open;
-		const target = activeTarget();
-		const uri = props.planUri;
-		if (!isOpen || !target) {
+	createEffect(
+		() => [props.open, activeTarget(), props.planUri] as const,
+		([isOpen, target, uri]) => {
+			if (!isOpen || !target) {
+				setPreview(null);
+				setLoading(false);
+				setMissing(false);
+				return;
+			}
+			const seq = ++fetchSeq;
 			setPreview(null);
-			setLoading(false);
+			setLoading(true);
 			setMissing(false);
-			return;
-		}
-		const seq = ++fetchSeq;
-		setPreview(null);
-		setLoading(true);
-		setMissing(false);
-		void readProcedurePreview(uri, { name: target.name, script: target.script, hintScript: target.hintScript }).then((res) => {
-			if (seq !== fetchSeq) return;
-			setLoading(false);
-			setPreview(res);
-			setMissing(!res);
-		});
-	});
+			void readProcedurePreview(uri, { name: target.name, script: target.script, hintScript: target.hintScript }).then((res) => {
+				if (seq !== fetchSeq) return;
+				setLoading(false);
+				setPreview(res);
+				setMissing(!res);
+			});
+			return () => {
+				fetchSeq++;
+			};
+		},
+	);
 
 	const isPreviewing = (name: string) => activeTarget()?.name.toLowerCase() === name.toLowerCase();
 
@@ -93,14 +111,14 @@ export function NodeImplementation(props: {
 			<button
 				type="button"
 				class="plan-impl-toggle"
-				aria-expanded={props.open}
-				onClick={props.onToggle}
+				aria-expanded={props.open ? "true" : "false"}
+				onClick={() => props.onToggle()}
 				title="Show or hide the scripts, functions, and code behind this step"
 			>
 				<Icon name={props.open ? "chevron-down" : "chevron-right"} />
 				<span class="plan-impl-label">Implementation</span>
 				<span class="spacer" />
-				<span class="plan-impl-meta" classList={{ linked: details().units.length > 0 || Boolean(details().primaryRef) }}>
+				<span class={["plan-impl-meta", { linked: details().units.length > 0 || Boolean(details().primaryRef) }]}>
 					{summary()}
 				</span>
 			</button>
@@ -122,7 +140,7 @@ export function NodeImplementation(props: {
 									const file = () => baseName(unit.script);
 									const folder = () => dirName(unit.script);
 									return (
-										<div class="plan-impl-card" classList={{ active: isPreviewing(unit.name) }}>
+										<div class={["plan-impl-card", { active: isPreviewing(unit.name) }]}>
 											<div class="plan-impl-card-row">
 												<button
 													type="button"
@@ -170,11 +188,13 @@ export function NodeImplementation(props: {
 									{(call) => (
 										<button
 											type="button"
-											class="plan-impl-chip"
-											classList={{
-												active: isPreviewing(call),
-												primary: details().primaryRef?.toLowerCase() === call.toLowerCase(),
-											}}
+											class={[
+												"plan-impl-chip",
+												{
+													active: isPreviewing(call),
+													primary: details().primaryRef?.toLowerCase() === call.toLowerCase(),
+												},
+											]}
 											title={`Click to preview ${call}; double-click to open in editor`}
 											onClick={() => setPickedTarget({ name: call, hintScript: details().units[0]?.script, label: call })}
 											onDblClick={() => props.onOpenRef(call)}
@@ -248,6 +268,46 @@ export function NodeImplementation(props: {
 	);
 }
 
+/**
+ * The "Target scripts" field while it is typed in: one field, holding the whole list, so one text to hand over.
+ *
+ * It was a plain draft, which the plan was given only when the field was left (the browser's change event). Text
+ * typed and not left was therefore lost when the inspector was replaced (a node selected by a click that does not
+ * move focus: an engine that fires no change event for a field it removes drops the text), and Ctrl+S saved the
+ * plan without it. It is now a field like the Palette's own (`pendingField`), held with the app's pending edits:
+ * a save, a close, and a change of tab or view ask it for its text first, and taken away it hands the text over.
+ * It needs no key: the inspector is built anew for each plan, so the text can only be for the plan it is in.
+ */
+export function targetsField(props: { readonly targets: readonly string[]; readonly onSetTargets: (value: string) => void }) {
+	const shown = () => props.targets.join(", ");
+	const field = pendingField(
+		{
+			get value() {
+				return shown();
+			},
+			get onCommit() {
+				// Read now, called later: the field is gone by the time a text handed over on its way out arrives.
+				const setTargets = props.onSetTargets;
+				return (text: string) => setTargets(text);
+			},
+		},
+		{ hold: holdsPendingEdit },
+	);
+	return {
+		...field,
+		/**
+		 * A keystroke. Text typed back to exactly what the plan holds is not pending: there is nothing to hand over,
+		 * and leaving the field then changes nothing, as it did not before. Handing it over all the same would not
+		 * always be harmless: the plan's list is written again from the text, so a target the plan writes out in
+		 * full ({ script, ... }) would come back as its path alone.
+		 */
+		type(text: string) {
+			if (text === untrack(shown)) field.revert();
+			else field.type(text);
+		},
+	};
+}
+
 export function PlanImplementation(props: {
 	plan: Plan;
 	builtUnits: BuiltUnit[];
@@ -262,7 +322,23 @@ export function PlanImplementation(props: {
 }) {
 	const targets = createMemo(() => planTargetsOf(props.plan));
 	const allScripts = createMemo(() => [...new Set([...targets(), ...props.builtUnits.map((u) => u.script).filter(Boolean)])]);
-	const scriptsText = () => targets().join(", ");
+	const scripts = targetsField({
+		get targets() {
+			return targets();
+		},
+		get onSetTargets() {
+			return props.onSetTargets;
+		},
+	});
+	const resyncScripts = (el: HTMLTextAreaElement) => {
+		onSettled(() => {
+			if (!el.isConnected) return;
+			const cur = untrack(() => targets().join(", "));
+			scripts.show(cur);
+			if (el.value !== cur) el.value = cur;
+			props.fitTextarea(el);
+		});
+	};
 
 	const summary = createMemo(() => {
 		const sc = allScripts().length;
@@ -278,14 +354,14 @@ export function PlanImplementation(props: {
 			<button
 				type="button"
 				class="plan-impl-toggle"
-				aria-expanded={props.open}
-				onClick={props.onToggle}
+				aria-expanded={props.open ? "true" : "false"}
+				onClick={() => props.onToggle()}
 				title="Show or hide the scripts and functions implementing this plan"
 			>
 				<Icon name={props.open ? "chevron-down" : "chevron-right"} />
 				<span class="plan-impl-label">Implementation</span>
 				<span class="spacer" />
-				<span class="plan-impl-meta" classList={{ linked: allScripts().length > 0 || props.builtUnits.length > 0 }}>
+				<span class={["plan-impl-meta", { linked: allScripts().length > 0 || props.builtUnits.length > 0 }]}>
 					{summary()}
 				</span>
 			</button>
@@ -344,14 +420,28 @@ export function PlanImplementation(props: {
 					<label class="plan-prop-field">
 						<span>Target scripts</span>
 						<textarea
-							ref={props.bindTextarea(scriptsText)}
+							ref={props.bindTextarea(scripts.draft)}
 							class="plan-scripts-input"
 							rows={2}
-							value={scriptsText()}
+							value={scripts.draft()}
 							placeholder="Sample/Release.ssl"
-							onKeyDown={props.onCommitOnEnter}
-							onInput={(e) => props.fitTextarea(e.currentTarget)}
-							onChange={(e) => props.onSetTargets(e.currentTarget.value)}
+							onKeyDown={(e) => props.onCommitOnEnter(e)}
+							onInput={(e) => {
+								scripts.type(e.currentTarget.value);
+								props.fitTextarea(e.currentTarget);
+							}}
+							onChange={(e) => {
+								const el = e.currentTarget;
+								scripts.commit(el.value);
+								resyncScripts(el);
+							}}
+							onBlur={(e) => {
+								// Left with no change event: the text is what it was when the field was entered, though a
+								// save since then has put other text in the plan. What was typed still goes to the plan,
+								// before the field shows the plan's text again. After a change event nothing is pending.
+								scripts.commit(e.currentTarget.value);
+								resyncScripts(e.currentTarget);
+							}}
 						/>
 					</label>
 				</div>

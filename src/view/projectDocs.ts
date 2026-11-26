@@ -5,8 +5,8 @@
 // be undone, and a file that exists is never written over.
 import DOMPurify from "dompurify";
 import { marked } from "marked";
-import { CATALOG_FILE, catalogBlock, catalogList, catalogStale, hasCatalogPlace, withCatalog, type CatalogItem } from "../shared/catalog";
-import { csvCell, csvRow, parseCsv } from "../shared/csv";
+import { CATALOG_FILE, catalogBlock, catalogEndMissing, catalogList, catalogStale, catalogUnderOpenFence, hasCatalogPlace, withCatalog, type CatalogItem } from "../shared/catalog";
+import { addCsvColumn, csvCell, csvDelimiterForPath, csvRow, parseCsv, type Table } from "../shared/csv";
 import { localDay } from "../shared/dates";
 import { docChecks } from "../shared/docChecks";
 import {
@@ -49,6 +49,7 @@ import {
 	addToFrontMatterList,
 	bodyOffset,
 	frontMatter,
+	frontMatterRefusal,
 	many,
 	one,
 	quoteYamlScalar,
@@ -69,9 +70,10 @@ import {
 	sqlTablesToMarkdown,
 } from "../shared/sqlSchema";
 import { importSummary, ticketsFromJson, ticketsFromTable, type Imported, type ImportedTicket } from "../shared/ticketImport";
+import { parseTemplateFile } from "../shared/templater";
 import { manifestSummary, mergeManifest } from "../shared/manifest";
 import { buildDocNameIndex, docByName, lookupInIndex, namedLink, namesToFollow, withNames } from "../shared/namedLinks";
-import { baseName, dirName, isInside, joinPath, relativePath, relativeTo, resolvePath } from "../shared/paths";
+import { baseName, dirName, isInside, joinPath, plainFileError, relativePath, relativeTo, resolvePath } from "../shared/paths";
 import { activeEditor } from "./editor/EditorGroup";
 import { activeLiveEditor } from "./editor/liveBridge";
 import {
@@ -110,17 +112,18 @@ import {
 } from "../shared/projectDocs";
 import { folderParts, typedParts } from "../shared/docSections";
 import type { DocFile, LinkTo, NameIn } from "../shared/protocol";
-import { backend } from "./backend";
+import { backend, fileExists } from "./backend";
 import { ask, browseWorkspaceFile, choose, quickPick, quickPickMany, type QuickPickOption } from "./dialogs";
 import { recall, remember } from "./graph/canvas";
 import { tasks, toggleTask } from "../shared/tasks";
 import type { LinkMend } from "../shared/docChecks";
-import { linkFile, linkWritten, ownLinkEdits, rewriteHeadingReferences, withLinkFiles, type LinkEdit } from "../shared/docLinks";
+import { bareNameTarget, isPictureName, linkFile, linkWritten, ownLinkEdits, rewriteHeadingReferences, withLinkFiles, type LinkEdit } from "../shared/docLinks";
 import { parsePlan, printPlan, isPlanPath } from "./plan/model";
 import { docs, isMarkdown } from "./project";
 import {
 	codeMatchesRef,
 	descendantTickets,
+	pathMatchesRef,
 	ticketAtHand as listedTicketAtHand,
 	scriptsForTicket,
 	ticketForFile,
@@ -171,6 +174,21 @@ async function current(path: string): Promise<string | null> {
 }
 
 /**
+ * Why `current` had no text for a file, as the end of a sentence about it ("Could not update Due-dates.md: ..."):
+ * it is not text, or it could not be read and this is what the reading said. A change asked of such a document
+ * said nothing at all, or counted it among the documents that "already had" the value.
+ */
+export async function whyNotRead(path: string): Promise<string> {
+	const NOT_TEXT = "it is not a text file.";
+	if (documents.get(canonical(path))?.binary) return NOT_TEXT;
+	return backend.read(path).then(
+		(res) => (res.binary ? NOT_TEXT : "it could not be read."),
+		// What the file system said, as a person would say it: "docs/specs/Due-dates.md is not there."
+		(e: any) => `it could not be read. ${plainFileError(String(e?.message ?? e), root())}`,
+	);
+}
+
+/**
  * Writes a file's text: through the editor when it is open there, where the
  * change can be undone. An open file that had nothing unsaved is saved with
  * the change, so what the folder says and what the editor shows stay the
@@ -182,8 +200,9 @@ async function put(path: string, text: string, existed: boolean) {
 	if (openDoc && !openDoc.binary && !openDoc.model.isDisposed()) {
 		const clean = !state.dirty[open];
 		if (!applyText(open, text)) throw new Error(`${relativeTo(root(), path)} could not be updated in the editor.`);
-		// A save that fails has said why; whoever asked for the write is told it was not made.
-		if (clean && !(await save(open))) throw new Error(`${relativeTo(root(), path)} was changed in the editor and could not be saved.`);
+		// A save that fails has said why; whoever asked for the write is told it was not made. The text is saved as
+		// it was put: with format on save, a link mended in an SSL comment would have its whole procedure reformatted.
+		if (clean && !(await save(open, { format: false }))) throw new Error(`${relativeTo(root(), path)} was changed in the editor and could not be saved.`);
 		return;
 	}
 	if (!existed) await backend.create(path, "file");
@@ -221,7 +240,19 @@ async function writeCatalog(
 	// In a folder that may do without a catalog, a file of that name with no place for the list is a person's own.
 	if (before !== null && optional && !hasCatalogPlace(before)) return false;
 	if (before !== null && !catalogStale(before, items)) return false;
-	await put(path, withCatalog(before ?? catalogTemplate(area), items), before !== null);
+	const written = withCatalog(before ?? catalogTemplate(area), items);
+	await put(path, written, before !== null);
+	// A list written under a code fence that is never closed is code to whatever shows the catalog, until the fence
+	// is closed: the person is told which line opens it.
+	const openFence = catalogUnderOpenFence(written);
+	if (openFence) {
+		notify(`${relativeTo(root(), path)} has a code fence that is never closed (it opens on line ${openFence}), and the catalog's list is under it: the list is written, and is shown as code until the fence is closed.`);
+	}
+	// With the line that ends the list gone, the old list cannot be told from the person's words under it: all of it
+	// is kept, and the person is told, since a line of the old list may now stand under the new one.
+	if (before !== null && catalogEndMissing(before)) {
+		notify(`${relativeTo(root(), path)} had lost the line that ends its list (<!-- /catalog -->). The list is written anew, and everything that stood under the old one is kept below it: take out any line of the old list left there.`);
+	}
 	// The docs folder's catalog names the catalogs of the folders under it: one of those just started is one more for
 	// it to name, where it is kept.
 	if (before === null && area in DOC_FOLDERS && !options.alone) await writeCatalog("docs", await backend.docs(), { kept: true });
@@ -236,20 +267,28 @@ export async function catalogsKeptFor(_paths: readonly string[]) {
 	// Intentionally no-op: treeVersion refresh marks affected catalogs out of date in Docs & Health.
 }
 
-/** Makes a document from its template and opens it as text. A file already there is opened, not replaced. */
-async function start(path: string, text: string, _area?: CatalogArea) {
+/**
+ * Makes a document from its template and opens it as text. A file already there is opened, not replaced. True when
+ * the document was made with that text: a caller that goes on to say what it wrote asks, since a file that could
+ * not be made (one that is there and cannot be read as text, a folder that cannot be written) is said here and
+ * nothing more comes of it.
+ */
+async function start(path: string, text: string, _area?: CatalogArea): Promise<boolean> {
 	if ((await current(path)) !== null) {
 		notify(`${relativeTo(root(), path)} is already there: opened.`);
-		return openFile(path);
+		await openFile(path);
+		return false;
 	}
 	try {
 		await backend.create(path, "file");
 		await backend.write(path, text);
 	} catch (e: any) {
-		return notify(String(e?.message ?? e), "error");
+		notify(String(e?.message ?? e), "error");
+		return false;
 	}
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	await openFile(path);
+	return true;
 }
 
 /** The ticket the open document is, or is for, as it stands in the editor: a document's front matter, or a plan's own. */
@@ -395,7 +434,7 @@ export async function createTicketFolder(ticketPath: string): Promise<string | n
 		return null;
 	}
 	fileRenamed(ticketPath, targetPath);
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	try {
 		await followRename(ticketPath, targetPath, beforeDocs);
 	} catch (e: any) {
@@ -524,6 +563,8 @@ export async function importTickets() {
 		(useFolders ? joinPath(areaFolder("tickets"), ticket.key, `${ticket.key}.md`) : joinPath(areaFolder("tickets"), `${ticket.key}.md`));
 	const counts = { made: 0, updated: 0, same: 0, skipped: read.skipped, pulls: read.pulls };
 	let failed = 0;
+	const unset = new Set<string>();
+	const unclosed = new Set<string>();
 	for (const ticket of read.tickets) {
 		if (!state.workspace || root() !== startRoot) break;
 		const dest = destPath(ticket);
@@ -552,6 +593,16 @@ export async function importTickets() {
 			const { values } = frontMatter(was);
 			const oldTitle = one(values.title);
 			let now = was;
+			// A field the file lays out over several lines is left as the person wrote it, and named when the import is done.
+			const kept = (field: string, next: string | null) => {
+				// A file whose front matter opens and is never closed takes no value at all: it is named once, by its
+				// ticket, and not field by field as writing each value over several lines.
+				if (next === null) {
+					if (frontMatter(now).lines) unset.add(`${ticket.key} ${field}`);
+					else unclosed.add(ticket.key);
+				}
+				return next ?? now;
+			};
 			for (const [k, value] of [
 				["status", ticket.status],
 				["title", ticket.title],
@@ -562,17 +613,17 @@ export async function importTickets() {
 				["source", ticket.source],
 			] as const) {
 				if (!value || one(values[k]).toLowerCase() === value.toLowerCase()) continue;
-				now = withFrontMatter(now, k, value) ?? now;
+				now = kept(k, withFrontMatter(now, k, value));
 			}
 			// Keep heading synced if it still matches `# KEY: Old Title` (function replacer prevents `$` corruption).
 			if (oldTitle && ticket.title && oldTitle.toLowerCase() !== ticket.title.toLowerCase()) {
 				const h1 = new RegExp(`^(#\\s+${ticket.key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s+)${oldTitle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "m");
 				if (h1.test(now)) now = now.replace(h1, (_, prefix: string) => `${prefix}${ticket.title}`);
 			}
-			for (const tag of ticket.tags ?? []) now = addToFrontMatterList(now, "tags", tag) ?? now;
-			for (const relKey of ticket.related) now = addToFrontMatterList(now, "related", relKey) ?? now;
-			for (const blk of ticket.blocks ?? []) now = addToFrontMatterList(now, "blocks", blk) ?? now;
-			for (const by of ticket.blockedBy ?? []) now = addToFrontMatterList(now, "blocked-by", by) ?? now;
+			for (const tag of ticket.tags ?? []) now = kept("tags", addToFrontMatterList(now, "tags", tag));
+			for (const relKey of ticket.related) now = kept("related", addToFrontMatterList(now, "related", relKey));
+			for (const blk of ticket.blocks ?? []) now = kept("blocks", addToFrontMatterList(now, "blocks", blk));
+			for (const by of ticket.blockedBy ?? []) now = kept("blocked-by", addToFrontMatterList(now, "blocked-by", by));
 			// Hydrate untouched stub descriptions only when the template prompt is still verbatim (ADR 0009: never overwrite human-edited descriptions).
 			if (ticket.description?.trim() && now.includes(PROMPTS.ticket)) {
 				const cutAt = bodyOffset(now);
@@ -593,9 +644,17 @@ export async function importTickets() {
 		}
 	}
 	if (!state.workspace || root() !== startRoot) return;
-	if (counts.made || counts.updated) setState("treeVersion", (v) => v + 1);
+	if (counts.made || counts.updated) setState((s) => { s.treeVersion += 1; });
 	if (counts.made || counts.updated || counts.same || !failed) {
 		notify(`${importSummary(counts)}${failed ? ` (${failed} failed)` : ""}`);
+	}
+	if (unset.size) {
+		const named = [...unset];
+		notify(`Not updated, because the file writes the value over several lines: ${named.slice(0, 6).join(", ")}${named.length > 6 ? ` and ${named.length - 6} more` : ""}. Change ${named.length === 1 ? "it" : "them"} in the text.`, "error");
+	}
+	if (unclosed.size) {
+		const named = [...unclosed];
+		notify(`Not updated, because the file's front matter is not closed (no closing ---): ${named.slice(0, 6).join(", ")}${named.length > 6 ? ` and ${named.length - 6} more` : ""}. Close it in the text.`, "error");
 	}
 	if (counts.made === 1 && read.tickets.length === 1) await openFile(destPath(read.tickets[0]!));
 }
@@ -671,9 +730,7 @@ export async function newKnowledge(
 		const language = guessed ?? (await choose("A snippet of what?", ["SQL", "SSL"]));
 		if (!language) return;
 		const lang = language === "SQL" ? "sql" : "ssl";
-		const header = snippetTemplate({ title, language: lang });
-		const body = code?.hasExcerpt ? `${header.replace(/\n*$/, "\n\n")}${code.text}\n` : header;
-		return start(joinPath(folder, `${slug(title)}.${lang}`), body, "knowledge");
+		return start(joinPath(folder, `${slug(title)}.${lang}`), newSnippetText(title, lang, code?.hasExcerpt ? code.text : null), "knowledge");
 	}
 	if (kind === "reference") return start(joinPath(folder, `${slug(title)}.md`), referenceTemplate({ title }), "knowledge");
 	if (kind === "prompts") return start(joinPath(folder, `${slug(title)}.md`), promptTemplate({ title }), "knowledge");
@@ -725,7 +782,7 @@ export async function startFolderCatalogs() {
 			}
 			if (await writeCatalog(area, await backend.docs(), { start: true })) started.push(catalogSaid(area));
 		}
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		const own = theirs.length ? ` ${theirs.join(", ")} ${theirs.length === 1 ? "is a document of your own and is" : "are documents of your own and are"} left as ${theirs.length === 1 ? "it is" : "they are"}.` : "";
 		notify(started.length ? `Started ${started.join(", ")}.${own}` : `Nothing to start: the docs, code and tests folders have their catalogs, or hold nothing to list.${own}`);
 	} catch (e: any) {
@@ -855,16 +912,24 @@ export async function setStatus(path: string, status: string) {
 	// Front matter is a Markdown document's: a query or a table kept in the same folder has none to set.
 	if (!isMarkdown(path)) return notify("Only a Markdown document has a status to set.", "error");
 	const before = await current(path);
-	if (before === null) return;
+	// Said, like a refused edit below: the one document of a selection goes through here, and nothing was said of it.
+	if (before === null) return notify(`Could not set the status of ${baseName(path)}: ${await whyNotRead(path)}`, "error");
 	let after = withFrontMatter(before, "status", status);
-	if (after === null) return notify("The status could not be set here: it is written as a list. Change it in the text.", "error");
+	// The writer gives null for two things, and the notice says which (`frontMatterRefusal`): this one and its like
+	// below said "written over several lines" of a document whose front matter opens and is never closed.
+	if (after === null) return notify(`Could not set the status of ${baseName(path)}: ${frontMatterRefusal(before, "status")}`, "error");
 	// A question that is answered says when, once: the day is part of the answer.
 	const question = docs().some((d) => d.group === "knowledge" && d.kind === "questions" && canonical(d.path) === canonical(path));
-	if (question && toneOf(status) === "done" && !one(frontMatter(after).values.answered)) after = withFrontMatter(after, "answered", today()) ?? after;
+	if (question && toneOf(status) === "done" && !one(frontMatter(after).values.answered)) {
+		const dated = withFrontMatter(after, "answered", today());
+		// The status is set either way; an `answered:` written over several lines is left as it is, and said.
+		if (dated === null) notify("The day it was answered could not be set: answered: is written over several lines. Change it in the text.", "error");
+		else after = dated;
+	}
 	if (after === before) return;
 	try {
 		await put(path, after, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
 		return;
@@ -929,12 +994,16 @@ export async function setStatus(path: string, status: string) {
 			let linked = false;
 			try {
 				const oldText = await current(path);
+				// A side whose field is written over several lines, or whose front matter is never closed, is not edited
+				// from here: the notice names the side that was left and why, and does not say linked for it.
+				const left: string[] = [];
 				if (oldText !== null) {
 					const curBy = many(frontMatter(oldText).values["superseded-by"]);
 					const updatedOld = curBy.length
 						? addToFrontMatterList(oldText, "superseded-by", newStem)
 						: withFrontMatter(oldText, "superseded-by", newStem);
-					if (updatedOld && updatedOld !== oldText) {
+					if (updatedOld === null) left.push(`${baseName(path)}: ${frontMatterRefusal(oldText, "superseded-by")}`);
+					else if (updatedOld !== oldText) {
 						await put(path, updatedOld, true);
 						linked = true;
 					}
@@ -945,15 +1014,17 @@ export async function setStatus(path: string, status: string) {
 					const updatedTarget = curSup.length
 						? addToFrontMatterList(targetText, "supersedes", oldStem)
 						: withFrontMatter(targetText, "supersedes", oldStem);
-					if (updatedTarget && updatedTarget !== targetText) {
+					if (updatedTarget === null) left.push(`${baseName(targetDecision.path)}: ${frontMatterRefusal(targetText, "supersedes")}`);
+					else if (updatedTarget !== targetText) {
 						await put(targetDecision.path, updatedTarget, true);
 						linked = true;
 					}
 				}
-				if (linked) setState("treeVersion", (v) => v + 1);
-				notify(`Linked ${newStem} as superseding ${oldStem}.`);
+				if (linked) setState((s) => { s.treeVersion += 1; });
+				if (left.length) notify(`Could not write the link in ${left.join(" Nor in ")}`, "error");
+				else notify(`Linked ${newStem} as superseding ${oldStem}.`);
 			} catch (e: any) {
-				if (linked) setState("treeVersion", (v) => v + 1);
+				if (linked) setState((s) => { s.treeVersion += 1; });
 				notify(`Could not link superseding decision: ${e?.message ?? e}`, "error");
 			}
 		} else if (picked === CREATE) {
@@ -974,7 +1045,8 @@ export async function setStatus(path: string, status: string) {
 					const oldText = await current(path);
 					if (oldText !== null) {
 						const updatedOld = withFrontMatter(oldText, "superseded-by", newStem);
-						if (updatedOld && updatedOld !== oldText) await put(path, updatedOld, true);
+						if (updatedOld === null) notify(`Could not write superseded-by: ${newStem} in ${baseName(path)}: ${frontMatterRefusal(oldText, "superseded-by")}`, "error");
+						else if (updatedOld !== oldText) await put(path, updatedOld, true);
 					}
 				} catch (e: any) {
 					notify(`Could not update superseded-by on ${baseName(path)}: ${e?.message ?? e}`, "error");
@@ -996,7 +1068,7 @@ export async function tickTask(path: string, index: number) {
 	if (after === null || after === before) return;
 	try {
 		await put(path, after, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
 	}
@@ -1014,7 +1086,7 @@ export async function mendLinks(path: string, mends: readonly LinkMend[]) {
 	if (!done) return notify("The link is not where it was: the document has changed since. Mend it in the text.", "error");
 	try {
 		await put(path, after, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(done === 1 && mends.length === 1 ? `The link now leads to ${mends[0]!.instead}.` : `${done} ${done === 1 ? "link now leads" : "links now lead"} to where ${done === 1 ? "its file is" : "their files are"}.`);
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
@@ -1425,7 +1497,7 @@ async function followPaths(
 			notify(String(e?.message ?? e), "error");
 		}
 	}
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	if (done) notify(`${done} ${done === 1 ? "place was" : "places were"} written anew for ${baseName(primary.to)}.`);
 	const left = total - done;
 	if (left > 0) notify(`${left} of them ${left === 1 ? "is" : "are"} not where ${left === 1 ? "it was" : "they were"}: the document has changed since. Mend ${left === 1 ? "it" : "them"} in the text.`, "error");
@@ -1592,7 +1664,7 @@ async function followPlanPaths(rawPairs: readonly { from: string; to: string }[]
 		}
 	}
 	if (written) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Updated ${writtenHits} ${writtenHits === 1 ? "path" : "paths"} in ${written} ${written === 1 ? "plan" : "plans"} for ${baseName(primary.to)}.`);
 	}
 }
@@ -1654,7 +1726,7 @@ async function followRegistryPaths(
 		}
 	}
 	if (written) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Updated ${writtenHits} ${writtenHits === 1 ? "path cell" : "path cells"} in ${written} ${written === 1 ? "registry" : "registries"} for ${baseName(primary.to)}.`);
 	}
 }
@@ -1718,7 +1790,7 @@ async function followCodeCommentLinks(
 		}
 	}
 	if (written) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Updated ${writtenHits} ${writtenHits === 1 ? "comment reference" : "comment references"} across ${written} ${written === 1 ? "file" : "files"} for ${baseName(primary.to)}.`);
 	}
 }
@@ -1755,6 +1827,37 @@ export async function followRename(from: string, to: string, beforeDocs?: DocFil
 	await followPlanPaths(allPairs);
 	await followRegistryPaths(allPairs, registryHits);
 	await followCodeCommentLinks(allPairs, codeHits);
+}
+
+/**
+ * What a bare name (`shot.png`, no folder) in an embed or a link by name is written as after a rename, or null
+ * where it is left as it is. Another file may have the same name (each ticket's own `attachments/shot.png`), so
+ * the name is followed only where, found from its document the way the page finds it, it led to the file that
+ * moved: a name that means one of the project's documents leads to that one, a picture or any other file is
+ * looked for among the project's files as they were. `holder` is the document it is written in, where it was and
+ * where it is now; `before` is the project before the rename.
+ */
+export function bareNameFollowed(
+	name: string,
+	holder: { was: string; is: string; embed?: boolean },
+	pairs: readonly { fromCanon: string; toCanon: string }[],
+	before: { files: readonly string[]; docs: readonly DocFile[]; root: string; docsFolder?: string | null; attachments?: string | null },
+): string | null {
+	const doc = isPictureName(name) ? null : docByName(name, before.docs, before.root);
+	const led = doc ? canonical(doc.path) : bareNameTarget(name, holder.was, before.files, { root: before.root, docs: before.docsFolder, attachments: before.attachments });
+	for (const p of pairs) {
+		const oldBase = baseName(p.fromCanon);
+		const newBase = baseName(p.toCanon);
+		if (name.toLowerCase() !== oldBase.toLowerCase()) continue;
+		if (!(holder.embed || /\.[a-z0-9]{1,8}$/i.test(oldBase))) continue;
+		if (led !== p.fromCanon) continue;
+		if (oldBase.toLowerCase() !== newBase.toLowerCase()) return newBase;
+		if (canonical(dirName(p.fromCanon)) === canonical(dirName(holder.was)) && canonical(dirName(p.toCanon)) !== canonical(dirName(holder.is))) {
+			return relativePath(dirName(holder.is), p.toCanon).split("\\").join("/");
+		}
+		return null;
+	}
+	return null;
 }
 
 /**
@@ -1818,6 +1921,18 @@ async function followNames(rawPairs: readonly { from: string; to: string }[], li
 		? namesToFollow(places, before, after, moved, wsRoot)
 		: [];
 
+	// The project's files as they were before the rename, the moved ones put back where they were: asked for once,
+	// and only when a bare name has a moved file's name. A bare name is followed only where it led to that file.
+	let filesBefore: string[] | null = null;
+	const wasThere = async () => {
+		if (!filesBefore) {
+			const now = await backend.files().catch(() => [] as string[]);
+			// A listing that was cut short, or could not be had, still knows the files that moved: they were there.
+			filesBefore = [...new Set([...now.map((path) => unmoved(canonical(path))), ...pairs.map((p) => p.fromCanon)])];
+		}
+		return filesBefore;
+	};
+
 	// Also rewrite non-doc wikilink/embed references such as `![[old.png]]` or `![[samples/old.sql]]` across all co-moved pairs.
 	const seenFollow = new Set(follow.map((p) => `${p.path}:${p.line}:${p.column}`));
 	for (const place of places) {
@@ -1847,19 +1962,14 @@ async function followNames(rawPairs: readonly { from: string; to: string }[], li
 				const rel = relativePath(placeCurDir, candDoc).split("\\").join("/");
 				instead = raw.startsWith("./") && !rel.startsWith(".") ? `./${rel}` : rel;
 			}
-		} else {
-			for (const p of pairs) {
-				const oldBase = baseName(p.fromCanon);
-				const newBase = baseName(p.toCanon);
-				if (raw.toLowerCase() !== oldBase.toLowerCase()) continue;
-				if (!((place as NameIn & { embed?: boolean }).embed || /\.[a-z0-9]{1,8}$/i.test(oldBase))) continue;
-				if (oldBase.toLowerCase() !== newBase.toLowerCase()) {
-					instead = newBase;
-				} else if (canonical(dirName(p.fromCanon)) === canonical(placeOrigDir) && canonical(dirName(p.toCanon)) !== canonical(placeCurDir)) {
-					instead = relativePath(placeCurDir, p.toCanon).split("\\").join("/");
-				}
-				break;
-			}
+		} else if (pairs.some((p) => baseName(p.fromCanon).toLowerCase() === raw.toLowerCase())) {
+			instead = bareNameFollowed(raw, { was: placeOrigPath, is: place.path, embed: (place as NameIn & { embed?: boolean }).embed }, pairs, {
+				files: await wasThere(),
+				docs: before,
+				root: wsRoot,
+				docsFolder: state.project?.docs,
+				attachments: state.settings.attachmentsFolder,
+			});
 		}
 		if (instead && instead !== place.name) {
 			seenFollow.add(key);
@@ -1889,7 +1999,7 @@ async function followNames(rawPairs: readonly { from: string; to: string }[], li
 					notify(String(e?.message ?? e), "error");
 				}
 			}
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			if (done) notify(`${done} ${done === 1 ? "link by name was" : "links by name were"} written anew for ${baseName(primary.to)}.`);
 			const left = follow.length - done;
 			if (left > 0) notify(`${left} of them ${left === 1 ? "is" : "are"} not where ${left === 1 ? "it was" : "they were"}: the document has changed since. Mend ${left === 1 ? "it" : "them"} in the text.`, "error");
@@ -1936,7 +2046,7 @@ async function followNames(rawPairs: readonly { from: string; to: string }[], li
 					}
 				}
 				if (updatedCount) {
-					setState("treeVersion", (v) => v + 1);
+					setState((s) => { s.treeVersion += 1; });
 					notify(`Updated supersedes / superseded-by in ${updatedCount} ${updatedCount === 1 ? "decision" : "decisions"} for ${newStem}.`);
 				}
 			}
@@ -1960,7 +2070,7 @@ export async function updateCatalogs() {
 			// The docs folder's names the catalogs under it, which this pass may have just started: listed afresh for it.
 			if (await writeCatalog(area, area === "docs" ? await backend.docs() : files, { alone: true })) changed.push(catalogSaid(area));
 		}
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(changed.length ? `Updated ${changed.join(", ")}.` : "Every catalog already says what its folder holds.");
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
@@ -2071,10 +2181,15 @@ export async function updateManifest() {
 				[MARK, KEEP],
 			);
 			if (!picked) return;
+			// The question was asked of the manifest as it was read before it, and its answer is for that text. What
+			// is written is made from that text too, so it is written only where the manifest still is that text: a
+			// manifest changed while the question stood open (in the editor, or on disk) was written over with the
+			// rows it had before, and what had been changed in it was gone.
+			if ((await current(path)) !== before) return notify(`${own} was changed while the question was open, so nothing was written to it. Update the file manifest again.`, "error");
 			if (picked === MARK) change = mergeManifest(before, files, { markChangedAfterDone: true });
 		}
 		if (before !== change.text) await put(path, change.text, before !== null);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(manifestSummary(change));
 		await openFile(path);
 	} catch (e: any) {
@@ -2189,8 +2304,14 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 				const before = await current(target.path);
 				if (before === null) return;
 				const next = withFrontMatter(before, "parent", key);
-				if (next && next !== before) await put(target.path, next, true);
-				setState("treeVersion", (v) => v + 1);
+				// Null says the field is laid out over several lines, or the front matter is never closed, and the file was
+				// left alone: the link is not said to be made, and the notice says which of the two it is.
+				if (next === null) {
+					notify(`Could not set parent: ${key} in ${baseName(target.path)}: ${frontMatterRefusal(before, "parent")}`, "error");
+					return;
+				}
+				if (next !== before) await put(target.path, next, true);
+				setState((s) => { s.treeVersion += 1; });
 				notify(`Set parent: ${key} on ${otherKey}.`);
 				return;
 			}
@@ -2198,8 +2319,12 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 			const before = await current(ticketPath);
 			if (before === null) return;
 			const next = addToFrontMatterList(before, field, otherKey);
-			if (next && next !== before) await put(ticketPath, next, true);
-			setState("treeVersion", (v) => v + 1);
+			if (next === null) {
+				notify(`Could not add ${otherKey} to ${field}: in ${baseName(ticketPath)}: ${frontMatterRefusal(before, field)}`, "error");
+				return;
+			}
+			if (next !== before) await put(ticketPath, next, true);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Linked ${otherKey} under ${field}: in ${baseName(ticketPath)}.`);
 			return;
 		}
@@ -2210,11 +2335,11 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 			const entry = rel(target.path);
 			const next = addToFrontMatterList(before, field, entry);
 			if (next === null) {
-				notify(`Could not update ${field}: automatically in ${baseName(ticketPath)} — add ${entry} directly in YAML.`, "error");
+				notify(`Could not add ${entry} to ${field}: in ${baseName(ticketPath)}: ${frontMatterRefusal(before, field)}`, "error");
 				return;
 			}
 			if (next !== before) await put(ticketPath, next, true);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Linked ${baseName(target.path)} — added to ${field}: in ${baseName(ticketPath)}.`);
 			return;
 		}
@@ -2226,50 +2351,69 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 		const existingSingle = many(fm.values.ticket);
 		const existingMulti = many(fm.values.tickets);
 		let next: string | null = before;
+		// The field the writer was at when it refused, for the notice.
+		let field = "ticket";
 		if (existingMulti.length) {
+			field = "tickets";
 			next = addToFrontMatterList(before, "tickets", key);
 		} else if (existingSingle.length) {
 			const merged = [...new Set([...existingSingle, key])];
-			let cleared = before;
-			for (const prev of existingSingle) cleared = removeFromFrontMatterList(cleared, "ticket", prev) ?? cleared;
+			// One step that cannot be made stops the rest: `ticket:` taken out with `tickets:` not written would lose the link there was.
+			let cleared: string | null = before;
+			for (const prev of existingSingle) cleared = cleared === null ? null : removeFromFrontMatterList(cleared, "ticket", prev);
 			next = cleared;
-			for (const t of merged) next = addToFrontMatterList(next, "tickets", t) ?? next;
+			if (next !== null) field = "tickets";
+			for (const t of merged) next = next === null ? null : addToFrontMatterList(next, "tickets", t);
 		} else {
 			next = withFrontMatter(before, "ticket", key);
 		}
 		if (next === null) {
-			notify(`Could not update ticket: automatically in ${baseName(target.path)} — add ticket: ${key} directly in its frontmatter.`, "error");
+			notify(`Could not link ${baseName(target.path)} to ${key}: ${frontMatterRefusal(before, field)}`, "error");
 			return;
 		}
 		if (next !== before) await put(target.path, next, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Linked ${baseName(target.path)} to ${key}.`);
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
 	}
 }
 
+/**
+ * The values of a ticket's `specs:` or `plans:` that name the document at `targetPath`: the ones to take out to
+ * unlink it. A value names it by the rule that lists the document under the ticket (`pathMatchesRef`), so a path
+ * written from the ticket's own folder, `../specs/Due-dates.md`, is one. It was once compared with the path from
+ * the project's folder alone: the document was listed as linked, and its Unlink found nothing to take out.
+ */
+export function refsNaming(values: readonly string[], targetPath: string, ticketPath: string, rootPath: string): string[] {
+	const normRef = (v: string) => v.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").toLowerCase();
+	const targetNorm = normRef(relativeTo(rootPath, targetPath));
+	return values.filter((v) => {
+		const vn = normRef(v);
+		return vn === targetNorm || targetNorm.endsWith(`/${vn}`) || vn.endsWith(`/${targetNorm}`) || pathMatchesRef(targetPath, v, ticketPath);
+	});
+}
+
 /** Removes the YAML/JSON association between `ticketPath` (`key`) and `target`. */
 export async function unlinkDocumentFromTicket(ticketPath: string, key: string, target: DocFile): Promise<void> {
 	if (!ready()) return;
-	const relTarget = relativeTo(root(), target.path).split("\\").join("/");
 	try {
 		let changed = false;
+		// A field laid out over several lines is not edited from here. It is named afterwards: the link is written,
+		// not inferred, and it is still there.
+		const refused = new Set<string>();
+		const take = (src: string, field: string, value: string, inPath: string) => {
+			const res = removeFromFrontMatterList(src, field, value);
+			if (res === null) refused.add(`${field}: in ${baseName(inPath)}`);
+			return res ?? src;
+		};
 		// 1. Remove from ticket's own specs/plans/related/blocks/blocked-by/parent frontmatter.
 		const tBefore = await current(ticketPath);
 		if (tBefore !== null) {
 			let tNext = tBefore;
-			const normRef = (v: string) => v.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "").toLowerCase();
-			const targetNorm = normRef(relTarget);
 			const removePathField = (src: string, field: string) => {
-				const vals = many(frontMatter(src).values[field]);
 				let cur = src;
-				for (const v of vals) {
-					const vn = normRef(v);
-					if (vn === targetNorm || targetNorm.endsWith(`/${vn}`) || vn.endsWith(`/${targetNorm}`)) {
-						cur = removeFromFrontMatterList(cur, field, v) ?? cur;
-					}
-				}
+				for (const v of refsNaming(many(frontMatter(src).values[field]), target.path, ticketPath, root())) cur = take(cur, field, v, ticketPath);
 				return cur;
 			};
 			if (target.group === "specs") {
@@ -2278,7 +2422,7 @@ export async function unlinkDocumentFromTicket(ticketPath: string, key: string, 
 				tNext = removePathField(removePathField(tNext, "plans"), "plan");
 			} else if (target.group === "tickets" && target.ticket) {
 				for (const field of ["related", "blocks", "blocked-by", "parent"]) {
-					tNext = removeFromFrontMatterList(tNext, field, target.ticket) ?? tNext;
+					tNext = take(tNext, field, target.ticket, ticketPath);
 				}
 			}
 			if (tNext !== tBefore) {
@@ -2300,7 +2444,7 @@ export async function unlinkDocumentFromTicket(ticketPath: string, key: string, 
 			} else if (isMarkdown(target.path)) {
 				let dNext = dBefore;
 				for (const field of target.group === "tickets" ? ["parent", "related", "blocks", "blocked-by"] : ["ticket", "tickets"]) {
-					dNext = removeFromFrontMatterList(dNext, field, key) ?? dNext;
+					dNext = take(dNext, field, key, target.path);
 				}
 				if (dNext !== dBefore) {
 					await put(target.path, dNext, true);
@@ -2308,8 +2452,10 @@ export async function unlinkDocumentFromTicket(ticketPath: string, key: string, 
 				}
 			}
 		}
-		if (changed) {
-			setState("treeVersion", (v) => v + 1);
+		if (changed) setState((s) => { s.treeVersion += 1; });
+		if (refused.size) {
+			notify(`Could not unlink in ${[...refused].join(", ")}: the value is written over several lines. Remove the link in the text.`, "error");
+		} else if (changed) {
 			notify(`Unlinked ${target.ticket ?? target.title ?? baseName(target.path)} from ${key}.`);
 		} else {
 			notify(`That link is inferred (e.g. via a paired plan or ticket folder) and cannot be unlinked from YAML.`);
@@ -2352,23 +2498,80 @@ export async function linkNonTicketToTicket(docPath: string): Promise<void> {
 	const freshSingle = many(freshFm.values.ticket);
 	const freshMulti = many(freshFm.values.tickets);
 	let next: string | null = fresh;
-	if (freshMulti.length) next = addToFrontMatterList(fresh, "tickets", ticket.ticket);
-	else if (freshSingle.length) {
+	// The field the writer was at when it refused, for the notice.
+	let field = "ticket";
+	if (freshMulti.length) {
+		field = "tickets";
+		next = addToFrontMatterList(fresh, "tickets", ticket.ticket);
+	} else if (freshSingle.length) {
 		const merged = [...new Set([...freshSingle, ticket.ticket])];
-		let cleared = fresh;
-		for (const prev of freshSingle) cleared = removeFromFrontMatterList(cleared, "ticket", prev) ?? cleared;
+		// One step that cannot be made stops the rest: `ticket:` taken out with `tickets:` not written would lose the link there was.
+		let cleared: string | null = fresh;
+		for (const prev of freshSingle) cleared = cleared === null ? null : removeFromFrontMatterList(cleared, "ticket", prev);
 		next = cleared;
-		for (const t of merged) next = addToFrontMatterList(next, "tickets", t) ?? next;
+		if (next !== null) field = "tickets";
+		for (const t of merged) next = next === null ? null : addToFrontMatterList(next, "tickets", t);
 	} else next = withFrontMatter(fresh, "ticket", ticket.ticket);
-	if (next && next !== fresh) {
+	if (next === null) {
+		notify(`Could not link ${baseName(docPath)} to ${ticket.ticket}: ${frontMatterRefusal(fresh, field)}`, "error");
+		return;
+	}
+	if (next !== fresh) {
 		try {
 			await put(docPath, next, true);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Linked ${baseName(docPath)} to ${ticket.ticket}.`);
 		} catch (e: any) {
 			notify(String(e?.message ?? e), "error");
 		}
 	}
+}
+
+/**
+ * The column of a registry that a new row's name goes in: its first that is neither the tickets' nor the status;
+ * -1 when it has no such column. The name went in the first column whatever that was: in a registry that opens
+ * with its ticket column it was written there, where the key belongs, and the new row named no ticket at all.
+ */
+export function registryNameColumn(table: Pick<Table, "header">): number {
+	return table.header.findIndex((h) => !["ticket", "tickets", "status"].includes(h.text.trim().toLowerCase()));
+}
+
+/**
+ * A registry's text with one more row, for a ticket: `name` in its name column (`registryNameColumn`), the ticket's
+ * key in its ticket column, "found" as its status. With `addTicketColumn`, a registry that has no ticket column is
+ * given one first.
+ * Both are edits of the text where they land (ADR 0002): the column goes on the end of each row's own line, and
+ * the row on the end of the file. The column was once added by printing the whole table again from its cells:
+ * every value was requoted, the blank lines went, and in a row with fewer or more cells than the header the new
+ * empty cell (or the row's own last one) came to stand under the wrong column. Null when there is no header row.
+ */
+export function registryTextWithRow(text: string, path: string, name: string, key: string, addTicketColumn: boolean): string | null {
+	const named = csvDelimiterForPath(path);
+	let table = parseCsv(text, { prefer: named });
+	if (!table.header.length) return null;
+	// A registry of one column has no delimiter in it to read, and the reading then says a comma. Written with that,
+	// a .tsv of one column got its ticket column and its row with commas (`name,ticket`), and was still a file of
+	// one column to everything that reads a .tsv by its tabs. Where the text says nothing the file's name decides:
+	// tabs for a .tsv, and for any other name the comma as before.
+	if (named && table.header.length === 1 && table.delimiter !== named) table = parseCsv(text, { delimiter: named });
+	let next = text;
+	if (addTicketColumn && ticketColumn(table) < 0) {
+		const widened = addCsvColumn(text, table, "ticket");
+		if (widened === null) return null;
+		next = widened;
+		table = parseCsv(next, { delimiter: table.delimiter });
+	}
+	const nl = text.includes("\r\n") ? "\r\n" : "\n";
+	const nameAt = registryNameColumn(table);
+	const row = table.header.map((h, idx) => {
+		const col = h.text.trim().toLowerCase();
+		if (idx === nameAt) return name;
+		if (col === "ticket" || col === "tickets") return key;
+		if (col === "status") return "found";
+		return "";
+	});
+	const prefix = next && !/\r?\n$/.test(next) ? nl : "";
+	return `${next}${prefix}${csvRow(row, table.delimiter)}${nl}`;
 }
 
 /** Appends a new row to a chosen CSV registry pre-filled with `key` in its Ticket column (adding a `ticket` column if missing). */
@@ -2395,7 +2598,7 @@ export async function addRegistryRowForTicket(key: string, initialItem?: string)
 	if (!state.workspace || root() !== startRoot) return;
 	const text = await current(reg.path);
 	if (text === null) return;
-	const table = parseCsv(text);
+	const table = parseCsv(text, { prefer: csvDelimiterForPath(reg.path) });
 	if (!table.header.length) return notify(`${reg.name} has no header row.`, "error");
 	const hasTicketCol = ticketColumn(table) >= 0;
 	let addTicketCol = false;
@@ -2407,43 +2610,26 @@ export async function addRegistryRowForTicket(key: string, initialItem?: string)
 		if (!state.workspace || root() !== startRoot) return;
 		addTicketCol = true;
 	}
-	const firstCol = table.header[0]!.text.trim() || "item";
-	const name = (await ask(`New ${firstCol} for ${key} in ${reg.name}`, initialItem ?? ""))?.trim();
-	if (!name) return;
-	if (!state.workspace || root() !== startRoot) return;
+	// The name is asked for by the column it goes in. A registry of tickets and nothing else has no such column: its
+	// new row is the ticket's key, and there is nothing to ask.
+	const nameAt = registryNameColumn(table);
+	let name = "";
+	if (nameAt >= 0) {
+		const nameCol = table.header[nameAt]!.text.trim() || "item";
+		const typed = (await ask(`New ${nameCol} for ${key} in ${reg.name}`, initialItem ?? ""))?.trim();
+		if (!typed) return;
+		name = typed;
+		if (!state.workspace || root() !== startRoot) return;
+	}
 	// Re-read current CSV after user prompts so edits made meanwhile are preserved.
 	const freshText = await current(reg.path);
 	if (freshText === null) return;
-	const freshTable = parseCsv(freshText);
-	if (!freshTable.header.length) return notify(`${reg.name} has no header row.`, "error");
-	const nl = freshText.includes("\r\n") ? "\r\n" : "\n";
-	let nextText = freshText;
-	if (addTicketCol && ticketColumn(freshTable) < 0) {
-		const headerVals = [...freshTable.header.map((h) => h.text), "ticket"];
-		const dataLines = freshTable.rows.map((r) => csvRow([...r.map((c) => c.text), ""], freshTable.delimiter));
-		const newRow = headerVals.map((h, idx) => {
-			const col = h.trim().toLowerCase();
-			if (idx === 0) return name;
-			if (col === "ticket") return key;
-			if (col === "status") return "found";
-			return "";
-		});
-		nextText = [csvRow(headerVals, freshTable.delimiter), ...dataLines, csvRow(newRow, freshTable.delimiter)].join(nl) + nl;
-	} else {
-		const row = freshTable.header.map((h, idx) => {
-			const col = h.text.trim().toLowerCase();
-			if (idx === 0) return name;
-			if (col === "ticket" || col === "tickets") return key;
-			if (col === "status") return "found";
-			return "";
-		});
-		const prefix = freshText && !/\r?\n$/.test(freshText) ? nl : "";
-		nextText = `${freshText}${prefix}${csvRow(row, freshTable.delimiter)}${nl}`;
-	}
+	const nextText = registryTextWithRow(freshText, reg.path, name, key, addTicketCol);
+	if (nextText === null) return notify(`${reg.name} has no header row.`, "error");
 	try {
 		await put(reg.path, nextText, true);
-		setState("treeVersion", (v) => v + 1);
-		notify(`Added “${name}” to ${reg.name} for ${key}.`);
+		setState((s) => { s.treeVersion += 1; });
+		notify(name ? `Added “${name}” to ${reg.name} for ${key}.` : `Added a row for ${key} to ${reg.name}.`);
 		await openFile(reg.path);
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
@@ -2497,10 +2683,10 @@ export async function trashTicket(file: DocFile): Promise<void> {
 	const isLayout2 = Boolean(file.ticketFolder && !isLayout1);
 	if (!file.ticketFolder) {
 		await (await import("./panels/Explorer")).trashFile(file.path);
-		const stillExists = await backend.read(file.path).then(() => true, () => false);
+		const stillExists = await fileExists(file.path);
 		if (!stillExists) {
 			await clearActiveIfMatching().catch(() => {});
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 		}
 		return;
 	}
@@ -2556,20 +2742,20 @@ export async function trashTicket(file: DocFile): Promise<void> {
 			primaryTrashed = true;
 			retargetScopedFolder(folder, null);
 			await clearActiveIfMatching().catch(() => {});
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Moved ${isLayout2 ? `${baseName(file.path)} and ` : ""}${relFolder}/ to the trash.`);
 		} else {
 			await backend.trash(file.path);
 			fileRemoved(file.path);
 			primaryTrashed = true;
 			await clearActiveIfMatching().catch(() => {});
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Moved ${relativeTo(startRoot, file.path)} to the trash.`);
 		}
 	} catch (e: any) {
 		if (primaryTrashed) {
 			await clearActiveIfMatching().catch(() => {});
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 		}
 		notify(String(e?.message ?? e), "error");
 	}
@@ -2669,7 +2855,7 @@ export async function renameTicket(file: DocFile): Promise<void> {
 			}
 		}
 	} catch (e: any) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(String(e?.message ?? e), "error");
 		return;
 	}
@@ -2772,7 +2958,7 @@ export async function renameTicket(file: DocFile): Promise<void> {
 			}
 		}
 	}
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	notify(`Renamed ${oldKey} to ${newKey}${refactored ? ` and updated ${refactored} referencing ${refactored === 1 ? "file" : "files"}` : ""}.`);
 }
 
@@ -2834,7 +3020,7 @@ export async function archiveTicket(file: DocFile): Promise<void> {
 			retargetScopedFolder(fromPrimary, toPrimary);
 		}
 	} catch (e: any) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(String(e?.message ?? e), "error");
 		return;
 	}
@@ -2848,7 +3034,7 @@ export async function archiveTicket(file: DocFile): Promise<void> {
 	if (file.ticket && state.settings.activeTicket?.trim().toLowerCase() === file.ticket.toLowerCase()) {
 		await saveSetting({ activeTicket: null }, "workspace").catch(() => {});
 	}
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	try {
 		const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
 		await followRename(fromPrimary, toPrimary, beforeDocs, coMoved);
@@ -2920,7 +3106,7 @@ export async function unarchiveTicket(file: DocFile): Promise<void> {
 			retargetScopedFolder(fromPrimary, toPrimary);
 		}
 	} catch (e: any) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(String(e?.message ?? e), "error");
 		return;
 	}
@@ -2930,7 +3116,7 @@ export async function unarchiveTicket(file: DocFile): Promise<void> {
 	if (picked === RESTORE_ACTIVE) {
 		await setStatus(movedTicketPath, "in progress");
 	}
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	try {
 		const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
 		await followRename(fromPrimary, toPrimary, beforeDocs, coMoved);
@@ -2938,6 +3124,32 @@ export async function unarchiveTicket(file: DocFile): Promise<void> {
 		notify(`Restored ${file.ticket ?? baseName(fromPrimary)}, but could not update links: ${e?.message ?? e}`, "error");
 	}
 	notify(`Restored ${file.ticket ?? baseName(fromPrimary)} to ${relTickets}/.`);
+}
+
+/**
+ * A template with the line it keeps for the writer's own words (`PROMPTS`) replaced by those words; null when it
+ * has no such line. Words saved into a new document are its own words: with the prompt left standing above them
+ * the document opened with "One sentence on what this explains." and was still listed as not written yet.
+ */
+function inPlaceOfPrompt(template: string, words: string): string | null {
+	const lines = template.split("\n");
+	const at = lines.findIndex((line) => Object.values(PROMPTS).some((prompt) => prompt === line.trim()));
+	if (at < 0) return null;
+	lines[at] = words;
+	return lines.join("\n");
+}
+
+/** A new reference note that holds a reply: the note's template with the reply, under its heading if it has one, where the prompt was. */
+export function referenceNoteHolding(template: string, body: string, heading?: string): string {
+	const words = `${heading ? `## ${heading}\n\n` : ""}${body.trim()}`;
+	return inPlaceOfPrompt(template, words) ?? `${template.replace(/\s*$/, "")}\n\n${words}\n`;
+}
+
+/** A new question that holds a reply: the reply is why it matters, where the prompt was, and the answer is left to be written. */
+export function questionHolding(template: string, body: string): string {
+	const upToAnswer = template.replace(/\n## Answer[\s\S]*$/, "");
+	const asked = inPlaceOfPrompt(upToAnswer, body.trim()) ?? `${upToAnswer.replace(/\s*$/, "")}\n\n${body.trim()}\n`;
+	return `${asked}\n## Answer\n\n`;
 }
 
 /**
@@ -2970,9 +3182,7 @@ export async function promoteToKnowledge(
 			const withT = withFrontMatter(template, "ticket", ticket);
 			template = withT ?? `---\ntitle: ${title}\nticket: ${ticket}\n---\n\n${template}`;
 		}
-		const final = bodyText
-			? `${template.split("## ")[0] ?? template}${input.heading ? `## ${input.heading}\n\n` : ""}${bodyText}\n`
-			: template;
+		const final = bodyText ? referenceNoteHolding(template, bodyText, input.heading) : template;
 		await start(dest, final, "knowledge");
 		return dest;
 	}
@@ -2980,9 +3190,7 @@ export async function promoteToKnowledge(
 	if (kind === "questions") {
 		const dest = joinPath(folder, `${slug(title)}.md`);
 		const template = questionTemplate({ title, date: today(), ticket });
-		const final = bodyText
-			? `${template.replace(/\n## Answer[\s\S]*$/, "")}\n${bodyText}\n\n## Answer\n\n`
-			: template;
+		const final = bodyText ? questionHolding(template, bodyText) : template;
 		await start(dest, final, "knowledge");
 		return dest;
 	}
@@ -3047,6 +3255,53 @@ export async function promoteToKnowledge(
 	return dest;
 }
 
+/**
+ * A new snippet that holds code: the template's opening comment with the snippet's name, then the code. The line
+ * that asks what the snippet is for and the statement the SQL template stands in for the code (`SELECT 1;`) are
+ * left out: with them, saved code ran `SELECT 1;` first and was listed as a snippet not written yet.
+ */
+export function snippetHolding(template: string, code: string): string {
+	const prompts: readonly string[] = Object.values(PROMPTS);
+	const opening = template.split("\n").filter((line) => !prompts.includes(line.replace(/^\s*(?:--\s*)?/, "").trim()) && line.trim() !== "SELECT 1;");
+	// An SSL comment ends at its semicolon: with the prompt's line gone it closes on the line of the name.
+	return `${opening.join("\n").replace(/\s*$/, "").replace(/\n;$/, ";")}\n\n${code}\n`;
+}
+
+/** Whether a text opens with the comment a template file says what it is by, as the templater reads it (`<!-- template: name="…" folder="…" -->`). */
+const hasTemplateHeader = (text: string) => parseTemplateFile(text, "", "", "").content.length < text.length;
+
+/**
+ * Whether a change to a document's text takes a template's header comment from the top of the file, where the
+ * templater looks for it. A template that loses its header there loses its name, its folder and its file name, and
+ * is listed under "Custom"; a note made from it starts with the comment.
+ */
+export const hidesTemplateHeader = (before: string, after: string) => hasTemplateHeader(before) && !hasTemplateHeader(after);
+
+/**
+ * A document that has no front matter, with a block that holds its title: what the Inspector's YAML button starts
+ * the raw box from. The block goes where a first property goes (`withFrontMatter`): at the top, or, in a template
+ * file, under its header comment, where the template's own text begins. The button wrote the block above that
+ * comment, which hid the header from the templater. Null when the block cannot be put where both readers find
+ * what they look for: front matter that is opened and never closed, or a header the templater reads and the front
+ * matter's reader does not take for one (written over several lines, or under a blank line).
+ */
+export function withTitleFrontMatter(text: string, title: string): string | null {
+	const next = withFrontMatter(text, "title", title);
+	return next === null || hidesTemplateHeader(text, next) ? null : next;
+}
+
+/**
+ * A new snippet's text: the template as it is, to be written, or with the code selected in the editor where the
+ * template's placeholder stands. Started from selected code, the snippet was the whole template with the code
+ * under it: the line that asks what the snippet is for stayed, and an SQL snippet ran the template's `SELECT 1;`
+ * before the code it was made to keep. Saving a reply's code as a snippet had the same and was mended; this is
+ * its twin, and both now ask `snippetHolding`.
+ */
+export function newSnippetText(title: string, language: "sql" | "ssl", selected: string | null): string {
+	const template = snippetTemplate({ title, language });
+	return selected === null ? template : snippetHolding(template, selected);
+}
+
 /** Saves a raw code snippet (e.g. from an Agent reply or Markdown code block) into `docs/knowledge/snippets/`. */
 export async function saveAsSnippet(code: string, langHint?: string): Promise<string | null> {
 	if (!ready()) return null;
@@ -3066,8 +3321,7 @@ export async function saveAsSnippet(code: string, langHint?: string): Promise<st
 	const folder = joinPath(areaFolder("knowledge"), "snippets");
 	const ext = lang === "sql" ? "sql" : "ssl";
 	const dest = joinPath(folder, `${slug(title)}.${ext}`);
-	const header = snippetTemplate({ title, language: lang });
-	await start(dest, `${header}\n${cleanCode}\n`, "knowledge");
+	await start(dest, snippetHolding(snippetTemplate({ title, language: lang }), cleanCode), "knowledge");
 	return dest;
 }
 
@@ -3124,7 +3378,7 @@ export async function appendNoteToTicket(key: string, noteMarkdown: string): Pro
 	const next = `${before}${sep}## Agent note (${today()})\n\n${noteMarkdown.trim()}\n`;
 	try {
 		await put(target.path, next, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Appended note to ${target.ticket ?? target.name}.`);
 		await openFile(target.path);
 	} catch (e: any) {
@@ -3275,7 +3529,7 @@ export async function generateSchemaDocFromSql(sqlPath?: string, targetDocPath?:
 			}
 			try {
 				await put(dest, nextText, true);
-				setState("treeVersion", (v) => v + 1);
+				setState((s) => { s.treeVersion += 1; });
 				notify(`Updated ${baseName(dest)} with ${missingObjs.length} new SQL ${missingObjs.length === 1 ? "object" : "objects"} from ${baseName(sourcePath)}.`);
 				await openFile(dest);
 			} catch (e: any) {
@@ -3346,7 +3600,7 @@ export async function generateSchemaDocFromSql(sqlPath?: string, targetDocPath?:
 		}
 		try {
 			await put(dest, nextText, true);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			void import("./docAudit").then((m) => m.refreshDocAudit());
 			const parts = [
 				merged.addedTables ? `${merged.addedTables} ${merged.addedTables === 1 ? "table" : "tables"} added` : "",
@@ -3465,7 +3719,7 @@ export async function generateSqlFromSchemaDoc(mdPath: string): Promise<void> {
 				if (updatedMd && updatedMd !== latestMd) await put(mdPath, updatedMd, true);
 			}
 		}
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		void import("./docAudit").then((m) => m.refreshDocAudit());
 		notify(`Generated ${baseName(dest)} (${finalGenerated.tables.join(", ")}) from ${baseName(mdPath)}.`);
 		await openFile(dest);
@@ -3483,7 +3737,7 @@ export async function unlinkSchemaDocSql(mdPath: string): Promise<void> {
 	if (next === cur) return;
 	try {
 		await put(mdPath, next, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		void import("./docAudit").then((m) => m.refreshDocAudit());
 		notify(`Unlinked SQL source from ${baseName(mdPath)}.`);
 	} catch (e: any) {
@@ -3572,10 +3826,11 @@ export async function linkSchemaDocToSql(mdPath: string): Promise<void> {
 	if (freshCur === null) return;
 	const relSql = relativeTo(startRoot, chosenPath).split("\\").join("/");
 	const next = withFrontMatter(freshCur, "source", relSql);
-	if (!next || next === freshCur) return;
+	if (next === null) return notify(`Could not set source: in ${baseName(mdPath)}: ${frontMatterRefusal(freshCur, "source")}`, "error");
+	if (next === freshCur) return;
 	try {
 		await put(mdPath, next, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		void import("./docAudit").then((m) => m.refreshDocAudit());
 		notify(`Linked ${baseName(mdPath)} to ${relSql}.`);
 	} catch (e: any) {
@@ -4088,7 +4343,7 @@ async function saveExportFile(
 			return false;
 		}
 		try {
-			const exists = await backend.read(dest).then(() => true, () => false);
+			const exists = await fileExists(dest);
 			if (exists) {
 				const OVERWRITE = "Overwrite file";
 				if ((await choose(`${relativeTo(startRoot, dest)} already exists. Overwrite it?`, [OVERWRITE], { danger: OVERWRITE })) !== OVERWRITE) {
@@ -4105,7 +4360,7 @@ async function saveExportFile(
 				await backend.write(dest, payload);
 				if (documents.get(openKey)) await revert(openKey);
 			});
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Saved export to ${relativeTo(startRoot, dest)}.`);
 			return true;
 		} catch (e: any) {
@@ -4411,7 +4666,7 @@ async function saveDocxExport(
 			...(options?.toc !== undefined ? { toc: options.toc } : {}),
 			headerFooter: options?.headerFooter ?? true,
 		});
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Saved Word document to ${relativeTo(state.workspace.root, res.path)}.`, "info", {
 			label: "Open externally",
 			run: () => void backend.openExternal(res.path),
@@ -5068,8 +5323,9 @@ export async function closeoutTicket(ticketPath: string, key: string): Promise<v
 			const bullet = `- ${today()} — ${summaryLine}`;
 			if (existingState === null) {
 				const fresh = `${stateTemplate(state.project!.name, today()).trimEnd()}\n\n## Completed\n\n${bullet}\n`;
-				await start(statePath, fresh);
-				stateUpdated = true;
+				// Only a record that was made is one. The close-out said "(recorded in STATE.md)" when the file could not
+				// be made (one of that name that cannot be read as text is there), under the notice that said so.
+				stateUpdated = await start(statePath, fresh);
 			} else {
 				const eol = existingState.includes("\r\n") ? "\r\n" : "\n";
 				const headingRe = /^(##\s+(?:Completed|Recent(?:ly)?\s+(?:completed|done|milestones)|Done|History)[^\r\n]*\r?\n+)/im;
@@ -5115,7 +5371,7 @@ export async function closeoutTicket(ticketPath: string, key: string): Promise<v
 		await saveSetting({ activeTicket: null }, "workspace").catch(() => {});
 	}
 
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	// Respect ADR 0031: never auto-rewrite INDEX.md catalogs silently — check fresh backend docs and offer manual trigger if stale.
 	const freshDocs = await backend.docs().catch(() => docs());
 	const staleInfo = staleCatalogSummary(freshDocs);
@@ -5128,8 +5384,11 @@ export async function closeoutTicket(ticketPath: string, key: string): Promise<v
 				: readmeUpdated
 					? " (updated README.md)"
 					: "";
+	// A record that was asked for and not made is said here too, where the close-out is summed up: why is in the
+	// notice raised when it failed.
+	const unrecorded = picked !== DONE_ONLY && !stateUpdated ? ` ${STATE_FILE} was not written.` : "";
 	notify(
-		`Closed out ${key}${detail}.`,
+		`Closed out ${key}${detail}.${unrecorded}`,
 		"info",
 		hasStale ? { label: "Update catalogs", run: () => void updateCatalogs() } : undefined,
 	);
@@ -5334,7 +5593,7 @@ export async function renameTagAcrossWorkspace(oldTag: string): Promise<void> {
 		}
 	}
 	if (changedCount) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Renamed #${cleanOld} to #${typed} in ${changedCount} ${changedCount === 1 ? "document" : "documents"}${failedCount ? ` (${failedCount} failed)` : ""}.`);
 	}
 }
@@ -5429,6 +5688,15 @@ export async function pickActiveTicket(): Promise<void> {
 }
 
 /**
+ * A heading's line with new words: its hashes, and its closing hashes where it has them, stay. Hashes at the
+ * line's end are closing ones only after a space, as the heading is read everywhere else: "## Notes on C#" ends
+ * in a sharp that is part of its words, and would otherwise be left behind after the new ones.
+ */
+export function renamedHeadingLine(rawLine: string, typed: string): string {
+	return rawLine.replace(/^([ \t]{0,3}#{1,6}[ \t]+).+?((?:[ \t]+#+)?[ \t]*)$/, (_, prefix: string, suffix: string) => `${prefix}${typed}${suffix}`);
+}
+
+/**
  * Renames a Markdown heading in the active document and rewrites `#anchor` / `[[Doc#Heading]]`
  * references across all workspace Markdown docs, confirming impact first (ADR 0009), and
  * refreshes any existing `<!-- toc -->` block in the source document.
@@ -5502,7 +5770,7 @@ export async function renameHeadingAcrossWorkspace(targetPath?: string, targetLi
 		const lineIdx = (match.line - 1) * 2;
 		const rawLine = lines[lineIdx];
 		if (rawLine === undefined) return null;
-		const updatedLine = rawLine.replace(/^([ \t]{0,3}#{1,6}[ \t]+).+?([ \t]*#*[ \t]*)$/, (_, prefix: string, suffix: string) => `${prefix}${typed}${suffix}`);
+		const updatedLine = renamedHeadingLine(rawLine, typed);
 		if (updatedLine === rawLine) return null;
 		lines[lineIdx] = updatedLine;
 		const renamed = lines.join("");
@@ -5603,7 +5871,7 @@ export async function renameHeadingAcrossWorkspace(targetPath?: string, targetLi
 		}
 	}
 	if (written) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(
 			writtenRefs > 0
 				? `Renamed heading to “${typed}” and updated ${writtenRefs} ${writtenRefs === 1 ? "reference" : "references"} across ${written} ${written === 1 ? "file" : "files"}.`
@@ -6264,7 +6532,7 @@ export async function importLegacyDoc(
 			if (!res) return;
 		}
 		await syncImportedBuffer(res.path);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		const imgNote = res.images.length ? ` (${res.images.length} ${res.images.length === 1 ? "image" : "images"} extracted)` : "";
 		notify(`Imported ${relativeTo(root(), res.path)} from ${res.kind.toUpperCase()}${imgNote}.`);
 		if (res.warnings?.length) {
@@ -6318,7 +6586,7 @@ export async function importDocxDrop(options: {
 			});
 		}
 		await syncImportedBuffer(res.path);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		const imgNote = res.images.length ? ` (${res.images.length} ${res.images.length === 1 ? "image" : "images"} extracted)` : "";
 		notify(`Imported ${relativeTo(root(), res.path)}${imgNote}.`);
 		if (res.warnings?.length) {
@@ -6423,6 +6691,7 @@ export async function onboardBrownfieldWorkspace(): Promise<void> {
 	}
 
 	const created: string[] = [];
+	let docsAreaLabel = areaSaid("docs");
 	try {
 		if (needsSetup) {
 			const made = await backend.setupProject();
@@ -6430,7 +6699,11 @@ export async function onboardBrownfieldWorkspace(): Promise<void> {
 			created.push(...made);
 			const refreshed = await backend.project();
 			if (!state.workspace || root() !== wsRoot) return;
-			setState("project", refreshed);
+			setState((s) => {
+				s.project = refreshed;
+			});
+			const refreshedDocsFolder = joinPath(wsRoot, ...(refreshed.docs ?? "docs").split(/[\\/]/).filter((part) => part && part !== "."));
+			docsAreaLabel = relativeTo(wsRoot, refreshedDocsFolder).split("\\").join("/");
 		}
 
 		if (!hasDbCsv && sqlFiles.length) {
@@ -6464,9 +6737,9 @@ export async function onboardBrownfieldWorkspace(): Promise<void> {
 		}
 
 		if (!state.workspace || root() !== wsRoot) return;
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		const legacyNote = legacyMdFiles.length
-			? ` Found ${legacyMdFiles.length} legacy Markdown ${legacyMdFiles.length === 1 ? "doc" : "docs"} outside ${areaSaid("docs")}/ (${legacyMdFiles.slice(0, 4).join(", ")}${legacyMdFiles.length > 4 ? "…" : ""}).`
+			? ` Found ${legacyMdFiles.length} legacy Markdown ${legacyMdFiles.length === 1 ? "doc" : "docs"} outside ${docsAreaLabel}/ (${legacyMdFiles.slice(0, 4).join(", ")}${legacyMdFiles.length > 4 ? "…" : ""}).`
 			: "";
 		notify(
 			created.length
@@ -6687,6 +6960,17 @@ export async function recordDocApproval(targetPath?: string): Promise<void> {
 	const freshBefore = await current(docPath);
 	if (freshBefore === null) return notify("Could not read the document.", "error");
 	const summary = changeControl ? `Approved (${changeControl})` : "Formal approval recorded";
+	// An approval is recorded whole or not at all: a field the document writes over several lines is not set from
+	// here, and a record that left it out would say less than the notice does.
+	const stamped = ["status", "approved-by", "approved-date", "effective-date", ...(nextVersion ? ["version"] : []), ...(changeControl ? ["change-control"] : []), ...(reviewDue ? ["review-due"] : [])];
+	const unset = stamped.filter((field) => withFrontMatter(freshBefore, field, "x") === null);
+	if (unset.length === stamped.length) {
+		// No field at all can be set: the block itself is not one (it opens and never closes).
+		return notify(`The approval was not recorded: the front matter of ${baseName(docPath)} cannot be written. Close its block with a line of three dashes and record the approval again.`, "error");
+	}
+	if (unset.length) {
+		return notify(`The approval was not recorded: ${unset.join(", ")} ${unset.length === 1 ? "is" : "are"} written over several lines in ${baseName(docPath)}. Put ${unset.length === 1 ? "it" : "each"} on one line and record the approval again.`, "error");
+	}
 	const after = applyApprovalToMarkdown(freshBefore, {
 		approver,
 		date: approvalDate,
@@ -6697,7 +6981,7 @@ export async function recordDocApproval(targetPath?: string): Promise<void> {
 	});
 	try {
 		await put(docPath, after, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Recorded approval on ${baseName(docPath)} (${nextVersion ? `v${nextVersion}, ` : ""}${approver}, ${approvalDate}).`);
 		await openFile(docPath);
 	} catch (e: any) {
@@ -7068,33 +7352,117 @@ function extractUncheckedChecklistLines(markdown: string): { line: number; text:
 	return out;
 }
 
-/** Removes selected 1-based checklist line numbers from a parent ticket and records a clean wikilink back to the new child ticket. */
-function splitParentTicketChecklist(
+/**
+ * A parent ticket with the picked checklist items (1-based line numbers) taken out and a wikilink to the child
+ * ticket they went to, and the items as the child is to have them. An item is its own line and the more-indented
+ * lines under it (sub-bullets, a wrapped line, a fenced block): they go with it. The text is edited where it
+ * changes and nowhere else: the items' lines come out, the link line goes in under `## Notes` (a new section at
+ * the end where there is none), and every other line stays as it was, blank lines inside a code fence included.
+ */
+export function splitParentTicketChecklist(
 	markdown: string,
 	removedLines: ReadonlySet<number>,
 	childKey: string,
 	childTitle: string,
-): string {
+): { text: string; moved: string[] } {
 	const eol = markdown.includes("\r\n") ? "\r\n" : "\n";
-	const lines = markdown.split(/\r?\n/);
-	const kept = lines.filter((_, idx) => !removedLines.has(idx + 1));
-	const linkLine = `- Split to [[${childKey}]]: ${childTitle}`;
-
-	// Place backlink under `## Notes` when present; otherwise append under a new `## Notes` section.
-	const notesIdx = kept.findIndex((ln) => /^[ \t]{0,3}##[ \t]+Notes\b/i.test(ln));
-	if (notesIdx >= 0) {
-		let insertAt = notesIdx + 1;
-		while (insertAt < kept.length && !/^[ \t]{0,3}#{1,2}[ \t]+/.test(kept[insertAt]!)) {
-			insertAt++;
-		}
-		while (insertAt > notesIdx + 1 && !kept[insertAt - 1]!.trim()) insertAt--;
-		if (insertAt === notesIdx + 1) kept.splice(insertAt, 0, "", linkLine);
-		else kept.splice(insertAt, 0, linkLine);
-	} else {
-		while (kept.length && !kept[kept.length - 1]!.trim()) kept.pop();
-		kept.push("", "## Notes", "", linkLine, "");
+	// Each line with where it starts and where the one after it does, so a line that is not moved keeps its own end.
+	const lines: { text: string; start: number; next: number }[] = [];
+	for (let at = 0; at <= markdown.length; ) {
+		const stop = markdown.indexOf("\n", at);
+		lines.push({ text: markdown.slice(at, stop < 0 ? markdown.length : stop).replace(/\r$/, ""), start: at, next: stop < 0 ? markdown.length : stop + 1 });
+		if (stop < 0) break;
+		at = stop + 1;
 	}
-	return kept.join(eol).replace(/(\r?\n){3,}/g, `${eol}${eol}`);
+	const blank = (idx: number) => !lines[idx]!.text.trim();
+	const width = (text: string) => /^[ \t]*/.exec(text)![0].replace(/\t/g, "    ").length;
+
+	// Each picked item with the lines under it. One picked under another that is picked goes as part of that one.
+	const items: [number, number][] = [];
+	for (const first of [...removedLines].map((n) => n - 1).sort((a, b) => a - b)) {
+		if (first < 0 || first >= lines.length || (items.length && first <= items.at(-1)![1])) continue;
+		const own = width(lines[first]!.text);
+		let end = first;
+		for (let j = first + 1; j < lines.length; j++) {
+			if (blank(j)) continue;
+			if (width(lines[j]!.text) <= own) break;
+			end = j;
+		}
+		items.push([first, end]);
+	}
+	const moved = items.map(([first, end]) => {
+		const lead = /^[ \t]*/.exec(lines[first]!.text)![0];
+		const block = lines.slice(first, end + 1).map((line) => (line.text.startsWith(lead) ? line.text.slice(lead.length) : line.text.trimStart()));
+		const box = /^[-*+][ \t]+\[ \][ \t]+(.+)$/.exec(block[0]!);
+		if (box) block[0] = `- [ ] ${box[1]!.trim()}`;
+		return block.join("\n");
+	});
+
+	// What comes out of the text. An item that stood alone between two blank lines takes the one after it along:
+	// the two would otherwise be left side by side where it was.
+	const gone = new Set<number>();
+	const cuts: { from: number; to: number; put: string }[] = [];
+	for (let i = 0; i < items.length; i++) {
+		const first = items[i]![0];
+		let end = items[i]![1];
+		while (i + 1 < items.length && items[i + 1]![0] === end + 1) end = items[++i]![1];
+		let before = first - 1;
+		while (before >= 0 && gone.has(before)) before--;
+		const after = end + 1;
+		if ((before < 0 || blank(before)) && after < lines.length && blank(after) && lines[after]!.next > lines[after]!.start) end = after;
+		for (let j = first; j <= end; j++) gone.add(j);
+		cuts.push({ from: lines[first]!.start, to: lines[end]!.next, put: "" });
+	}
+
+	// The link line goes in at one place: after the last line of `## Notes`, or in a new `## Notes` at the end.
+	// A line inside a code fence is no heading, so the section is not cut short at a `#` comment in a script.
+	const linkLine = `- Split to [[${childKey}]]: ${childTitle}`;
+	let notesIdx = -1;
+	let sectionEnd = lines.length;
+	let fenceChar = "";
+	let fenceLen = 0;
+	for (let i = frontMatter(markdown).lines; i < lines.length; i++) {
+		if (gone.has(i)) continue;
+		const raw = lines[i]!.text;
+		const fence = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(raw);
+		if (fence) {
+			if (!fenceChar) {
+				fenceChar = fence[1]![0]!;
+				fenceLen = fence[1]!.length;
+			} else if (fence[1]![0] === fenceChar && fence[1]!.length >= fenceLen && /^[ \t]*$/.test(raw.slice(fence[0].length))) {
+				fenceChar = "";
+				fenceLen = 0;
+			}
+			continue;
+		}
+		if (fenceChar) continue;
+		if (notesIdx < 0) {
+			if (/^[ \t]{0,3}##[ \t]+Notes\b/i.test(raw)) notesIdx = i;
+		} else if (/^[ \t]{0,3}#{1,2}[ \t]+/.test(raw)) {
+			sectionEnd = i;
+			break;
+		}
+	}
+	// The last line that stays and says something, in the section or in the whole text: the link goes in after it.
+	let last = (notesIdx < 0 ? lines.length : sectionEnd) - 1;
+	while (last > notesIdx && (gone.has(last) || blank(last))) last--;
+	// A last line with no line end of its own is given one first.
+	const at = last < 0 ? 0 : lines[last]!.next;
+	const open = last >= 0 && !markdown.slice(lines[last]!.start, at).endsWith("\n") ? eol : "";
+	if (notesIdx < 0) {
+		// A new section stands one blank line below the text: the one that is there already, where there is one.
+		let below = last + 1;
+		while (gone.has(below)) below++;
+		const spaced = last >= 0 && below < lines.length && blank(below) && lines[below]!.next > lines[below]!.start;
+		const from = spaced ? lines[below]!.next : at;
+		cuts.push({ from, to: from, put: `${open}${last < 0 || spaced ? "" : eol}## Notes${eol}${eol}${linkLine}${eol}` });
+	} else if (last === notesIdx) cuts.push({ from: at, to: at, put: `${open}${eol}${linkLine}${eol}` });
+	else cuts.push({ from: at, to: at, put: open ? `${open}${linkLine}` : `${linkLine}${eol}` });
+
+	// From the end backwards, so no edit moves the place of one before it; where the link goes in at the start of a cut, it is put in last.
+	let text = markdown;
+	for (const cut of cuts.sort((a, b) => b.from - a.from || b.to - a.to)) text = `${text.slice(0, cut.from)}${cut.put}${text.slice(cut.to)}`;
+	return { text, moved };
 }
 
 /** Suggests a deterministic next sub-ticket key (e.g. `LIMS-100-1` or `LIMS-101`). */
@@ -7182,7 +7550,19 @@ export async function splitTicketSubticket(targetPath?: string): Promise<void> {
 	if (gxpVal) childMd = withFrontMatter(childMd, "gxp-impact", gxpVal) ?? childMd;
 	for (const tag of many(fm.tags)) childMd = addToFrontMatterList(childMd, "tags", tag) ?? childMd;
 
-	const movedChecklist = pickedItems.map((it) => `- [ ] ${it.text}`).join("\n");
+	// The picked items as the ticket has them now. One that is found goes to the child with the lines under it and
+	// leaves the parent; one that is no longer there goes as the one line that was picked.
+	const freshUnchecked = extractUncheckedChecklistLines(freshSrcText);
+	const removedSet = new Set<number>();
+	const notFound: string[] = [];
+	for (const picked of pickedItems) {
+		const exact = freshUnchecked.find((u) => !removedSet.has(u.line) && u.line === picked.line && u.text === picked.text);
+		const fallback = exact ?? freshUnchecked.find((u) => !removedSet.has(u.line) && u.text === picked.text);
+		if (fallback) removedSet.add(fallback.line);
+		else notFound.push(`- [ ] ${picked.text}`);
+	}
+	const split = splitParentTicketChecklist(freshSrcText, removedSet, childKey, childTitle);
+	const movedChecklist = [...split.moved, ...notFound].join("\n");
 	const donePlaceholder = /^## What done looks like\r?\n\r?\n- \[ \] What must be true when this is done:[^\r\n]*/m;
 	if (donePlaceholder.test(childMd)) {
 		childMd = childMd.replace(donePlaceholder, () => `## What done looks like\n\n${movedChecklist}`);
@@ -7195,16 +7575,8 @@ export async function splitTicketSubticket(targetPath?: string): Promise<void> {
 	try {
 		await backend.create(childDest, "file");
 		await backend.write(childDest, childMd);
-		const freshUnchecked = extractUncheckedChecklistLines(freshSrcText);
-		const removedSet = new Set<number>();
-		for (const picked of pickedItems) {
-			const exact = freshUnchecked.find((u) => !removedSet.has(u.line) && u.line === picked.line && u.text === picked.text);
-			const fallback = exact ?? freshUnchecked.find((u) => !removedSet.has(u.line) && u.text === picked.text);
-			if (fallback) removedSet.add(fallback.line);
-		}
-		const nextParent = splitParentTicketChecklist(freshSrcText, removedSet, childKey, childTitle);
-		await put(srcDoc.path, nextParent, true);
-		setState("treeVersion", (v) => v + 1);
+		await put(srcDoc.path, split.text, true);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Split ${pickedItems.length} ${pickedItems.length === 1 ? "item" : "items"} from ${parentKey} into ${childKey}.`);
 		await openFile(childDest);
 	} catch (e: any) {
@@ -7231,7 +7603,7 @@ export async function addDatabaseRegistryRow(objectName: string, sourcePath: str
 		const fresh = `${csvRow(dbKind.columns)}\n${csvRow([cleanObj, "table", relSrc, "", "found", citeNote])}\n`;
 		try {
 			await put(dbPath, fresh, false);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Created database.csv and added ${cleanObj}.`);
 		} catch (e: any) {
 			notify(String(e?.message ?? e), "error");
@@ -7267,7 +7639,7 @@ export async function addDatabaseRegistryRow(objectName: string, sourcePath: str
 	const nextText = `${existingText}${prefix}${csvRow(newRow, table.delimiter)}${nl}`;
 	try {
 		await put(dbPath, nextText, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Added ${cleanObj} to database.csv (${relSrc}).`);
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");

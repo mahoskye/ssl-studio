@@ -6,7 +6,7 @@ import { readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createFrameReader, frame } from "../src/bun/frames";
-import { findLsp } from "../src/bun/tools";
+import { findLsp, lspCommand, verbatim } from "../src/bun/tools";
 
 const compareCodepoint = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -36,10 +36,10 @@ export async function recordStructure(opts: { rootDir?: string; lspCommand?: str
 	if (!cmd) {
 		const lsp = await findLsp();
 		if (!lsp.path) throw new Error(lsp.message);
-		cmd = [lsp.path, "--stdio"];
+		cmd = lspCommand(lsp.path, ["--stdio"]);
 		version = lsp.version;
 	}
-	const proc = Bun.spawn(cmd, { stdin: "pipe", stdout: "pipe" });
+	const proc = Bun.spawn(cmd, { stdin: "pipe", stdout: "pipe", windowsVerbatimArguments: verbatim(cmd) });
 	const pending = new Map<number, { resolve: (v: any) => void; reject: (err: Error) => void }>();
 	let closing = false;
 	let exitedError: Error | null = null;

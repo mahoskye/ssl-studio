@@ -47,14 +47,14 @@ export function Finder(props: {
 				type="search"
 				role="combobox"
 				aria-label={props.label}
-				aria-expanded={found().length > 0}
+				aria-expanded={found().length > 0 ? "true" : "false"}
 				aria-controls={listId}
 				aria-autocomplete="list"
 				aria-activedescendant={found().length ? `${listId}-${here()}` : undefined}
 				title={props.title}
 				placeholder={props.placeholder}
 				autocomplete="off"
-				spellcheck={false}
+				spellcheck="false"
 				value={text()}
 				onInput={(e) => (setText(e.currentTarget.value), setAt(0))}
 				onBlur={() => setText("")}
@@ -87,7 +87,7 @@ export function Finder(props: {
 					<For each={found()} fallback={<li class="none">{props.none(text().trim())}</li>}>
 						{(c, i) => (
 							// The pointer chooses on its way down, before the box loses the keyboard and the list goes.
-							<li id={`${listId}-${i()}`} role="option" aria-selected={i() === here()} classList={{ on: i() === here() }} onMouseDown={(e) => (e.preventDefault(), choose(c.id))} onMouseEnter={() => setAt(i())}>
+							<li id={`${listId}-${i()}`} role="option" aria-selected={i() === here() ? "true" : "false"} class={{ on: i() === here() }} onMouseDown={(e) => (e.preventDefault(), choose(c.id))} onMouseEnter={() => setAt(i())}>
 								<span class="label">{c.name}</span>
 								<span class="hint">{c.where}</span>
 							</li>

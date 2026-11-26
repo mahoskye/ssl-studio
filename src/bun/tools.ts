@@ -1,16 +1,16 @@
 // Finding the external tools: starlims-lsp (pinned, ADR 0003) and opencode
 // (a supported range, ADR 0004).
-import { existsSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import type { ToolStatus } from "../shared/protocol";
 
-export const LSP_PIN = "0.31.0";
+export const LSP_PIN = "0.32.0";
 export const OPENCODE_RANGE = { min: "2.2.5", below: "2.4.0" };
 
 async function run(cmd: string[]): Promise<string | null> {
 	try {
-		const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" });
+		const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore", windowsVerbatimArguments: verbatim(cmd) });
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let killTimer: ReturnType<typeof setTimeout> | undefined;
 		void proc.exited.finally(() => {
@@ -90,17 +90,61 @@ export function lspCandidates(configured?: string): string[] {
 	].filter((p): p is string => Boolean(p));
 }
 
+/** What cmd.exe reads as more than part of a word when it stands outside quotes: the space that ends the word, and cmd's own signs. */
+const CMD_SPECIAL = /[\s&|<>()^,;="]/;
+
+/** One word of a cmd.exe command line: in quotes where cmd would read something into it. A quote in it is doubled, so every sign stays between two quotes. */
+const cmdWord = (word: string) => (word !== "" && !CMD_SPECIAL.test(word) ? word : `"${word.replace(/"/g, '""')}"`);
+
+/**
+ * The command that runs a `.cmd` or `.bat` file with these arguments. Windows starts one only through cmd.exe, and
+ * with `/s` cmd takes the first and the last quote off what follows `/c`. Each word used to be given to cmd on its
+ * own, so a path with a space in it reached cmd as `"C:\Users\First Last\opencode.cmd" --version`, lost its two
+ * quotes, and `C:\Users\First` was run: the npm shim of opencode in such a home folder was never found.
+ *
+ * So where a word needs quotes, the whole line is written here as cmd is to read it, in a pair of quotes of its own
+ * for `/s` to take off (`cmd.exe /d /s /c ""C:\a b\x.cmd" --version"`), and the process must be started with
+ * that line as it is written: `windowsVerbatimArguments: verbatim(command)`. Bun's own quoting would put a
+ * backslash before each quote. Arguments added after such a command go after its last quote and must be plain words.
+ * Where no word needs quotes the command is the words, as before, and is the same line however it is started.
+ *
+ * A quote cannot be in a Windows path and is dropped from it. A `%NAME%` is still filled in by cmd, quotes or not.
+ */
+export function shimCommand(path: string, args: string[] = []): string[] {
+	const words = [path.replace(/"/g, ""), ...args];
+	if (!words.some((word) => word === "" || CMD_SPECIAL.test(word))) return ["cmd.exe", "/d", "/s", "/c", ...words];
+	return ["cmd.exe", "/d", "/s", "/c", `"${words.map(cmdWord).join(" ")}"`];
+}
+
+/** True for a command that is a line written out for cmd.exe (`shimCommand`): on Windows it is passed as written. */
+export function verbatim(command: readonly string[], platform: string = process.platform): boolean {
+	return platform === "win32" && /^cmd(?:\.exe)?$/i.test(command[0] ?? "") && command[3] === "/c" && Boolean(command[4]?.startsWith('"'));
+}
+
 /** Builds the argv to invoke `starlims-lsp`, wrapping `.cmd`/`.bat` shims via `cmd.exe` on Windows. */
-export function lspCommand(path: string, args: string[]): string[] {
-	if (process.platform === "win32" && /\.(cmd|bat)$/i.test(path)) {
-		return ["cmd.exe", "/d", "/s", "/c", path, ...args];
-	}
+export function lspCommand(path: string, args: string[], platform: string = process.platform): string[] {
+	if (platform === "win32" && /\.(cmd|bat)$/i.test(path)) return shimCommand(path, args);
 	return [path, ...args];
+}
+
+/**
+ * Whether what is at `path` is a program this user can start: a file, and outside Windows one with its execute bit.
+ * A candidate that is not is passed over before anything is started. That it was passed over at all used to rest on
+ * the start failing: a vendor/starlims-lsp left without the bit by a download that broke off was tried each time.
+ */
+export function runnable(path: string, platform: string = process.platform): boolean {
+	try {
+		if (!statSync(path).isFile()) return false;
+		if (platform !== "win32") accessSync(path, constants.X_OK);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 export async function findLsp(configured?: string): Promise<ToolStatus> {
 	for (const path of lspCandidates(configured)) {
-		if (!existsSync(path)) continue;
+		if (!runnable(path)) continue;
 		const out = await run(lspCommand(path, ["--version"]));
 		// A developer build says "version dev": usable, with the pin warning.
 		const version = out && /starlims-lsp version (\S+)/.exec(out)?.[1];
@@ -120,15 +164,15 @@ export async function findLsp(configured?: string): Promise<ToolStatus> {
  * a process cannot be spawned from directly; the shim sits beside the real
  * binary's package, so use that, else go through cmd.exe.
  */
-export function opencodeCommand(): string[] {
+export function opencodeCommand(args: string[] = []): string[] {
 	const found = Bun.which("opencode");
-	if (!found || process.platform !== "win32" || !/\.(cmd|bat)$/i.test(found)) return [found ?? "opencode"];
+	if (!found || process.platform !== "win32" || !/\.(cmd|bat)$/i.test(found)) return [found ?? "opencode", ...args];
 	const exe = join(dirname(found), "node_modules", "@opencode", "cli", "bin", "opencode.exe");
-	return existsSync(exe) ? [exe] : ["cmd.exe", "/d", "/s", "/c", found];
+	return existsSync(exe) ? [exe, ...args] : shimCommand(found, args);
 }
 
 export async function findOpencode(): Promise<ToolStatus> {
-	const out = await run([...opencodeCommand(), "--version"]);
+	const out = await run(opencodeCommand(["--version"]));
 	const version = out && /(\d+\.\d+\.\d+)/.exec(out)?.[1];
 	if (!version) return { ok: false, message: "opencode not found on PATH: the Agent panel is off." };
 	const inRange = compareVersions(version, OPENCODE_RANGE.min) >= 0 && compareVersions(version, OPENCODE_RANGE.below) < 0;

@@ -19,6 +19,8 @@ if (typeof (globalThis as any).localStorage === "undefined") {
 if (typeof (globalThis as any).window === "undefined") {
 	(globalThis as any).window = {
 		Error,
+		Map,
+		Set,
 		innerWidth: 1280,
 		innerHeight: 900,
 		addEventListener() {},
@@ -26,8 +28,10 @@ if (typeof (globalThis as any).window === "undefined") {
 		location: { href: "http://localhost/", protocol: "http:", host: "127.0.0.1:5190" },
 		matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
 	};
-} else if (!(globalThis as any).window.Error) {
-	(globalThis as any).window.Error = Error;
+} else {
+	if (!(globalThis as any).window.Error) (globalThis as any).window.Error = Error;
+	if (!(globalThis as any).window.Map) (globalThis as any).window.Map = Map;
+	if (!(globalThis as any).window.Set) (globalThis as any).window.Set = Set;
 }
 if (typeof (globalThis as any).document === "undefined") {
 	(globalThis as any).document = {
@@ -447,7 +451,7 @@ describe("Source invariants across TableView.tsx, CsvFormatDialog.tsx, and table
 	test("Repair 5: virtualization beyond excludes pinnedRow and height measurement tracks editing() & hiddenCols()", () => {
 		expect(tvSrc).toContain("const focusRow = ed && !ed.ghost ? ed.row : null;");
 		expect(tvSrc).not.toContain("const focusRow = ed && !ed.ghost ? ed.row : pinnedRow();");
-		expect(tvSrc).toMatch(/drawnEntries\(\);\s*colWidths\(\);\s*hiddenCols\(\);\s*editing\(\);\s*text\(\);/);
+		expect(tvSrc).toMatch(/\[drawnEntries\(\),\s*colWidths\(\),\s*hiddenCols\(\),\s*editing\(\),\s*text\(\)\]/);
 	});
 
 	test("Repair 6: split-view Escape listener and clearCellSelection stay scoped to rootEl", () => {
@@ -458,8 +462,9 @@ describe("Source invariants across TableView.tsx, CsvFormatDialog.tsx, and table
 	test("Repair 7: runCodeCheck distinguishes explicit user cancellation, aborts workers in catch, and clears on workspace switch", () => {
 		expect(tvSrc).toContain("let userCancelledRunId = 0;");
 		expect(tvSrc).toContain("const isUserCancelled = !disposed && userCancelledRunId === runId;");
-		expect(tvSrc).toMatch(/catch \(e: any\) \{\s*cancelled = true;\s*if \(runId === checkRunId\) \{\s*checkRunId\+\+;/);
-		expect(tvSrc).toMatch(/on\(\[\(\) => props\.path, \(\) => state\.workspace\?\.root\], \(\) => \{\s*clearCodeCheck\(\);/);
+		// The scans run one after another now (`scanValuesInTurn`): a scan that fails ends the run, and there are no other workers to stop.
+		expect(tvSrc).toMatch(/catch \(e: any\) \{\s*if \(runId === checkRunId\) \{\s*checkRunId\+\+;/);
+		expect(tvSrc).toMatch(/\[\s*props\.path,\s*state\.workspace\?\.root[\s\S]*?clearCodeCheck\(\);/);
 	});
 
 	test("Repair 10: addColumnInteractive cancel, replaceAll via applyCellUpdates, check-cell targetRow, and headerless TSV copy", () => {

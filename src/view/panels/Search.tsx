@@ -5,7 +5,8 @@
 // one expression (src/shared/searchPattern.ts), so they agree.
 import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
-import { createEffect, createMemo, createResource, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createAsyncQuery } from "../asyncQuery";
 import { monaco } from "../editor/monaco";
 import { symbolPath } from "../editor/regions";
 import { session } from "../lsp/session";
@@ -15,11 +16,25 @@ import { choose, quickPick } from "../dialogs";
 import { activePath, canonical, documents, fileChangedOnDisk, isUntitled, notify, openFile, save, saveAll, setState, state } from "../state";
 import { baseName, isInside, relativeTo } from "../../shared/paths";
 import { parseCsv } from "../../shared/csv";
-import { createFileFilter } from "../../shared/fileGlob";
+import { createFileFilter, folderPattern } from "../../shared/fileGlob";
 import { frontMatter, HEADING, many, one, plainMarkdown } from "../../shared/frontMatter";
-import { overlapsProtectedSpan, planLineBreadcrumb, protectedMarkdownSpans, replaceSafeInText, type TextSpan } from "../../shared/menuBar";
+import { overlapsProtectedSpan, planLineBreadcrumb, protectedMarkdownSpans, type TextSpan } from "../../shared/menuBar";
 import { DOC_FOLDERS, isCatalog, toneOf } from "../../shared/projectDocs";
-import { excerptForMatch, matchesOn, REGEX_MAX_LINE_LENGTH, SEARCH_LIMIT, SEARCH_LINE_WINDOW, searchPattern, type SearchOptions } from "../../shared/searchPattern";
+import {
+	becomesFound,
+	changedSinceSearch,
+	folderScope,
+	openBatches,
+	replacePreviewTitle,
+	replaceQuestion,
+	replaceSearched,
+	searchBoxMoved,
+	SEARCH_LIMIT,
+	SEARCH_LINE_WINDOW,
+	type OpenText,
+	type ReplaceEdit,
+	type SearchOptions,
+} from "../../shared/searchPattern";
 import { outline } from "../../shared/outline";
 import { workspaceTags } from "../../shared/tags";
 import { codeMatchesRef, descendantTickets, scriptsForTicket, ticketForFile, ticketWork } from "../../shared/workContext";
@@ -34,7 +49,11 @@ import {
 	markedColumns,
 	parseDocFilterTokens,
 	resolveSearchQuery,
+	searchShortfall,
 	segments,
+	shortfallBlocksReplace,
+	shortfallCount,
+	timedOutEmpty,
 	type LineHit,
 	type ParsedDocFilters,
 	type SearchScopeKind,
@@ -54,11 +73,15 @@ const [safeDocs, setSafeDocs] = createSignal(true);
 const [include, setInclude] = createSignal("");
 const [exclude, setExclude] = createSignal("");
 
-/** Shows the Search panel scoped to a specific folder (relative to workspace root). */
+/**
+ * Shows the Search panel scoped to a specific folder (relative to workspace root). Both boxes are set, and shown:
+ * what a scope chosen before was leaving out (the Code scope leaves out the documents) would go on being left out.
+ */
 export function findInFolder(relFolder: string) {
-	const cleaned = relFolder.replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
+	const scope = folderScope(relFolder);
 	setTicketScopeKey(null);
-	setInclude(cleaned ? `${cleaned}/**` : "");
+	setInclude(scope.include);
+	setExclude(scope.exclude);
 	setChoosing(true);
 	showPanel("search");
 }
@@ -69,48 +92,50 @@ export function showReplace() {
 	showPanel("search");
 }
 
-/** Replaces every match in an open file's text (optionally restricted to `allowedLines` and skipping `protectedSpans`), as one undoable step. */
-export function replaceInModel(
-	model: monaco.editor.ITextModel,
-	pattern: RegExp,
-	with_: string,
-	regex: boolean,
-	allowedLines?: ReadonlySet<number>,
-	protectedSpans?: ReadonlyMap<number, TextSpan[]>,
-): number {
-	const edits: monaco.editor.IIdentifiedSingleEditOperation[] = [];
-	for (let line = 1; line <= model.getLineCount(); line++) {
-		if (allowedLines && !allowedLines.has(line)) continue;
-		const content = model.getLineContent(line);
-		if (regex && content.length > REGEX_MAX_LINE_LENGTH) continue;
-		const spans = protectedSpans?.get(line);
-		for (const match of matchesOn(content, pattern, with_, regex)) {
-			if (overlapsProtectedSpan(match.column, match.length, spans)) continue;
-			edits.push({ range: new monaco.Range(line, match.column, line, match.column + match.length), text: match.becomes });
-		}
-	}
+// The expression that is searched for is never run in the window. A regular expression can take minutes over one
+// line ("(a+)+$" on a line of thirty letters), nothing can stop it once it runs, and while it runs here the
+// window answers to nothing. It used to be run here for an open file with unsaved changes (to search it), for
+// each row of the list (to show what a match would become), and for a replace in an open file. The backend runs
+// it now, under its time budget, for the open files too (`backend.searchScan` with their texts); and what a
+// replace does here is worked out from what that search found: where each match and its groups lie.
+
+/** Makes the edits of a replace in an open file's text, as one undoable step. Says how many. */
+export function replaceInModel(model: monaco.editor.ITextModel, edits: readonly ReplaceEdit[]): number {
 	if (!edits.length) return 0;
 	model.pushStackElement();
-	model.pushEditOperations([], edits, () => null);
+	model.pushEditOperations(
+		[],
+		edits.map((edit) => ({ range: new monaco.Range(edit.line, edit.column, edit.line, edit.column + edit.length), text: edit.text })),
+		() => null,
+	);
 	model.pushStackElement();
 	return edits.length;
 }
 
-/** Scans a single in-memory text buffer using the exact same `searchPattern` + `matchesOn` + windowing walk as backend search. */
-export function scanTextBuffer(path: string, text: string, pattern: RegExp, isRegex: boolean, limit: number): SearchHit[] {
-	const out: SearchHit[] = [];
-	const lines = text.split(/\r?\n/);
-	for (let i = 0; i < lines.length && out.length < limit; i++) {
-		const line = lines[i]!;
-		if (isRegex && line.length > REGEX_MAX_LINE_LENGTH) continue;
-		const found = matchesOn(line, pattern, "", isRegex, limit - out.length);
-		for (const m of found) {
-			const { text: excerpt, textOffset } = excerptForMatch(line, m.column, m.length);
-			out.push({ path, line: i + 1, column: m.column, length: m.length, text: excerpt, ...(textOffset > 0 ? { textOffset } : {}) });
-			if (out.length >= limit) break;
-		}
+/**
+ * What a replace makes of one file's text, from the matches listed in it and under the Safe Docs guards: the
+ * protected parts of a Markdown document are left and counted, and a `.plan.json` that would no longer be JSON is
+ * left as it is. Null when the text is not the one that was searched (`replaceSearched`). Every replace worked
+ * out in the window comes through here: the preview, the check of a plan, and the replace in an open file.
+ */
+function replaceGuarded(path: string, text: string, mark: string | undefined, listed: readonly SearchHit[] | undefined, with_: string, regex: boolean, protect: boolean, maxSamples: number) {
+	const spans = protect && /\.(md|markdown)$/i.test(path) ? protectedMarkdownSpans(text) : null;
+	return replaceSearched(text, mark, listed, with_, regex, {
+		skip: spans ? (match) => overlapsProtectedSpan(match.column, match.length, spans.get(match.line)) : undefined,
+		json: protect && /\.plan\.json$/i.test(path),
+		maxSamples,
+	});
+}
+
+/** The hits of each file, by the path the search gave it. */
+function hitsByPath(hits: readonly SearchHit[]): Map<string, SearchHit[]> {
+	const map = new Map<string, SearchHit[]>();
+	for (const hit of hits) {
+		const list = map.get(hit.path);
+		if (list) list.push(hit);
+		else map.set(hit.path, [hit]);
 	}
-	return out;
+	return map;
 }
 
 const [request, setRequest] = createSignal<({ query: string } & SearchOptions) | null>(null);
@@ -124,6 +149,12 @@ export function searchFor(query: string, options: SearchOptions = {}) {
 // patterns, so that coming back to it is coming back to the same search.
 const [typed, setTyped] = createSignal("");
 const [hits, setHits] = createSignal<SearchHit[]>([]);
+/**
+ * For each file with a hit, the mark of its text as it was searched (`textMark`). A replace is made in a file
+ * only while its text still has that mark: the hits are places in the text that was searched, and so are the
+ * rows that were dismissed.
+ */
+const [marks, setMarks] = createSignal<Record<string, string>>({});
 const [regex, setRegex] = createSignal(false);
 const [caseSensitive, setCaseSensitive] = createSignal(false);
 const [wholeWord, setWholeWord] = createSignal(false);
@@ -139,6 +170,8 @@ const [docFilterNote, setDocFilterNote] = createSignal("");
 const [lineFiltered, setLineFiltered] = createSignal(false);
 /** True when backend/dirty search hit `SEARCH_LIMIT` before post-filtering or deduping. */
 const [truncated, setTruncated] = createSignal(false);
+/** True when the backend's scan ran out of time: what is listed is only what was found in the files it got to. */
+const [timedOut, setTimedOut] = createSignal(false);
 /** Active ticket key when scoped to an active ticket via explicit `paths` allowlist. */
 const [ticketScopeKey, setTicketScopeKey] = createSignal<string | null>(null);
 /** Re-entrancy guard for Replace All and Replace Preview flows. */
@@ -158,6 +191,7 @@ function resetSearchState() {
 	replaceBusy = false;
 	setReplaceActive(false);
 	setHits([]);
+	setMarks({});
 	setStatus("idle");
 	setAsked("");
 	setEffectiveAsked("");
@@ -166,6 +200,7 @@ function resetSearchState() {
 	setDocFilterNote("");
 	setLineFiltered(false);
 	setTruncated(false);
+	setTimedOut(false);
 	setDismissedFiles(new Set<string>());
 	setDismissedLines(new Set<string>());
 	setTicketScopeKey(null);
@@ -377,52 +412,64 @@ function csvBreadcrumbForLine(text: string, lineNumber: number, matchCol: number
 	return "";
 }
 
+// The project's folders as patterns, said as any folder to search in is (folderPattern): a folder's name is not a
+// pattern, and one that opens with a dot keeps it. "" where the folder is the workspace's own.
+const docsGlob = () => folderPattern(state.project?.docs ?? "docs");
+const plansGlob = () => folderPattern(state.project?.plans ?? "design");
+const schemaGlob = () => folderPattern(state.project?.schema ?? "schema");
+/**
+ * What a search leaves out to look in code only: the Code scope's own words. The other panels that search the code
+ * (a document's "Find in code", a schema name's uses) ask for it here, so that the search they start is the Code
+ * scope and its chip lights; each used to write the list for itself, and the lists had come apart.
+ */
+export const codeExcludeGlob = () =>
+	[
+		docsGlob() || `${DOC_FOLDERS.tickets}/**, ${DOC_FOLDERS.specs}/**, ${DOC_FOLDERS.knowledge}/**, ${DOC_FOLDERS.registries}/**`,
+		plansGlob(),
+		schemaGlob(),
+		"README.md",
+		"AGENTS.md",
+		"**/INDEX.md",
+	]
+		.filter(Boolean)
+		.join(", ");
+const docsIncludeGlob = () =>
+	[
+		docsGlob() || `${DOC_FOLDERS.tickets}/**, ${DOC_FOLDERS.specs}/**, ${DOC_FOLDERS.knowledge}/**, ${DOC_FOLDERS.registries}/**`,
+		plansGlob(),
+		schemaGlob(),
+		"*.md",
+	]
+		.filter(Boolean)
+		.join(", ");
+/** What a search looks in to look in the project's documents only, or every Markdown file where the documents are the workspace's own folder. */
+export const docsFolderGlob = () => docsGlob() || "**/*.md";
+
 export function Search() {
 	let input!: HTMLInputElement;
 	let historyIdx = -1;
 	let historyDraft = "";
 
-	createEffect(() => {
-		const currentRoot = state.workspace?.root ?? "";
-		if (lastWorkspaceRoot === undefined) {
-			lastWorkspaceRoot = currentRoot;
-			return;
-		}
-		if (currentRoot !== lastWorkspaceRoot) {
-			lastWorkspaceRoot = currentRoot;
-			resetSearchState();
-		}
-	});
+	const workspaceRoot = createMemo(() => state.workspace?.root ?? "");
+	createEffect(
+		() => workspaceRoot(),
+		(currentRoot) => {
+			if (lastWorkspaceRoot === undefined) {
+				lastWorkspaceRoot = currentRoot;
+				return;
+			}
+			if (currentRoot !== lastWorkspaceRoot) {
+				lastWorkspaceRoot = currentRoot;
+				resetSearchState();
+			}
+		},
+	);
 
-	const [workspaceFiles] = createResource(
+	const [workspaceFiles] = createAsyncQuery(
 		() => (state.workspace?.root ? `${state.workspace.root}#${state.treeVersion}` : false),
 		() => backend.files().catch(() => [] as string[]),
 	);
 
-	const cleanDir = (dir?: string) => (dir ?? "").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
-	const docsRel = () => cleanDir(state.project?.docs ?? "docs");
-	const plansRel = () => cleanDir(state.project?.plans ?? "design");
-	const schemaRel = () => cleanDir(state.project?.schema ?? "schema");
-	const codeExcludeGlob = () =>
-		[
-			docsRel() ? `${docsRel()}/**` : `${DOC_FOLDERS.tickets}/**, ${DOC_FOLDERS.specs}/**, ${DOC_FOLDERS.knowledge}/**, ${DOC_FOLDERS.registries}/**`,
-			plansRel() ? `${plansRel()}/**` : "",
-			schemaRel() ? `${schemaRel()}/**` : "",
-			"README.md",
-			"AGENTS.md",
-			"**/INDEX.md",
-		]
-			.filter(Boolean)
-			.join(", ");
-	const docsIncludeGlob = () =>
-		[
-			docsRel() ? `${docsRel()}/**` : `${DOC_FOLDERS.tickets}/**, ${DOC_FOLDERS.specs}/**, ${DOC_FOLDERS.knowledge}/**, ${DOC_FOLDERS.registries}/**`,
-			plansRel() ? `${plansRel()}/**` : "",
-			schemaRel() ? `${schemaRel()}/**` : "",
-			"*.md",
-		]
-			.filter(Boolean)
-			.join(", ");
 	const scopeActive = (inc: string, exc = "") =>
 		!ticketScopeKey() && (choosing() ? include().trim() === inc && exclude().trim() === exc : !inc && !exc);
 	const inCodeScope = () => scopeActive("", codeExcludeGlob());
@@ -484,17 +531,31 @@ export function Search() {
 		};
 	});
 
-	const run = async () => {
-		const rawQuery = input.value;
+	type RunOverrides = {
+		query?: string;
+		regex?: boolean;
+		caseSensitive?: boolean;
+		wholeWord?: boolean;
+		choosing?: boolean;
+		include?: string;
+		exclude?: string;
+		ticketScopeKey?: string | null;
+	};
+
+	const run = async (overrides: RunOverrides = {}) => {
+		const rawQuery = overrides.query ?? input.value;
 		const mine = ++latest;
 		const startRoot = state.workspace?.root;
 		setDocFilterNote("");
 		setLineFiltered(false);
 		setTruncated(false);
+		setTimedOut(false);
 		setDismissedFiles(new Set<string>());
 		setDismissedLines(new Set<string>());
 		if (!rawQuery) {
 			setHits([]);
+			setAsked("");
+			setEffectiveAsked("");
 			setStatus("idle");
 			return;
 		}
@@ -503,13 +564,23 @@ export function Search() {
 		setStatus("busy");
 		setAsked(rawQuery);
 
-		const baseInclude = choosing() ? include() : "";
-		const baseExclude = choosing() ? exclude() : "";
+		const curChoosing = overrides.choosing ?? choosing();
+		const curInclude = overrides.include ?? include();
+		const curExclude = overrides.exclude ?? exclude();
+		const curTicketScopeKey = overrides.ticketScopeKey !== undefined ? overrides.ticketScopeKey : ticketScopeKey();
+		const curRegex = overrides.regex ?? regex();
+		const curCaseSensitive = overrides.caseSensitive ?? caseSensitive();
+		const curWholeWord = overrides.wholeWord ?? wholeWord();
+
+		const baseInclude = curChoosing ? curInclude : "";
+		const baseExclude = curChoosing ? curExclude : "";
 		const root = startRoot;
-		const activeTicket = ticketScopeKey() && activeTicketScope()?.key === ticketScopeKey() ? activeTicketScope() : null;
-		const scopeKind: SearchScopeKind = inCodeScope()
+		const activeTicket = curTicketScopeKey && activeTicketScope()?.key === curTicketScopeKey ? activeTicketScope() : null;
+		const isScopeActive = (inc: string, exc = "") =>
+			!curTicketScopeKey && (curChoosing ? curInclude.trim() === inc && curExclude.trim() === exc : !inc && !exc);
+		const scopeKind: SearchScopeKind = isScopeActive("", codeExcludeGlob())
 			? "code"
-			: inDocsScope()
+			: isScopeActive(docsIncludeGlob(), "")
 				? "docs"
 				: activeTicket
 					? "ticket"
@@ -517,7 +588,7 @@ export function Search() {
 						? "custom"
 						: "all";
 
-		const preParsed = !regex() && scopeKind !== "code" ? parseDocFilterTokens(rawQuery) : undefined;
+		const preParsed = !curRegex && scopeKind !== "code" ? parseDocFilterTokens(rawQuery) : undefined;
 		const customMatchedByPath = new Map<string, Record<string, string | string[]>>();
 		const keysSeen = new Set<string>();
 
@@ -539,9 +610,9 @@ export function Search() {
 
 		const resolved = resolveSearchQuery({
 			rawQuery,
-			regex: regex(),
-			caseSensitive: caseSensitive(),
-			wholeWord: wholeWord(),
+			regex: curRegex,
+			caseSensitive: curCaseSensitive,
+			wholeWord: curWholeWord,
 			scope: scopeKind,
 			knownCustomKeys: keysSeen,
 			parsed: preParsed,
@@ -629,47 +700,43 @@ export function Search() {
 		setLineFiltered(hasHeadingFilter || hasTaskFilter);
 
 		try {
-			const diskHits = await backend.search(effectiveQuery, backendOptions);
-			if (mine !== latest || state.workspace?.root !== startRoot) return;
-
-			// Overlay unsaved dirty open editor buffers so freshly edited unsaved text is always searchable.
-			const dirtyPaths = new Set<string>();
-			const dirtyHits: SearchHit[] = [];
+			// The open files with unsaved changes go with the search as they are in the editor, so that freshly edited
+			// text is searched and not what is on disk of it. The backend searches them, in place of the files of their
+			// names: the expression is not run here (see `replaceInModel`).
+			const open: OpenText[] = [];
 			const dirtyFilter = createFileFilter(effectiveInclude, effectiveExclude);
 			const pathAllowSet = effectivePaths !== undefined ? new Set(effectivePaths.map((p) => p.replace(/\\/g, "/"))) : null;
-			let compiledPattern: RegExp | null = null;
-			try {
-				compiledPattern = searchPattern(effectiveQuery, backendOptions);
-			} catch {
-				compiledPattern = null;
-			}
-			if (compiledPattern) {
-				for (const [docPath, doc] of documents) {
-					const at = canonical(docPath);
-					if (!state.dirty[at] || doc.binary) continue;
-					if (allowedDocSet && !allowedDocSet.has(at)) continue;
-					if (isUntitled(at)) {
-						if (effectiveInclude.trim() || pathAllowSet !== null) continue;
-					} else if (root && isInside(root, at)) {
-						const relPath = relativeTo(root, at).replace(/\\/g, "/");
-						if (pathAllowSet !== null && !pathAllowSet.has(relPath)) continue;
-						if (!dirtyFilter(relPath)) continue;
-					} else {
-						continue;
-					}
-					dirtyPaths.add(at);
-					const remaining = Math.max(0, SEARCH_LIMIT - dirtyHits.length);
-					if (remaining > 0) {
-						dirtyHits.push(...scanTextBuffer(docPath, doc.model.getValue(), compiledPattern, Boolean(effectiveRegex), remaining));
-					}
+			for (const [docPath, doc] of documents) {
+				const at = canonical(docPath);
+				if (!state.dirty[at] || doc.binary) continue;
+				if (allowedDocSet && !allowedDocSet.has(at)) continue;
+				if (isUntitled(at)) {
+					if (effectiveInclude.trim() || pathAllowSet !== null) continue;
+				} else if (root && isInside(root, at)) {
+					const relPath = relativeTo(root, at).replace(/\\/g, "/");
+					if (pathAllowSet !== null && !pathAllowSet.has(relPath)) continue;
+					if (!dirtyFilter(relPath)) continue;
+				} else {
+					continue;
 				}
+				open.push({ path: docPath, text: doc.model.getValue() });
 			}
 
-			let merged: SearchHit[] = [
-				...diskHits.filter((h) => !dirtyPaths.has(canonical(h.path))),
-				...dirtyHits,
-			];
-			const wasTruncated = diskHits.length >= SEARCH_LIMIT || dirtyHits.length >= SEARCH_LIMIT || merged.length >= SEARCH_LIMIT;
+			let merged: SearchHit[] = [];
+			let ranOutOfTime = false;
+			const found: Record<string, string> = {};
+			// One call, but for more unsaved text than a call carries: the rest follows in calls that read no file
+			// (`paths: []`), one after another and none once the time has run out.
+			for (const [index, batch] of openBatches(open).entries()) {
+				// Asked for with whether the scan was cut short: a scan that ran out of time gives only some of what is there.
+				const scan = await backend.searchScan(effectiveQuery, index ? { ...backendOptions, paths: [] } : backendOptions, batch);
+				if (mine !== latest || state.workspace?.root !== startRoot) return;
+				merged = merged.concat(scan.hits);
+				Object.assign(found, scan.marks);
+				ranOutOfTime = scan.timedOut;
+				if (ranOutOfTime) break;
+			}
+			const wasTruncated = merged.length >= SEARCH_LIMIT;
 
 			// Enforce heading:/task: line-level constraints (only Markdown files & matching heading/task lines).
 			if (hasHeadingFilter || hasTaskFilter) {
@@ -708,39 +775,58 @@ export function Search() {
 
 			if (merged.length > SEARCH_LIMIT) merged = merged.slice(0, SEARCH_LIMIT);
 			setTruncated(wasTruncated);
+			setTimedOut(ranOutOfTime);
+			setMarks(found);
 			setHits(merged);
 			setStatus("done");
 		} catch (e: any) {
 			if (mine !== latest || state.workspace?.root !== startRoot) return;
 			setHits([]);
 			setTruncated(false);
+			setTimedOut(false);
 			setFailure(String(e?.message ?? e));
 			setStatus("failed");
 		}
 	};
 
 	// A search asked for from elsewhere is put in the box and run, as if it had been typed.
-	createEffect(() => {
-		const wanted = request();
-		if (!wanted || !input) return;
-		setRequest(null);
-		input.value = wanted.query;
-		setTyped(wanted.query);
-		setRegex(Boolean(wanted.regex));
-		setWholeWord(Boolean(wanted.wholeWord));
-		setCaseSensitive(Boolean(wanted.caseSensitive));
-		const nextInc = wanted.include ?? "";
-		const nextExc = wanted.exclude ?? "";
-		setTicketScopeKey(null);
-		setInclude(nextInc);
-		setExclude(nextExc);
-		setChoosing(Boolean(nextInc.trim() || nextExc.trim()));
-		void run();
-	});
+	createEffect(
+		() => request(),
+		(wanted) => {
+			if (!wanted || !input) return;
+			setRequest(null);
+			input.value = wanted.query;
+			const nextRegex = Boolean(wanted.regex);
+			const nextWhole = Boolean(wanted.wholeWord);
+			const nextCase = Boolean(wanted.caseSensitive);
+			const nextInc = wanted.include ?? "";
+			const nextExc = wanted.exclude ?? "";
+			const nextChoosing = Boolean(nextInc.trim() || nextExc.trim());
+			setTyped(wanted.query);
+			setRegex(nextRegex);
+			setWholeWord(nextWhole);
+			setCaseSensitive(nextCase);
+			setTicketScopeKey(null);
+			setInclude(nextInc);
+			setExclude(nextExc);
+			setChoosing(nextChoosing);
+			void run({
+				query: wanted.query,
+				regex: nextRegex,
+				wholeWord: nextWhole,
+				caseSensitive: nextCase,
+				include: nextInc,
+				exclude: nextExc,
+				choosing: nextChoosing,
+				ticketScopeKey: null,
+			});
+		},
+	);
 	// A switch changes what the results on screen mean, so they are fetched again.
-	const flip = (set: (v: boolean) => void, now: boolean) => {
-		set(!now);
-		if (status() !== "idle") void run();
+	const flip = (kind: "caseSensitive" | "wholeWord" | "regex", set: (v: boolean) => void, now: boolean) => {
+		const next = !now;
+		set(next);
+		if (status() !== "idle") void run({ [kind]: next });
 	};
 
 	const visibleHits = createMemo(() => {
@@ -780,7 +866,7 @@ export function Search() {
 	// Keyed on raw `hits()` so dismissing rows never re-reads files, and cleans up on unmount.
 	let placesSeq = 0;
 	onCleanup(() => placesSeq++);
-	const [places] = createResource(
+	const [places] = createAsyncQuery(
 		() => ({ root: state.workspace?.root ?? "", hits: hits() }),
 		async ({ root: startRoot, hits: rawHits }) => {
 			const mine = ++placesSeq;
@@ -911,7 +997,7 @@ export function Search() {
 		const next = re.test(cur) ? cur.replace(re, " ").replace(/\s+/g, " ").trim() : `${token}${cur.trim() ? ` ${cur.trim()}` : ""}`;
 		if (input) input.value = next;
 		setTyped(next);
-		if (next) void run();
+		void run({ query: next });
 	};
 	const hasQueryToken = (token: string) => {
 		const esc = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -924,11 +1010,12 @@ export function Search() {
 			/\b(?:tag|status|ticket|parent|group|kind|heading|task):/i.test(typed()));
 
 	const applyScope = (inc: string, exc = "") => {
+		const nextChoosing = Boolean(inc || exc);
 		setTicketScopeKey(null);
 		setInclude(inc);
 		setExclude(exc);
-		setChoosing(Boolean(inc || exc));
-		if (typed()) void run();
+		setChoosing(nextChoosing);
+		if (typed()) void run({ ticketScopeKey: null, include: inc, exclude: exc, choosing: nextChoosing });
 	};
 
 	const applyTicketScope = (key: string) => {
@@ -936,25 +1023,24 @@ export function Search() {
 		setInclude("");
 		setExclude("");
 		setChoosing(false);
-		if (typed()) void run();
+		if (typed()) void run({ ticketScopeKey: key, include: "", exclude: "", choosing: false });
 	};
 
 	// --- replacing -------------------------------------------------------------
 
-	/** The expression the results were found with, for showing what each match would become. Null when it cannot be read. */
-	const pattern = createMemo(() => {
-		try {
-			const q = effectiveAsked() || asked();
-			return q ? searchPattern(q, searched()) : null;
-		} catch {
-			return null;
-		}
+	/** The matches a replace would make, file by file: what is listed and not dismissed. */
+	const listedBy = createMemo(() => hitsByPath(visibleHits()));
+	/** Where the groups of a regular expression's match lie, by the match's file, line and column: for what it would become. */
+	const groupsAt = createMemo(() => {
+		const map = new Map<string, SearchHit>();
+		for (const hit of hits()) if (hit.groups || hit.named) map.set(`${hit.path}\n${hit.line}\n${hit.column}`, hit);
+		return map;
 	});
 
 	// Document-level Safe Docs cache for Markdown protected spans & .plan.json validation during Replace preview.
 	let safeCacheSeq = 0;
 	onCleanup(() => safeCacheSeq++);
-	const [safeDocInfo] = createResource(
+	const [safeDocInfo] = createAsyncQuery(
 		() => {
 			if (!replacing() || !safeDocs() || searched().syntheticQuery) return null;
 			const list = hits();
@@ -1012,32 +1098,22 @@ export function Search() {
 	const invalidPlanPaths = createMemo(() => {
 		const bad = new Set<string>();
 		if (!replacing() || !safeDocs() || searched().syntheticQuery) return bad;
-		const found = pattern();
-		if (!found) return bad;
 		const info = safeDocInfo();
-		const with_ = replacement();
-		const isRegex = Boolean(searched().regex);
-		for (const [path, fileLines] of groups()) {
+		for (const [path] of groups()) {
 			if (!/\.plan\.json$/i.test(path)) continue;
 			const canon = canonical(path);
 			const open = documents.get(canon);
 			const text = open && !open.binary ? open.model.getValue() : info?.planTexts.get(canon);
 			if (!text) continue;
-			const res = replaceSafeInText(text, found, with_, isRegex, {
-				allowedLines: allowedLinesFor(path, fileLines),
-				isPlanJson: true,
-				safeDocs: true,
-				maxSamples: 0,
-			});
-			if (res.invalidJson) bad.add(canon);
+			// A plan changed since the search says nothing here: the replace itself leaves it as it is.
+			if (replaceGuarded(path, text, marks()[path], listedBy().get(path), replacement(), Boolean(searched().regex), true, 0)?.invalidJson) bad.add(canon);
 		}
 		return bad;
 	});
 
 	/** What each marked match of a line would become, by the column it starts at (using document-level Safe Docs spans). */
 	const becomes = (line: LineHit) => {
-		const found = pattern();
-		if (!found || searched().syntheticQuery) return new Map<number, string>();
+		if (searched().syntheticQuery) return new Map<number, string>();
 		const canon = canonical(line.path);
 		if (safeDocs() && /\.plan\.json$/i.test(line.path) && invalidPlanPaths().has(canon)) {
 			return new Map<number, string>();
@@ -1049,42 +1125,55 @@ export function Search() {
 			lineSpans = docSpans?.get(line.line);
 		}
 		const entries: [number, string][] = [];
-		for (const match of matchesOn(line.text, found, replacement(), Boolean(searched().regex))) {
+		const isRegex = Boolean(searched().regex);
+		const where = isRegex ? groupsAt() : null;
+		for (const match of line.matches) {
 			if (overlapsProtectedSpan(match.column, match.length, lineSpans)) continue;
-			entries.push([match.column, match.becomes]);
+			// From where the search found the match and its groups: the expression is not run again here.
+			const text = becomesFound(line.text, line.textOffset ?? 0, where?.get(`${line.path}\n${line.line}\n${match.column}`) ?? match, replacement(), isRegex);
+			if (text !== undefined) entries.push([match.column, text]);
 		}
 		return new Map(entries);
 	};
+	/** How the list on screen falls short of all there is to find, when it does: the summary says so and a replace is refused. */
+	const shortfall = () => searchShortfall({ hits: hits().length, limit: SEARCH_LIMIT, truncated: truncated(), timedOut: timedOut() });
 	/** Why "Replace all" cannot be pressed now; "" when it can. */
-	const noReplace = () => {
-		if (status() === "busy" || replaceActive()) return "The search is still running";
+	const noReplace = (ignoreReplaceActive = false) => {
+		if (status() === "busy" || (!ignoreReplaceActive && replaceActive())) return "The search is still running";
 		if (searched().syntheticQuery) return "Enter search text to replace — filter-only queries cannot replace";
 		if (status() !== "done" || !visibleHits().length) return "Search for something first: what is found is what is replaced";
-		if (truncated() || hits().length >= SEARCH_LIMIT) return `There are ${SEARCH_LIMIT} results or more, and only the first are listed: narrow the search before replacing`;
-		return "";
+		// What is replaced is the text that was searched. With another text typed in the box since, and Enter not
+		// pressed, that is no longer the text on screen: nothing is replaced until the box and the list agree again.
+		const moved = searchBoxMoved(asked(), typed());
+		if (moved) return moved;
+		// A list cut short by the match limit or by the scan's time budget is not all there is to replace.
+		return shortfallBlocksReplace(shortfall(), SEARCH_LIMIT);
 	};
 	const executeReplace = async (skipConfirm: boolean) => {
-		if (replaceBusy || noReplace()) return;
+		if (replaceBusy || noReplace(true)) return;
 		const startRoot = state.workspace?.root;
 		const startSearchId = latest;
-		const query = effectiveAsked() || asked();
+		// What the box held when the list was found: the search made again after the replace is that one.
+		const searchedFor = asked();
+		const query = effectiveAsked() || searchedFor;
 		const options = searched();
 		const with_ = replacement();
-		const found = pattern();
-		if (!found) return;
 		const activeGroups = groups();
 		const paths = activeGroups.map(([path]) => path);
 		const total = visibleHits().length;
 		const protect = safeDocs();
+		// What was listed and the texts it was found in, as they are now: asked for again after a wait, they could be another search's.
+		const listed = listedBy();
+		const searchedAs = marks();
 
 		replaceBusy = true;
 		setReplaceActive(true);
 		let handoffToPreview = false;
 		let ranReplace = false;
-		try {
+		replaceBody: try {
 			if (!skipConfirm) {
-				const safeTail = protect ? " Safe docs skips YAML keys, Markdown link targets, and invalid .plan.json edits." : "";
-				const prompt = `Replace ${count(total, "match", "matches")} in ${count(paths.length, "file")} with ${with_ ? `“${with_}”` : "nothing"}? Each file that is written is first kept as it was in its local history.${safeTail}`;
+				// The question names what is replaced: the text that was searched, with the switches it was searched with.
+				const prompt = replaceQuestion({ query, regex: options.regex, caseSensitive: options.caseSensitive, wholeWord: options.wholeWord, replacement: with_, matches: total, files: paths.length, safeDocs: protect });
 				if (paths.length > 1) {
 					const REPLACE = "Replace all";
 					const PREVIEW = "Preview changes…";
@@ -1092,7 +1181,7 @@ export function Search() {
 					if (state.workspace?.root !== startRoot || latest !== startSearchId) return;
 					if (answer === PREVIEW) {
 						handoffToPreview = true;
-						return;
+						break replaceBody;
 					}
 					if (answer !== REPLACE) return;
 				} else {
@@ -1110,51 +1199,67 @@ export function Search() {
 			const unsaved: string[] = [];
 			const skippedJson: string[] = [];
 			const failed: string[] = [];
+			/** The files left as they are because their text is no longer the one that was searched. */
+			const changed: string[] = [];
 			const onDiskPaths: string[] = [];
 			const linesByPath: Record<string, number[]> = {};
+			const asSearched: Record<string, string> = {};
 			try {
 				for (const [path, fileLines] of activeGroups) {
 					if (state.workspace?.root !== startRoot) return;
 					const at = canonical(path);
 					const allowedLines = allowedLinesFor(path, fileLines);
-					const isMd = /\.(md|markdown)$/i.test(path);
-					const isPlan = /\.plan\.json$/i.test(path);
-					const needsSafe = protect && (isMd || isPlan);
+					const mark = searchedAs[path];
 
 					const doc = documents.get(at);
 					const tabbed = state.groups.some((group) => group.tabs.includes(at));
 					if (!doc || doc.binary || (!tabbed && !state.dirty[at])) {
 						// Route all closed-file replacements (including safeDocs and partial lines) through locked backend.replace.
+						// It is given the mark of the text that was searched, and leaves a file that is no longer that text.
 						onDiskPaths.push(path);
 						if (allowedLines) linesByPath[path] = [...allowedLines];
+						if (mark !== undefined) asSearched[path] = mark;
 						continue;
 					}
 
+					// An open file is replaced in only while its text is the one that was searched: the matches listed, and
+					// the rows dismissed, are places in that text. Typed into since, or changed on disk and loaded again,
+					// it has other lines under those numbers: a dismissed match was replaced and the ones kept were left.
 					const currentValue = doc.model.getValue();
-					let mdProtected: Map<number, TextSpan[]> | undefined;
-					if (needsSafe) {
-						const sim = replaceSafeInText(currentValue, found, with_, Boolean(options.regex), {
-							allowedLines,
-							isMarkdown: isMd,
-							isPlanJson: isPlan,
-							safeDocs: protect,
-						});
-						skippedProtected += sim.skippedProtected;
-						if (sim.invalidJson) {
-							skippedJson.push(baseName(path));
-							continue;
-						}
-						if (!sim.count) continue;
-						if (isMd) mdProtected = protectedMarkdownSpans(currentValue);
+					const version = doc.model.getVersionId();
+					const sim = replaceGuarded(path, currentValue, mark, listed.get(path), with_, Boolean(options.regex), protect, 0);
+					if (!sim) {
+						changed.push(path);
+						continue;
 					}
+					skippedProtected += sim.skippedProtected;
+					if (sim.invalidJson) {
+						skippedJson.push(baseName(path));
+						continue;
+					}
+					if (!sim.count) continue;
 					const wasUnsaved = Boolean(state.dirty[at]);
 					if (!wasUnsaved) {
-						await backend.historyKeep(at).catch(() => {});
+						// The file as it was goes into local history first, as the question said it would. Where that copy
+						// could not be made the file is left and said so: the replace went on without it, and was then saved.
+						const notKept = await backend.historyKeep(at).then(
+							() => "",
+							(e: any) => String(e?.message ?? e),
+						);
 						if (state.workspace?.root !== startRoot) return;
+						if (notKept) {
+							failed.push(`${baseName(path)}: its copy for local history was not made (${notKept})`);
+							continue;
+						}
+						// Typed into, or closed, while its copy for local history was made: the edits are for the text before that.
+						if (doc.model.isDisposed() || doc.model.getVersionId() !== version) {
+							changed.push(path);
+							continue;
+						}
 					}
-					const changed = replaceInModel(doc.model, found, with_, Boolean(options.regex), allowedLines, mdProtected);
-					if (!changed) continue;
-					done += changed;
+					const replaced = replaceInModel(doc.model, sim.edits);
+					if (!replaced) continue;
+					done += replaced;
 					files++;
 					if (wasUnsaved) unsaved.push(path);
 					else {
@@ -1169,11 +1274,16 @@ export function Search() {
 						caseSensitive: options.caseSensitive,
 						wholeWord: options.wholeWord,
 						safeDocs: protect,
+						asSearched,
 						...(Object.keys(linesByPath).length ? { linesByPath } : {}),
 					};
 					const results = await backend.replace(query, with_, replaceOptions, onDiskPaths);
 					if (state.workspace?.root !== startRoot) return;
 					for (const result of results) {
+						if (result.changed) {
+							changed.push(result.path);
+							continue;
+						}
 						if (result.skippedProtected) skippedProtected += result.skippedProtected;
 						if (result.invalidJson) {
 							skippedJson.push(baseName(result.path));
@@ -1192,11 +1302,13 @@ export function Search() {
 				failed.push(String(e?.message ?? e));
 			}
 			if (state.workspace?.root !== startRoot) return;
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => {
+				s.treeVersion += 1;
+			});
 			const protectedNote = skippedProtected
 				? ` (${count(skippedProtected, "protected doc match", "protected doc matches")} skipped by Safe docs)`
 				: "";
-			const differs = done !== total && !failed.length && !skippedProtected && !skippedJson.length
+			const differs = done !== total && !failed.length && !skippedProtected && !skippedJson.length && !changed.length
 				? ` ${count(total, "match", "matches")} were listed: a file has changed since the search.`
 				: "";
 			const note = `Replaced ${count(done, "match", "matches")} in ${count(files, "file")}.${protectedNote}${differs}`;
@@ -1210,6 +1322,7 @@ export function Search() {
 			if (skippedJson.length) {
 				notify(`Skipped ${skippedJson.join(", ")}: replacement would break .plan.json JSON syntax.`, "error");
 			}
+			if (changed.length) notify(changedSinceSearch(changed.map(baseName)), "error");
 			if (failed.length) notify(`Not replaced: ${failed.join("; ")}`, "error");
 		} finally {
 			replaceBusy = false;
@@ -1220,20 +1333,23 @@ export function Search() {
 			return;
 		}
 		if (ranReplace && state.workspace?.root === startRoot) {
-			await run();
+			// The search that was replaced from, made again: not whatever has been typed in the box meanwhile, which
+			// nobody pressed Enter on.
+			await run({ query: searchedFor });
 		}
 	};
 	const replaceAll = () => executeReplace(false);
 	const previewReplace = async () => {
-		if (replaceBusy || noReplace()) return;
+		if (replaceBusy || noReplace(true)) return;
 		const startRoot = state.workspace?.root;
 		const startSearchId = latest;
+		const query = effectiveAsked() || asked();
 		const options = searched();
 		const with_ = replacement();
-		const found = pattern();
-		if (!found) return;
 		const activeGroups = groups();
 		const protect = safeDocs();
+		const listed = listedBy();
+		const searchedAs = marks();
 
 		type PreviewRow = {
 			path: string;
@@ -1241,6 +1357,8 @@ export function Search() {
 			count: number;
 			skippedProtected: number;
 			invalidJson: boolean;
+			/** Its text is no longer the one that was searched: a replace leaves it as it is. */
+			changed?: boolean;
 			sampleLine?: number;
 			sampleSummary?: string;
 		};
@@ -1248,6 +1366,7 @@ export function Search() {
 		let totalMatches = 0;
 		let totalProtected = 0;
 		let invalidCount = 0;
+		let changedCount = 0;
 
 		replaceBusy = true;
 		setReplaceActive(true);
@@ -1257,16 +1376,23 @@ export function Search() {
 			for (const [path, fileLines] of activeGroups) {
 				const text = await currentTextFor(path);
 				if (state.workspace?.root !== startRoot || latest !== startSearchId) return;
-				if (!text) continue;
-				const isMd = /\.(md|markdown)$/i.test(path);
-				const isPlan = /\.plan\.json$/i.test(path);
-				const res = replaceSafeInText(text, found, with_, Boolean(options.regex), {
-					allowedLines: allowedLinesFor(path, fileLines),
-					isMarkdown: isMd,
-					isPlanJson: isPlan,
-					safeDocs: protect,
-					maxSamples: 1,
-				});
+				const res = replaceGuarded(path, text, searchedAs[path], listed.get(path), with_, Boolean(options.regex), protect, 1);
+				// A file that is not the text that was searched any more (or cannot be read now) is shown as that: the
+				// replace leaves it as it is, and what it would have become cannot be told from another text.
+				if (!res) {
+					changedCount++;
+					rows.push({
+						path,
+						relPath: rel(path),
+						count: 0,
+						skippedProtected: 0,
+						invalidJson: false,
+						changed: true,
+						sampleLine: fileLines[0]?.line,
+						sampleSummary: "Skipped: changed since the search. Search again to replace in it",
+					});
+					continue;
+				}
 				totalProtected += res.skippedProtected;
 				if (res.invalidJson) {
 					invalidCount++;
@@ -1303,7 +1429,8 @@ export function Search() {
 			const readyFiles = rows.filter((r) => r.count > 0 && !r.invalidJson).length;
 			const APPLY = "__apply__";
 			const picked = await quickPick<string>({
-				title: `Replace preview: ${count(totalMatches, "match", "matches")} in ${count(readyFiles, "file")}`,
+				// "Apply" below replaces with no further question, so what is replaced is named here too.
+				title: replacePreviewTitle({ query, regex: options.regex, caseSensitive: options.caseSensitive, wholeWord: options.wholeWord, replacement: with_, matches: totalMatches, files: readyFiles }),
 				placeholder: "Apply replace or pick a file to inspect…",
 				items: [
 					...(totalMatches > 0
@@ -1315,6 +1442,7 @@ export function Search() {
 									detail: [
 										totalProtected ? `${totalProtected} protected skipped` : "",
 										invalidCount ? `${invalidCount} invalid JSON skipped` : "",
+										changedCount ? `${changedCount} changed since the search skipped` : "",
 									]
 										.filter(Boolean)
 										.join(" · ") || "Local history snapshots kept before writing",
@@ -1322,10 +1450,10 @@ export function Search() {
 							]
 						: []),
 					...rows.map((r, idx) => ({
-						label: `${r.relPath} (${r.invalidJson ? "invalid JSON" : count(r.count, "change")})`,
+						label: `${r.relPath} (${r.invalidJson ? "invalid JSON" : r.changed ? "changed since the search" : count(r.count, "change")})`,
 						value: r.path,
 						file: baseName(r.path),
-						danger: r.invalidJson,
+						danger: r.invalidJson || r.changed,
 						divide: idx === 0 && totalMatches > 0,
 						description: r.sampleSummary,
 						detail: r.skippedProtected && !r.invalidJson ? `${r.skippedProtected} protected` : undefined,
@@ -1337,10 +1465,10 @@ export function Search() {
 			if (!picked) return;
 			if (picked === APPLY) {
 				applyAfter = true;
-				return;
+			} else {
+				const targetRow = rows.find((r) => r.path === picked);
+				if (targetRow) openTarget = { path: targetRow.path, line: targetRow.sampleLine };
 			}
-			const targetRow = rows.find((r) => r.path === picked);
-			if (targetRow) openTarget = { path: targetRow.path, line: targetRow.sampleLine };
 		} finally {
 			replaceBusy = false;
 			setReplaceActive(false);
@@ -1364,14 +1492,10 @@ export function Search() {
 		const dismissedTail = dismissedHitCount() ? ` (${dismissedHitCount()} dismissed)` : "";
 		if (!visibleHits().length) {
 			if (dismissedHitCount()) return `All ${count(hits().length, "result")} for “${asked()}” were dismissed.`;
+			if (timedOut()) return timedOutEmpty(asked(), filterTail);
 			return `Nothing found for “${asked()}”${filterTail}${narrowed() && !docFilterNote() ? " in the files chosen" : ""}. Check the spelling${switchesOn().length ? `, or switch ${switchesOn().join(" and ")} off` : ""}${narrowed() ? ", or look in more files" : ""}.`;
 		}
-		const countText =
-			hits().length >= SEARCH_LIMIT
-				? `The first ${SEARCH_LIMIT} results`
-				: truncated()
-					? `Partial results (${count(visibleHits().length, "result")} shown; hit ${SEARCH_LIMIT}-match limit)`
-					: count(visibleHits().length, "result");
+		const countText = shortfallCount(shortfall(), count(visibleHits().length, "result"), hits().length, SEARCH_LIMIT);
 		return `${countText} in ${count(groups().length, "file")} for “${asked()}”${filterTail}${dismissedTail}${narrowed() && !docFilterNote() ? ", in the files chosen" : ""}`;
 	};
 
@@ -1419,16 +1543,14 @@ export function Search() {
 						{(part) =>
 							!part.match ? (
 								part.text
-							) : after()?.has(part.column!) ? (
-								// What is there now, struck out, and what would stand in its place.
-								<>
+							) : (
+								<Show when={after()?.has(part.column!)} fallback={<mark>{part.text}</mark>}>
+									{/* What is there now, struck out, and what would stand in its place. */}
 									<del>{part.text}</del>
 									<span class="visually-hidden"> becomes </span>
-									<ins>{after()!.get(part.column!)}</ins>
+									<ins>{after()?.get(part.column!) ?? ""}</ins>
 									<span class="visually-hidden"> </span>
-								</>
-							) : (
-								<mark>{part.text}</mark>
+								</Show>
 							)
 						}
 					</For>
@@ -1472,7 +1594,7 @@ export function Search() {
 				}}
 			>
 				<div class="search-row">
-					<button type="button" class="search-fold" title={replacing() ? "Hide the replace row" : "Replace across files"} aria-label="Replace across files" aria-expanded={replacing()} onClick={() => setReplacing(!replacing())}>
+					<button type="button" class="search-fold" title={replacing() ? "Hide the replace row" : "Replace across files"} aria-label="Replace across files" aria-expanded={replacing() ? "true" : "false"} onClick={() => setReplacing(!replacing())}>
 						<Icon name={replacing() ? "chevron-down" : "chevron-right"} />
 					</button>
 					<input
@@ -1509,18 +1631,19 @@ export function Search() {
 							if (e.key === "ArrowDown" && focusRowsBelow(el)) e.preventDefault();
 						}}
 					/>
-					<IconButton label="Match case" glyph="Aa" pressed={caseSensitive()} onClick={() => flip(setCaseSensitive, caseSensitive())} />
-					<IconButton label="Match whole word" title="Whole word" glyph="ab" pressed={wholeWord()} onClick={() => flip(setWholeWord, wholeWord())} />
-					<IconButton label="Use a regular expression" title="Regular expression" glyph=".*" pressed={regex()} onClick={() => flip(setRegex, regex())} />
+					<IconButton label="Match case" glyph="Aa" pressed={caseSensitive()} onClick={() => flip("caseSensitive", setCaseSensitive, caseSensitive())} />
+					<IconButton label="Match whole word" title="Whole word" glyph="ab" pressed={wholeWord()} onClick={() => flip("wholeWord", setWholeWord, wholeWord())} />
+					<IconButton label="Use a regular expression" title="Regular expression" glyph=".*" pressed={regex()} onClick={() => flip("regex", setRegex, regex())} />
 					<IconButton
 						label="Choose which files to search"
 						title="Which files: to include, to exclude"
 						icon="ellipsis"
 						pressed={choosing()}
 						onClick={() => {
-							setChoosing(!choosing());
+							const nextChoosing = !choosing();
+							setChoosing(nextChoosing);
 							// Patterns that were narrowing the results stop when their boxes go, and start when they come back.
-							if (status() !== "idle" && (include().trim() || exclude().trim())) void run();
+							if (status() !== "idle" && (include().trim() || exclude().trim())) void run({ choosing: nextChoosing });
 						}}
 					/>
 				</div>
@@ -1564,12 +1687,12 @@ export function Search() {
 					</div>
 				</Show>
 				<div class="search-scopes" role="group" aria-label="Quick search scope">
-					<button type="button" classList={{ on: scopeActive("", "") }} title="Search all workspace files" onClick={() => applyScope("", "")}>
+					<button type="button" class={{ on: scopeActive("", "") }} title="Search all workspace files" onClick={() => applyScope("", "")}>
 						All
 					</button>
 					<button
 						type="button"
-						classList={{ on: scopeActive("", codeExcludeGlob()) }}
+						class={{ on: scopeActive("", codeExcludeGlob()) }}
 						title="Search code files only (exclude docs, design, schema, and catalogs)"
 						onClick={() => applyScope("", codeExcludeGlob())}
 					>
@@ -1577,7 +1700,7 @@ export function Search() {
 					</button>
 					<button
 						type="button"
-						classList={{ on: scopeActive(docsIncludeGlob(), "") }}
+						class={{ on: scopeActive(docsIncludeGlob(), "") }}
 						title="Search project documentation, plans, schema, and Markdown files"
 						onClick={() => applyScope(docsIncludeGlob(), "")}
 					>
@@ -1587,7 +1710,7 @@ export function Search() {
 						{(scope) => (
 							<button
 								type="button"
-								classList={{ on: ticketScopeKey() === scope().key }}
+								class={{ on: ticketScopeKey() === scope().key }}
 								title={scope().tip}
 								onClick={() => applyTicketScope(scope().key)}
 							>
@@ -1604,7 +1727,7 @@ export function Search() {
 								return (
 									<button
 										type="button"
-										classList={{ on: hasQueryToken(tok) }}
+										class={{ on: hasQueryToken(tok) }}
 										title={`Filter Docs by #${bucket.tag} (${bucket.count})`}
 										onClick={() => toggleQueryToken(tok)}
 									>
@@ -1619,7 +1742,7 @@ export function Search() {
 								return (
 									<button
 										type="button"
-										classList={{ on: hasQueryToken(tok) }}
+										class={{ on: hasQueryToken(tok) }}
 										title={`Filter Docs by ${tok}${st.count ? ` (${st.count})` : ""}`}
 										onClick={() => toggleQueryToken(tok)}
 									>
@@ -1630,7 +1753,7 @@ export function Search() {
 						</For>
 						<button
 							type="button"
-							classList={{ on: hasQueryToken("task:open") }}
+							class={{ on: hasQueryToken("task:open") }}
 							title="Match unchecked checklist tasks (- [ ])"
 							onClick={() => toggleQueryToken("task:open")}
 						>
@@ -1639,53 +1762,71 @@ export function Search() {
 					</div>
 				</Show>
 			</form>
-			<p class="hint" classList={{ warn: status() === "failed" }} role="status">
+			<p class={["hint", { warn: status() === "failed" }]} role="status">
 				{summary()}
 			</p>
 			<Rows label="Search results">
-				<For each={groups()}>
-					{([path, list]) => (
-						<RowGroup
-							headClass="tree-row file-head"
-							title={path}
-							head={
-								<>
-									<FileMark name={path} />
-									<span class="label">{rel(path)}</span>
-									<span class="meta" title={count(matchesIn(list), "match", "matches") + " in this file"}>
-										{matchesIn(list)}
-									</span>
-									<button
-										type="button"
-										class="search-dismiss"
-										style={dismissBtnStyle}
-										tabindex={-1}
-										title={`Dismiss ${rel(path)} from results and Replace all`}
-										aria-label={`Dismiss ${rel(path)} from results`}
-										onClick={(e) => {
-											e.stopPropagation();
-											dismissFile(path);
-										}}
-									>
-										<Icon name="close" />
-									</button>
-								</>
-							}
-						>
-							<For each={byPlace(list)}>
-								{([where, lines]) => (
-									<Show when={where} fallback={<For each={lines}>{(line) => <HitRow line={line} />}</For>}>
-										<div role="group" aria-label={where}>
-											<div class="tree-row place" style={{ "padding-left": "16px" }} title={where} aria-hidden="true">
-												<span class="label">{where}</span>
-											</div>
-											<For each={lines}>{(line) => <HitRow line={line} />}</For>
-										</div>
-									</Show>
-								)}
-							</For>
-						</RowGroup>
-					)}
+				<For each={groups()} keyed={([path]) => path}>
+					{(group) => {
+						const path = () => group()[0];
+						const list = () => group()[1];
+						const places = createMemo(() => byPlace(list()));
+						return (
+							<RowGroup
+								headClass="tree-row file-head"
+								title={path()}
+								head={
+									<>
+										<FileMark name={path()} />
+										<span class="label">{rel(path())}</span>
+										<span class="meta" title={count(matchesIn(list()), "match", "matches") + " in this file"}>
+											{matchesIn(list())}
+										</span>
+										<button
+											type="button"
+											class="search-dismiss"
+											style={dismissBtnStyle}
+											tabindex={-1}
+											title={`Dismiss ${rel(path())} from results and Replace all`}
+											aria-label={`Dismiss ${rel(path())} from results`}
+											onClick={(e) => {
+												e.stopPropagation();
+												dismissFile(path());
+											}}
+										>
+											<Icon name="close" />
+										</button>
+									</>
+								}
+							>
+								<For each={places()} keyed={([where]) => where}>
+									{(place) => {
+										const where = () => place()[0];
+										const lines = () => place()[1];
+										return (
+											<Show
+												when={where()}
+												fallback={
+													<For each={lines()} keyed={(line) => `${line.path}:${line.line}`}>
+														{(line) => <HitRow line={line()} />}
+													</For>
+												}
+											>
+												<div role="group" aria-label={where()}>
+													<div class="tree-row place" style={{ "padding-left": "16px" }} title={where()} aria-hidden="true">
+														<span class="label">{where()}</span>
+													</div>
+													<For each={lines()} keyed={(line) => `${line.path}:${line.line}`}>
+														{(line) => <HitRow line={line()} />}
+													</For>
+												</div>
+											</Show>
+										);
+									}}
+								</For>
+							</RowGroup>
+						);
+					}}
 				</For>
 			</Rows>
 		</div>

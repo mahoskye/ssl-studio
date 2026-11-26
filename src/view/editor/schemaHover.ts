@@ -1,8 +1,9 @@
 // Secondary Monaco Hover, Definition, Link, Completion, and CodeLens providers bridging
 // SSL/SQL/Markdown/XML/JSON code to documented `schema/` tables/columns, workspace tickets,
 // governing plans/ADRs/questions, and comment doc references (ADR 0003: matches identifiers
-// strictly against workspace docs, DDL, and starlims-lsp symbols, never parsing SSL).
-import { createEffect, createRoot } from "solid-js";
+// strictly against workspace docs, DDL, and starlims-lsp symbols, never parsing SSL: which word is a
+// keyword or a name being declared, and where the comments are, is the language server's to say).
+import { createEffect, createMemo, createRoot, runWithOwner } from "solid-js";
 import { findCodeCitations, type CodeCitation } from "../../shared/codeCitations";
 import { parseCsv } from "../../shared/csv";
 import { linkBeingWritten } from "../../shared/docLinks";
@@ -15,15 +16,18 @@ import {
 	extractSchemaColumns,
 	extractSchemaPreview,
 	findSchemaDocForIdentifier,
+	hasSchemaTables,
 	referencedSchemaTables,
 	schemaDocKeys,
 	type SchemaColumnInfo,
 } from "../../shared/schemaIndex";
 import { ticketMatcher } from "../../shared/ticketRefs";
+import { isSslOwnWord, namesByLine, NO_FACTS } from "../../shared/lexicalTokens";
 import { codeMatchesRef, docsGoverningFile } from "../../shared/workContext";
 import { backend } from "../backend";
 import { quickPick, type QuickPickOption } from "../dialogs";
 import { docAuditData } from "../docAudit";
+import { searchableText, sslFacts } from "../lsp/facts";
 import { session } from "../lsp/session";
 import { symbols } from "../panels/Objects";
 import { docs, isMarkdown } from "../project";
@@ -43,7 +47,7 @@ const refUri = (target: string | RefTarget) => {
 	return monaco.Uri.from({ scheme: REF_SCHEME, path: "/", query: JSON.stringify(payload) });
 };
 
-import { extractCommentSpans, findCommentDocRefsInLines, type CommentDocRef, type CommentSpan } from "../../shared/editorDocHelpers";
+import { extractCommentSpans, findCommentDocRefsInLines, findCommentDocRefsInSpans, type CommentDocRef, type CommentSpan } from "../../shared/editorDocHelpers";
 export { extractCommentSpans, findCommentDocRefsInLines, type CommentDocRef, type CommentSpan };
 
 const SQL_RESERVED_KEYWORDS = new Set([
@@ -134,22 +138,13 @@ const SQL_RESERVED_KEYWORDS = new Set([
 	"endif",
 ]);
 
-const SSL_DECL_LINE_RE = /^\s*:(?:DECLARE|PARAMETERS|PROCEDURE|PUBLIC|CLASS|LABEL)\b/i;
-
-function isSslDeclarationTarget(lineText: string, matchStart: number): boolean {
-	if (matchStart > 0 && lineText[matchStart - 1] === ":") return true;
-	if (!SSL_DECL_LINE_RE.test(lineText)) return false;
-	const semi = lineText.indexOf(";");
-	return semi < 0 || matchStart < semi;
-}
-
 /**
  * Derives comment spans per line: for SSL strictly from the canonical SSL TextMate
  * grammar (`textmate.ts` COMMENT_TOKEN, ADR 0003), and for SQL via `extractCommentSpans`.
  */
 function commentSpansFor(lines: readonly string[], lang: "ssl" | "sql"): CommentSpan[][] {
 	if (lang === "ssl") return sslCommentSpans(lines) ?? lines.map(() => []);
-	return extractCommentSpans(lines, "sql");
+	return extractCommentSpans(lines);
 }
 
 function findCommentDocRefsFor(
@@ -159,35 +154,8 @@ function findCommentDocRefsFor(
 	root?: string | null,
 	precomputedSpans?: CommentSpan[][],
 ): CommentDocRef[] {
-	if (lang === "sql" && !precomputedSpans) return findCommentDocRefsInLines(lines, "sql", files, root);
-	const spansByLine = precomputedSpans ?? commentSpansFor(lines, lang);
-	const synthetic: string[] = [];
-	const meta: { line: number; spanFrom: number }[] = [];
-	for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-		const spans = spansByLine[lineIdx];
-		if (!spans?.length) continue;
-		const lineText = lines[lineIdx]!;
-		for (const span of spans) {
-			const slice = lineText.slice(span.from, span.to);
-			if (!slice.trim()) continue;
-			synthetic.push(`-- ${slice}`);
-			meta.push({ line: lineIdx + 1, spanFrom: span.from });
-		}
-	}
-	if (!synthetic.length) return [];
-	const raw = findCommentDocRefsInLines(synthetic, "sql", files, root);
-	const out: CommentDocRef[] = [];
-	for (const r of raw) {
-		const m = meta[r.line - 1];
-		if (!m || r.from < 3) continue;
-		out.push({
-			...r,
-			line: m.line,
-			from: m.spanFrom + (r.from - 3),
-			to: m.spanFrom + (r.to - 3),
-		});
-	}
-	return out;
+	if (lang === "sql" && !precomputedSpans) return findCommentDocRefsInLines(lines, files, root);
+	return findCommentDocRefsInSpans(lines, precomputedSpans ?? commentSpansFor(lines, lang), files, root);
 }
 
 function findCommentDocRefAt(
@@ -810,7 +778,10 @@ export function registerSchemaHoverProviders(): void {
 				}
 
 				const wordLower = word.word.toLowerCase();
-				if (SQL_RESERVED_KEYWORDS.has(wordLower) || (lang === "ssl" && isSslDeclarationTarget(lineText, word.startColumn - 1))) {
+				// What is left is a table's or a column's hover. A project that describes no table has neither, and the
+				// server is not asked about the word. Where it does: a keyword, a member, or a name its statement declares
+				// is the language's own, whatever table is called the same.
+				if (SQL_RESERVED_KEYWORDS.has(wordLower) || !hasSchemaTables(allDocs) || (lang === "ssl" && isSslOwnWord(await sslFacts(model), position.lineNumber - 1, word.startColumn - 1))) {
 					return null;
 				}
 
@@ -823,7 +794,7 @@ export function registerSchemaHoverProviders(): void {
 
 				// 4. Column hover for tables referenced elsewhere in this file
 				if (model.getValueLength() <= 200_000) {
-					const refTables = referencedSchemaTables(model.getValue(), allDocs, 8);
+					const refTables = referencedSchemaTables(await searchableText(model), allDocs, 8);
 					if (refTables.length) {
 						const matches: SchemaColumnInfo[] = [];
 						for (const refDoc of refTables) {
@@ -871,7 +842,7 @@ export function registerSchemaHoverProviders(): void {
 					const qDoc = findSchemaDocForIdentifier(qualifier, allDocs);
 					if (qDoc) return definitionLocation(qDoc.path, 1);
 				}
-				if (SQL_RESERVED_KEYWORDS.has(word.word.toLowerCase()) || (lang === "ssl" && isSslDeclarationTarget(lineText, word.startColumn - 1))) {
+				if (SQL_RESERVED_KEYWORDS.has(word.word.toLowerCase()) || !hasSchemaTables(allDocs) || (lang === "ssl" && isSslOwnWord(await sslFacts(model), position.lineNumber - 1, word.startColumn - 1))) {
 					return null;
 				}
 				const tableDoc = findSchemaDocForIdentifier(word.word, allDocs);
@@ -950,8 +921,8 @@ export function registerSchemaHoverProviders(): void {
 					}
 				}
 
-				if (model.getValueLength() <= 200_000) {
-					const refTables = referencedSchemaTables(model.getValue(), allDocs, 6);
+				if (model.getValueLength() <= 200_000 && hasSchemaTables(allDocs)) {
+					const refTables = referencedSchemaTables(await searchableText(model), allDocs, 6);
 					const seenCols = new Set<string>();
 					for (const refDoc of refTables) {
 						const cols = await loadColumnsForDoc(refDoc);
@@ -980,9 +951,8 @@ export function registerSchemaHoverProviders(): void {
 	// LinkProvider for SSL & SQL: comment doc paths + [[wikilinks]], ticket keys, and schema table names.
 	for (const lang of ["ssl", "sql"] as const) {
 		monaco.languages.registerLinkProvider(lang, {
-			provideLinks(model) {
-				const lineCount = model.getLineCount();
-				if (lineCount > 5000) return { links: [] };
+			async provideLinks(model) {
+				if (model.getLineCount() > 5000) return { links: [] };
 				const allDocs = docs();
 				const wsRoot = state.workspace?.root;
 				const { map: ticketMap, match: matchTickets } = ticketIndex();
@@ -999,6 +969,13 @@ export function registerSchemaHoverProviders(): void {
 				const schemaRe = schemaKeys.length
 					? new RegExp(`(?<![A-Za-z0-9_])(${schemaKeys.map(escapeRegExp).join("|")})(?![A-Za-z0-9_])`, "gi")
 					: null;
+
+				// Which words are the language's own matters to a table's link alone: with no table to link, the server is
+				// not asked. It is asked before the lines are read, so that they are read from the text the answer is of.
+				const facts = lang === "ssl" && schemaRe ? await sslFacts(model) : NO_FACTS;
+				if (model.isDisposed()) return { links: [] };
+				const ownNames = facts.names ? namesByLine(facts.names) : null;
+				const lineCount = model.getLineCount();
 
 				const lines: string[] = [];
 				for (let lineNum = 1; lineNum <= lineCount; lineNum++) lines.push(model.getLineContent(lineNum));
@@ -1056,7 +1033,7 @@ export function registerSchemaHoverProviders(): void {
 							const to = from + m[0].length;
 							if (taken.some(([a, b]) => from < b && to > a)) continue;
 							if (SQL_RESERVED_KEYWORDS.has(m[0].toLowerCase())) continue;
-							if (lang === "ssl" && isSslDeclarationTarget(text, from)) continue;
+							if (lang === "ssl" && isSslOwnWord(facts, lineNum - 1, from, ownNames?.get(lineNum - 1) ?? (ownNames ? [] : undefined))) continue;
 							const doc = findSchemaDocForIdentifier(m[0], allDocs);
 							if (!doc) continue;
 							const rel = wsRoot ? relativeTo(wsRoot, doc.path).replace(/\\/g, "/") : doc.name;
@@ -1410,20 +1387,24 @@ export function registerSchemaHoverProviders(): void {
 	monaco.languages.registerCodeLensProvider("ssl", codeLensProvider);
 
 	// Refresh CodeLenses reactively whenever LSP state/symbols, workspace docs, or doc audit results update.
-	createRoot(() => {
-		createEffect(() => {
-			void state.workspace?.root;
-			void state.lsp.state;
-			modelSymbolCache.clear();
-			lensEmitter.fire(codeLensProvider);
-		});
-		createEffect(() => {
-			void symbols();
-			void docs();
-			void docAuditData();
-			lensEmitter.fire(codeLensProvider);
-		});
-	});
+	runWithOwner(null, () =>
+		createRoot(() => {
+			const env = createMemo(
+				() => [state.workspace?.root, state.lsp.state] as const,
+				{ equals: (a, b) => a[0] === b[0] && a[1] === b[1] },
+			);
+			createEffect(env, () => {
+				modelSymbolCache.clear();
+				lensEmitter.fire(codeLensProvider);
+			});
+			createEffect(
+				() => [symbols(), docs(), docAuditData()] as const,
+				() => {
+					lensEmitter.fire(codeLensProvider);
+				},
+			);
+		}),
+	);
 }
 
 /** Command Palette action: jumps from the identifier under cursor in SSL/SQL/Markdown to its documented schema file. */

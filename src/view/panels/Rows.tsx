@@ -5,7 +5,8 @@
 // row's menu. The arithmetic is in rowMoves.ts; this file applies it to the DOM.
 import { Icon, type IconName } from "../Icon";
 import { state } from "../state";
-import { createSignal, createUniqueId, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createSignal, createUniqueId, onSettled, Show } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import { foldedFrom, isMoveKey, moveIndex, restoreIndex, stopIndex, treeStep, typeAhead, withFold, type TreeRow } from "./rowMoves";
 
 export type Point = { x: number; y: number };
@@ -38,18 +39,20 @@ export const isFolded = (name: string) => !tested() && folded().includes(name);
 /** Shuts or opens many at once: "collapse all", "expand all". */
 export function setFolds(names: readonly string[], shut: boolean) {
 	if (tested()) return;
-	setFolded(names.reduce((list, name) => withFold(list, name, shut), folded()));
+	const next = names.reduce((list, name) => withFold(list, name, shut), folded());
+	setFolded(next);
 	try {
-		kept()?.setItem(FOLDED, JSON.stringify(folded()));
+		kept()?.setItem(FOLDED, JSON.stringify(next));
 	} catch {
 		// Not kept: folded for this session all the same.
 	}
 }
 export function setFold(name: string, shut: boolean) {
 	if (tested()) return;
-	setFolded(withFold(folded(), name, shut));
+	const next = withFold(folded(), name, shut);
+	setFolded(next);
 	try {
-		kept()?.setItem(FOLDED, JSON.stringify(folded()));
+		kept()?.setItem(FOLDED, JSON.stringify(next));
 	} catch {
 		// Not kept: the group is folded for this session all the same.
 	}
@@ -221,10 +224,9 @@ export function Rows(props: {
 		}
 	};
 
-	onMount(() => {
+	onSettled(() => {
 		const observer = new MutationObserver(sync);
 		observer.observe(el, { childList: true, subtree: true });
-		onCleanup(() => observer.disconnect());
 		sync();
 		props.api?.({
 			focus(key) {
@@ -232,6 +234,7 @@ export function Rows(props: {
 				settle(rowsIn(el));
 			},
 		});
+		return () => observer.disconnect();
 	});
 
 	return (
@@ -309,10 +312,12 @@ export function Row(props: {
 					toggle: () => props.onToggle?.(),
 					key: (e) => props.onKey?.(e),
 					chord: (e) => props.onChord?.(e),
-					menu: props.onMenu && ((at) => props.onMenu?.(at)),
+					get menu() {
+						return props.onMenu ? (at: Point) => props.onMenu?.(at) : undefined;
+					},
 				})
 			}
-			classList={{ [props.class ?? "tree-row"]: true, ...props.classList }}
+			class={[props.class ?? "tree-row", props.classList]}
 			role={props.role ?? "option"}
 			tabindex={-1}
 			data-row={props.key}
@@ -325,7 +330,7 @@ export function Row(props: {
 			data-fold={props.expanded === undefined || (props.role ?? "option") === "treeitem" ? undefined : props.expanded ? "open" : "shut"}
 			title={props.title}
 			style={props.style}
-			draggable={props.draggable}
+			draggable={props.draggable === undefined ? undefined : props.draggable ? "true" : "false"}
 			onDragStart={(e) => props.onDragStart?.(e)}
 			onDragEnd={(e) => props.onDragEnd?.(e)}
 			onDragOver={(e) => props.onDragOver?.(e)}
@@ -394,8 +399,18 @@ export function RowGroup(props: {
 				}
 			>
 				<div
-					ref={(el) => handlers.set(el, { activate: flip, toggle: flip, key: () => false, chord: () => false, menu: props.onMenu && ((at) => props.onMenu?.(at)) })}
-					class={`${props.headClass ?? "group-head"} foldable`}
+					ref={(el) =>
+						handlers.set(el, {
+							activate: flip,
+							toggle: flip,
+							key: () => false,
+							chord: () => false,
+							get menu() {
+								return props.onMenu ? (at: Point) => props.onMenu?.(at) : undefined;
+							},
+						})
+					}
+					class={[props.headClass ?? "group-head", "foldable"]}
 					id={id}
 					role="button"
 					tabindex={-1}
@@ -451,7 +466,7 @@ export function IconButton(props: {
 	return (
 		<button
 			type="button"
-			classList={{ on: props.pressed === true }}
+			class={{ on: props.pressed === true }}
 			title={props.title ?? props.label}
 			aria-label={props.label}
 			aria-pressed={props.pressed === undefined ? undefined : props.pressed ? "true" : "false"}

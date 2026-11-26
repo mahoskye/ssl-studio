@@ -2,7 +2,8 @@
 // the snippets the project keeps in its knowledge base (ADR 0012), inserted
 // as they are written. When a plan chart is open, Palette switches cleanly to
 // business-analyst process shapes and stage navigation (ADR 0027).
-import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onSettled, Show, untrack } from "solid-js";
+import { createAsyncQuery } from "../asyncQuery";
 import { snippetAsText, TEMPLATES, type Template } from "../../shared/houseStyle";
 import { CALLOUT_PRESETS } from "../../shared/markdownEdit";
 import { createEmptyTable } from "../../shared/markdownTables";
@@ -34,12 +35,12 @@ import { driftFor } from "../plan/drift";
 import { addNodeDoc, nodeDocsOf, printPlan, removeNodeDoc, SHAPE_DRAG, type NodeKind, type Plan } from "../plan/model";
 import { PlanAssistant } from "../plan/PlanAssistant";
 import { NodeImplementation, PlanImplementation } from "../plan/PlanCodeDrilldown";
-import { activePlanBridge, planPaletteTabRequest, setActivePlanTab } from "../plan/planBridge";
+import { activePlanBridge, pendingField, planPaletteTabRequest, setActivePlanTab } from "../plan/planBridge";
 import "../plan/planExtra.css";
 import { NodeTests, PlanTests } from "../plan/PlanTests";
 import { assistOf } from "../plan/run";
 import { docs, isMarkdown } from "../project";
-import { activeDoc, activePath, applyText, markdownMode, notify, openFile, planMode, setMarkdownMode, state } from "../state";
+import { activeDoc, activePath, applyText, holdsPendingEdit, markdownMode, notify, openFile, planMode, setMarkdownMode, state } from "../state";
 import { insertCalloutInteractive, insertImageInteractive, insertMarkdownTemplate, loadMarkdownTemplates, manageTemplates, newNoteFromTemplate } from "../templater";
 import { IconButton, Row, RowGroup, Rows, setFolds } from "./Rows";
 import { SectionSplitter } from "./SectionSplitter";
@@ -351,7 +352,7 @@ export function Palette() {
 		const path = activePath();
 		return path && isMarkdown(path) ? path : null;
 	};
-	const [mdTemplates] = createResource(
+	const [mdTemplates] = createAsyncQuery(
 		() => (activeMdPath() ? ([state.workspace?.root ?? "", state.treeVersion, state.settings.templatesFolder ?? ""] as const) : null),
 		() => loadMarkdownTemplates(),
 	);
@@ -501,26 +502,29 @@ export function Palette() {
 		setPlanTabSignal(tab);
 		setActivePlanTab(tab);
 	};
-	createEffect(() => {
-		const req = planPaletteTabRequest();
-		if (!req || req.seq <= lastHandledPlanTabSeq) return;
-		lastHandledPlanTabSeq = req.seq;
-		setPlanTab(req.tab);
-	});
 	createEffect(
-		on(
-			() => state.workspace?.root,
-			() => {
-				asked = "";
-				askedMdSnippet = "";
-				setShown(null);
-				setShownMd(null);
-			},
-			{ defer: true },
-		),
+		() => planPaletteTabRequest(),
+		(req) => {
+			if (!req || req.seq <= lastHandledPlanTabSeq) return;
+			lastHandledPlanTabSeq = req.seq;
+			setPlanTab(req.tab);
+		},
+	);
+	const wsRoot = createMemo(() => state.workspace?.root);
+	createEffect(
+		() => wsRoot(),
+		() => {
+			asked = "";
+			askedMdSnippet = "";
+			setShown(null);
+			setShownMd(null);
+		},
+		{ defer: true },
 	);
 	const commitOnEnter = (e: KeyboardEvent) => {
-		if (e.key === "Enter" && !e.shiftKey) {
+		// Not the Enter that takes an input method's candidate (as Escape below leaves one alone): that one belongs
+		// to the composition, and committing on it cut the word short.
+		if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
 			e.preventDefault();
 			(e.currentTarget as HTMLElement).blur();
 		}
@@ -529,27 +533,155 @@ export function Palette() {
 		el.style.height = "auto";
 		el.style.height = `${Math.min(200, Math.max(36, el.scrollHeight + 2))}px`;
 	};
-	const bindAutoTextarea = (value?: () => string) => (el: HTMLTextAreaElement) => {
-		const refit = () => fitTextarea(el);
-		queueMicrotask(refit);
+	const bindAutoTextarea = (value?: () => string) => {
+		let el: HTMLTextAreaElement | undefined;
+		let ro: ResizeObserver | undefined;
+		const refit = () => {
+			if (el) fitTextarea(el);
+		};
 		if (value) {
-			createEffect(() => {
-				value();
-				queueMicrotask(refit);
-			});
+			createEffect(
+				() => value(),
+				() => {
+					queueMicrotask(refit);
+				},
+			);
 		}
-		if (typeof ResizeObserver !== "undefined") {
-			let lastWidth = -1;
-			const ro = new ResizeObserver((entries) => {
-				const w = Math.round(entries[0]?.contentRect.width ?? 0);
-				if (w > 0 && w !== lastWidth) {
-					lastWidth = w;
-					refit();
-				}
-			});
-			ro.observe(el);
-			onCleanup(() => ro.disconnect());
-		}
+		onCleanup(() => ro?.disconnect());
+		return (nextEl: HTMLTextAreaElement) => {
+			el = nextEl;
+			ro?.disconnect();
+			ro = undefined;
+			queueMicrotask(refit);
+			if (typeof ResizeObserver !== "undefined") {
+				let lastWidth = -1;
+				ro = new ResizeObserver((entries) => {
+					const w = Math.round(entries[0]?.contentRect.width ?? 0);
+					if (w > 0 && w !== lastWidth) {
+						lastWidth = w;
+						refit();
+					}
+				});
+				ro.observe(nextEl);
+			}
+		};
+	};
+	// A plan field's draft, and what it was typed for (`resetKey`: the node's id, or the plan's path). The text
+	// reaches the plan when the field is left, and also when the selection moves on, the field is taken away, or
+	// a save asks for what is pending, without the field having been left: `pendingField` (planBridge.ts) says why.
+	const DraftInput = (props: {
+		value: string;
+		resetKey?: string;
+		placeholder?: string;
+		list?: string;
+		onKeyDown?: (e: KeyboardEvent) => void;
+		/** `key` is the `resetKey` the text was typed under, which may no longer be the one shown. */
+		onCommit: (value: string, key: string) => void;
+	}) => {
+		const field = pendingField(props, { hold: holdsPendingEdit });
+		let reverted = false;
+		let disposed = false;
+		onCleanup(() => {
+			disposed = true;
+		});
+		return (
+			<input
+				value={field.draft()}
+				placeholder={props.placeholder}
+				list={props.list}
+				onFocus={() => {
+					reverted = false;
+				}}
+				onKeyDown={(e) => {
+					if (e.key === "Escape" && !e.isComposing && e.keyCode !== 229) {
+						e.preventDefault();
+						e.stopPropagation();
+						reverted = true;
+						const el = e.currentTarget;
+						el.value = field.revert();
+						el.blur();
+						return;
+					}
+					props.onKeyDown?.(e);
+				}}
+				onInput={(e) => {
+					reverted = false;
+					field.type(e.currentTarget.value);
+				}}
+				onChange={(e) => {
+					if (reverted) {
+						reverted = false;
+						return;
+					}
+					const el = e.currentTarget;
+					field.commit(el.value);
+					onSettled(() => {
+						if (disposed) return;
+						const cur = untrack(() => props.value);
+						field.show(cur);
+						if (el.value !== cur) el.value = cur;
+					});
+				}}
+			/>
+		);
+	};
+	const DraftTextarea = (props: {
+		value: string;
+		resetKey?: string;
+		rows?: number;
+		placeholder?: string;
+		onCommit: (value: string, key: string) => void;
+	}) => {
+		const field = pendingField(props, { hold: holdsPendingEdit });
+		let reverted = false;
+		let disposed = false;
+		onCleanup(() => {
+			disposed = true;
+		});
+		return (
+			<textarea
+				ref={bindAutoTextarea(field.draft)}
+				rows={props.rows}
+				value={field.draft()}
+				placeholder={props.placeholder}
+				onFocus={() => {
+					reverted = false;
+				}}
+				onKeyDown={(e) => {
+					if (e.key === "Escape" && !e.isComposing && e.keyCode !== 229) {
+						e.preventDefault();
+						e.stopPropagation();
+						reverted = true;
+						const el = e.currentTarget;
+						el.value = field.revert();
+						fitTextarea(el);
+						el.blur();
+					}
+				}}
+				onInput={(e) => {
+					reverted = false;
+					field.type(e.currentTarget.value);
+					fitTextarea(e.currentTarget);
+				}}
+				onChange={(e) => {
+					if (reverted) {
+						reverted = false;
+						return;
+					}
+					const el = e.currentTarget;
+					field.commit(el.value);
+					onSettled(() => {
+						if (disposed) return;
+						const cur = untrack(() => props.value);
+						field.show(cur);
+						if (el.value !== cur) {
+							el.value = cur;
+							fitTextarea(el);
+						}
+					});
+				}}
+			/>
+		);
 	};
 	const showTemplate = (t: Template) => void setShown({ label: t.label, note: t.note, text: snippetAsText(t.body()) });
 	/** A snippet's text is read when it is pointed at: the row asked for last is the one shown. */
@@ -1008,8 +1140,8 @@ export function Palette() {
 										<button
 											type="button"
 											role="tab"
-											aria-selected={planTab() === "design"}
-											classList={{ on: planTab() === "design" }}
+											aria-selected={planTab() === "design" ? "true" : "false"}
+											class={{ on: planTab() === "design" }}
 											onClick={() => setPlanTab("design")}
 										>
 											Design
@@ -1017,8 +1149,8 @@ export function Palette() {
 										<button
 											type="button"
 											role="tab"
-											aria-selected={planTab() === "assistant"}
-											classList={{ on: planTab() === "assistant" }}
+											aria-selected={planTab() === "assistant" ? "true" : "false"}
+											class={{ on: planTab() === "assistant" }}
 											onClick={() => setPlanTab("assistant")}
 										>
 											<span>Assistant</span>
@@ -1042,22 +1174,23 @@ export function Palette() {
 												const threshold = Math.max(24, shapeGridEl.offsetTop + 26);
 												setShapesScrolled(scrollEl.scrollTop > threshold);
 											};
-											createEffect(() => {
-												plan.selectedId();
-												setSelectedShapesExpanded(false);
-												setDocPickerOpen(false);
-												setDocPickerQuery("");
-												setDocPickerIdx(0);
-												queueMicrotask(syncDock);
-											});
-											createEffect(() => {
-												shapesCollapsed();
-												nodeImplOpen();
-												planImplOpen();
-												nodeTestsOpen();
-												planTestsOpen();
-												queueMicrotask(syncDock);
-											});
+											const selectedId = createMemo(() => plan.selectedId());
+											createEffect(
+												() => selectedId(),
+												() => {
+													setSelectedShapesExpanded(false);
+													setDocPickerOpen(false);
+													setDocPickerQuery("");
+													setDocPickerIdx(0);
+													queueMicrotask(syncDock);
+												},
+											);
+											createEffect(
+												() => [shapesCollapsed(), nodeImplOpen(), planImplOpen(), nodeTestsOpen(), planTestsOpen()] as const,
+												() => {
+													queueMicrotask(syncDock);
+												},
+											);
 											const startShapeDrag = (e: DragEvent, shape: PlanShapeItem) => {
 												if (!shape.dragKind) return;
 												e.dataTransfer?.setData(SHAPE_DRAG, shape.dragKind);
@@ -1076,22 +1209,20 @@ export function Palette() {
 													scrollEl?.scrollTo({ top: 0, behavior: "smooth" });
 												}
 											};
-											const renderRail = (className: string, visible: boolean) => (
+											const renderRail = (className: string, visible: () => boolean) => (
 												<div
-													class={className}
-													classList={{ visible }}
+													class={[className, { visible: visible() }]}
 													role="toolbar"
 													aria-label="Process shapes"
-													aria-hidden={!visible}
+													aria-hidden={visible() ? "false" : "true"}
 												>
 													<For each={PLAN_SHAPES}>
 														{(shape) => (
 															<button
 																type="button"
-																class="plan-dock-btn"
-																classList={{ active: Boolean(shape.active?.(plan)) }}
-																tabIndex={visible ? 0 : -1}
-																draggable={Boolean(shape.dragKind)}
+																class={["plan-dock-btn", { active: Boolean(shape.active?.(plan)) }]}
+																tabindex={visible() ? 0 : -1}
+																draggable={shape.dragKind ? "true" : "false"}
 																onDragStart={(e) => startShapeDrag(e, shape)}
 																onClick={() => shape.run(plan)}
 																title={`${shape.label}: ${shape.about}`}
@@ -1104,7 +1235,7 @@ export function Palette() {
 													<button
 														type="button"
 														class="plan-rail-toggle"
-														tabIndex={visible ? 0 : -1}
+														tabindex={visible() ? 0 : -1}
 														onClick={expandFromRail}
 														title="Expand process shapes"
 														aria-label="Expand process shapes"
@@ -1116,10 +1247,10 @@ export function Palette() {
 											return (
 												<div class="plan-palette-wrap">
 													{/* Top icon rail: shown directly when collapsed (auto on selected step, or manually collapsed). */}
-													<Show when={shapesCollapsed()}>{renderRail("plan-shape-rail", true)}</Show>
+													<Show when={shapesCollapsed()}>{renderRail("plan-shape-rail", () => true)}</Show>
 
 													{/* Scroll-triggered top icon rail when Process shapes is expanded and scrolled out of view. */}
-													<Show when={!shapesCollapsed()}>{renderRail("plan-shape-dock", shapesScrolled())}</Show>
+													<Show when={!shapesCollapsed()}>{renderRail("plan-shape-dock", shapesScrolled)}</Show>
 
 													<div class="plan-palette-scroll" ref={scrollEl} onScroll={syncDock}>
 														{/* Full Process shapes grid when expanded; manually collapsible to top rail. */}
@@ -1143,12 +1274,14 @@ export function Palette() {
 																		{(shape) => (
 																			<button
 																				type="button"
-																				class="plan-shape-tile"
-																				classList={{
-																					active: Boolean(shape.active?.(plan)),
-																					wide: shape.id === "plan-connect",
-																				}}
-																				draggable={Boolean(shape.dragKind)}
+																				class={[
+																					"plan-shape-tile",
+																					{
+																						active: Boolean(shape.active?.(plan)),
+																						wide: shape.id === "plan-connect",
+																					},
+																				]}
+																				draggable={shape.dragKind ? "true" : "false"}
 																				onDragStart={(e) => startShapeDrag(e, shape)}
 																				onClick={() => shape.run(plan)}
 																				onMouseEnter={() => setPlanNote(shape.about)}
@@ -1175,9 +1308,8 @@ export function Palette() {
 														{/* Contextual inspector: Selected object OR Plan (never both stacked together). */}
 														<Show
 															when={plan.selectedNode()}
-															keyed
 															fallback={
-																<Show when={p()} keyed>
+																<Show when={p()}>
 																	{(curPlan) => (
 																		<div class="plan-inspector">
 																			<section class="plan-prop-section" aria-label="Plan details">
@@ -1185,21 +1317,21 @@ export function Palette() {
 																				<div class="plan-prop-fields">
 																					<label class="plan-prop-field">
 																						<span>Title</span>
-																						<input
-																							value={curPlan.title ?? ""}
+																						<DraftInput
+																							resetKey={plan.path}
+																							value={curPlan().title ?? ""}
 																							onKeyDown={commitOnEnter}
-																							onChange={(e) => plan.setPlanField("title", e.currentTarget.value)}
+																							onCommit={(val) => plan.setPlanField("title", val)}
 																						/>
 																					</label>
 																					<label class="plan-prop-field">
 																						<span>Goal</span>
-																						<textarea
-																							ref={bindAutoTextarea(goalText)}
+																						<DraftTextarea
+																							resetKey={plan.path}
 																							rows={2}
 																							value={goalText()}
 																							placeholder="What this process should achieve"
-																							onInput={(e) => fitTextarea(e.currentTarget)}
-																							onChange={(e) => plan.setPlanField("goal", e.currentTarget.value)}
+																							onCommit={(val) => plan.setPlanField("goal", val)}
 																						/>
 																					</label>
 																					<label
@@ -1208,19 +1340,20 @@ export function Palette() {
 																					>
 																						<span>Ticket</span>
 																						<div class="plan-ticket-row">
-																							<input
-																								value={typeof curPlan.ticket === "string" ? curPlan.ticket : ""}
+																							<DraftInput
+																								resetKey={plan.path}
+																								value={typeof curPlan().ticket === "string" ? (curPlan().ticket as string) : ""}
 																								placeholder="LIMS-123"
 																								onKeyDown={commitOnEnter}
-																								onChange={(e) => plan.setPlanField("ticket", e.currentTarget.value)}
+																								onCommit={(val) => plan.setPlanField("ticket", val)}
 																							/>
-																							<Show when={ticketDoc()} keyed>
+																							<Show when={ticketDoc()}>
 																								{(td) => (
 																									<IconButton
-																										label={`Open ticket ${td.ticket}`}
-																										title={`Open ${td.ticket}${td.title ? `: ${td.title}` : ""}`}
+																										label={`Open ticket ${td().ticket}`}
+																										title={`Open ${td().ticket}${td().title ? `: ${td().title}` : ""}`}
 																										icon="go-to-file"
-																										onClick={() => void openFile(td.path)}
+																										onClick={() => void openFile(td().path)}
 																									/>
 																								)}
 																							</Show>
@@ -1256,7 +1389,7 @@ export function Palette() {
 																					type="button"
 																					class="plan-sched-btn"
 																					title="Implement this plan with Agent or run the spec build"
-																					onClick={() => plan.triggerScheduledBuild({ kind: "plan", label: curPlan.title || "this plan" })}
+																					onClick={() => plan.triggerScheduledBuild({ kind: "plan", label: curPlan().title || "this plan" })}
 																				>
 																					<Icon name="tools" />
 																					<span>Implement with Agent</span>
@@ -1266,7 +1399,7 @@ export function Palette() {
 																						type="button"
 																						class="plan-sched-btn"
 																						title="Reconcile chart and code drift with Agent"
-																						onClick={() => void fixPlanDriftWithAgent(plan.path, curPlan, plan.planUri())}
+																						onClick={() => void fixPlanDriftWithAgent(plan.path, curPlan(), plan.planUri())}
 																					>
 																						<Icon name="warning" />
 																						<span>Fix drift with Agent</span>
@@ -1284,7 +1417,7 @@ export function Palette() {
 																			</div>
 
 																			<PlanTests
-																				plan={curPlan}
+																				plan={curPlan()}
 																				allPaths={plan.allPaths()}
 																				activePathIndex={plan.activePathIndex()}
 																				open={planTestsOpen()}
@@ -1302,7 +1435,7 @@ export function Palette() {
 																			/>
 
 																			<PlanImplementation
-																				plan={curPlan}
+																				plan={curPlan()}
 																				builtUnits={plan.builtUnits()}
 																				open={planImplOpen()}
 																				onToggle={() => setPlanImplOpen((o) => !o)}
@@ -1319,18 +1452,18 @@ export function Palette() {
 															}
 														>
 															{(node) => {
-																const displayKind = node.kind === "call" ? "step" : node.kind;
-																const heading = `Selected ${displayKind}`;
-																const iconName: IconName =
-																	displayKind === "decision"
+																const displayKind = () => (node().kind === "call" ? "step" : node().kind);
+																const heading = () => `Selected ${displayKind()}`;
+																const iconName = (): IconName =>
+																	displayKind() === "decision"
 																		? "git-branch"
-																		: displayKind === "end"
+																		: displayKind() === "end"
 																			? "pass-filled"
 																			: "play";
-																const codeState = () => plan.codeStateOf(node.id);
-																const actionable = node.kind !== "start" && node.kind !== "end";
+																const codeState = () => plan.codeStateOf(node().id);
+																const actionable = () => node().kind !== "start" && node().kind !== "end";
 																const linkedDocs = () =>
-																	nodeDocsOf(node).map((ref) => {
+																	nodeDocsOf(node()).map((ref) => {
 																		const doc = resolveLinkedDoc(ref);
 																		const label = doc ? docDisplayName(doc) : baseName(ref) || ref;
 																		const kind = doc ? docKindTag(doc) : "";
@@ -1364,7 +1497,7 @@ export function Palette() {
 																const linkDoc = (d: DocFile) => {
 																	const cur = p();
 																	if (!cur) return;
-																	applyText(plan.path, printPlan(addNodeDoc(cur, node.id, docRelPath(d))));
+																	applyText(plan.path, printPlan(addNodeDoc(cur, node().id, docRelPath(d))));
 																	setDocPickerOpen(false);
 																	setDocPickerQuery("");
 																	setDocPickerIdx(0);
@@ -1373,7 +1506,7 @@ export function Palette() {
 																const unlinkDoc = (ref: string) => {
 																	const cur = p();
 																	if (!cur) return;
-																	applyText(plan.path, printPlan(removeNodeDoc(cur, node.id, ref)));
+																	applyText(plan.path, printPlan(removeNodeDoc(cur, node().id, ref)));
 																};
 																const openLinkedDoc = (item: { ref: string; doc: DocFile | null }) => {
 																	if (item.doc) return void openFile(item.doc.path);
@@ -1389,14 +1522,14 @@ export function Palette() {
 																};
 																return (
 																	<div class="plan-inspector">
-																		<section class="plan-prop-section plan-step-section" aria-label={heading}>
+																		<section class="plan-prop-section plan-step-section" aria-label={heading()}>
 																			<div class="plan-step-head">
-																				<Icon name={iconName} class={`plan-sel-icon ${displayKind}`} />
-																				<span class="plan-prop-title">{heading}</span>
+																				<Icon name={iconName()} class={`plan-sel-icon ${displayKind()}`} />
+																				<span class="plan-prop-title">{heading()}</span>
 																				<span class="spacer" />
-																				<IconButton label={`Close ${heading.toLowerCase()}`} title="Back to plan details (Esc)" icon="close" onClick={() => plan.clearSelection()} />
+																				<IconButton label={`Close ${heading().toLowerCase()}`} title="Back to plan details (Esc)" icon="close" onClick={() => plan.clearSelection()} />
 																			</div>
-																			<Show when={actionable}>
+																			<Show when={actionable()}>
 																				<div class="plan-step-status-row">
 																					<span
 																						class={`plan-code-badge ${codeState()}`}
@@ -1419,10 +1552,11 @@ export function Palette() {
 																							if (codeState() === "yellow" && cur && driftFor(plan.planUri() ?? "").items.length > 0) {
 																								void fixPlanDriftWithAgent(plan.path, cur, plan.planUri());
 																							} else {
+																								const curNode = node();
 																								plan.triggerScheduledBuild({
 																									kind: "node",
-																									id: node.id,
-																									label: node.text.trim() || node.id,
+																									id: curNode.id,
+																									label: curNode.text.trim() || curNode.id,
 																								});
 																							}
 																						}}
@@ -1442,8 +1576,8 @@ export function Palette() {
 																						{(k) => (
 																							<button
 																								type="button"
-																								classList={{ on: displayKind === k }}
-																								aria-pressed={displayKind === k}
+																								class={{ on: displayKind() === k }}
+																								aria-pressed={displayKind() === k ? "true" : "false"}
 																								onClick={() => plan.setNodeKind(k)}
 																							>
 																								{k === "step" ? "Step" : "Decision"}
@@ -1455,21 +1589,23 @@ export function Palette() {
 																			<div class="plan-prop-fields">
 																				<label class="plan-prop-field">
 																					<span>Label</span>
-																					<input
-																						value={node.text}
+																					<DraftInput
+																						resetKey={node().id}
+																						value={node().text}
 																						placeholder="Describe this step"
 																						onKeyDown={commitOnEnter}
-																						onChange={(e) => plan.setNodeText(e.currentTarget.value)}
+																						onCommit={(val, id) => plan.setNodeText(val, id)}
 																					/>
 																				</label>
 																				<label class="plan-prop-field">
 																					<span>Stage</span>
-																					<input
+																					<DraftInput
+																						resetKey={node().id}
 																						value={plan.groupName()}
 																						list="plan-palette-groups"
 																						placeholder="None (unassigned)"
 																						onKeyDown={commitOnEnter}
-																						onChange={(e) => plan.setNodeGroup(e.currentTarget.value)}
+																						onCommit={(val, id) => plan.setNodeGroup(val, id)}
 																					/>
 																				</label>
 																				<datalist id="plan-palette-groups">
@@ -1477,13 +1613,12 @@ export function Palette() {
 																				</datalist>
 																				<label class="plan-prop-field">
 																					<span>Notes</span>
-																					<textarea
-																						ref={bindAutoTextarea()}
+																					<DraftTextarea
+																						resetKey={node().id}
 																						rows={2}
-																						value={node.notes ?? ""}
+																						value={node().notes ?? ""}
 																						placeholder="Business rules, exceptions, or context"
-																						onInput={(e) => fitTextarea(e.currentTarget)}
-																						onChange={(e) => plan.setNodeField("notes", e.currentTarget.value)}
+																						onCommit={(val, id) => plan.setNodeField("notes", val, id)}
 																					/>
 																				</label>
 																				<div class="plan-prop-field plan-node-docs">
@@ -1493,7 +1628,7 @@ export function Palette() {
 																							ref={addDocBtn}
 																							type="button"
 																							class="plan-node-doc-add"
-																							aria-expanded={docPickerOpen()}
+																							aria-expanded={docPickerOpen() ? "true" : "false"}
 																							title="Link a decision, question, reference, snippet, spec, schema, registry, or ticket to this step"
 																							onClick={() => {
 																								setDocPickerOpen((o) => !o);
@@ -1508,7 +1643,7 @@ export function Palette() {
 																						<div class="plan-node-doc-chips">
 																							<For each={linkedDocs()}>
 																								{(item) => (
-																									<span class="plan-node-doc-chip" classList={{ missing: !item.doc }}>
+																									<span class={["plan-node-doc-chip", { missing: !item.doc }]}>
 																										<button
 																											type="button"
 																											class="plan-node-doc-open"
@@ -1583,9 +1718,8 @@ export function Palette() {
 																												<button
 																													type="button"
 																													role="option"
-																													aria-selected={docPickerIdx() === i()}
-																													class="plan-doc-picker-item"
-																													classList={{ active: docPickerIdx() === i() }}
+																													aria-selected={docPickerIdx() === i() ? "true" : "false"}
+																													class={["plan-doc-picker-item", { active: docPickerIdx() === i() }]}
 																													title={docRelPath(doc)}
 																													onMouseEnter={() => setDocPickerIdx(i())}
 																													onClick={() => linkDoc(doc)}
@@ -1602,12 +1736,12 @@ export function Palette() {
 																					</Show>
 																				</div>
 																			</div>
-																			<Show when={p()} keyed>
+																			<Show when={p()}>
 																				{(curPlan) => (
 																					<>
 																						<NodeTests
-																							plan={curPlan}
-																							node={node}
+																							plan={curPlan()}
+																							node={node()}
 																							allPaths={plan.allPaths()}
 																							activePathIndex={plan.activePathIndex()}
 																							open={nodeTestsOpen()}
@@ -1623,9 +1757,9 @@ export function Palette() {
 																							onTriggerScheduled={(scope) => plan.triggerScheduledBuild(scope)}
 																						/>
 																						<NodeImplementation
-																							plan={curPlan}
+																							plan={curPlan()}
 																							planUri={plan.planUri()}
-																							node={node}
+																							node={node()}
 																							open={nodeImplOpen()}
 																							onToggle={() => setNodeImplOpen((o) => !o)}
 																							onOpenUnit={(unit) => plan.openCodeUnit(unit)}

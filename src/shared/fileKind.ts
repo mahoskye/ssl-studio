@@ -35,16 +35,43 @@ export function looksBinary(bytes: Uint8Array): boolean {
 	if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xfe && bytes[2] === 0x00 && bytes[3] === 0x00) return true;
 	const utf16 = bytes.length >= 2 && ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff));
 	if (utf16) return false;
-	const end = Math.min(bytes.length, SNIFF_BYTES);
-	// Zero bytes, counted by whether they stand first or second of each pair.
-	const zeros = [0, 0];
-	for (let at = 0; at < end; at++) if (bytes[at] === 0) zeros[at % 2]!++;
+	const { zeros } = zeroSides(bytes);
 	if (!zeros[0] && !zeros[1]) return false;
 	// UTF-16 without its mark: plain letters, each beside a zero byte, the zeros all on one side. It is text, and
 	// it opens as it did before bytes were told from text here (its letters with marks between), to be saved back
 	// byte for byte.
+	return !unmarkedUtf16(bytes);
+}
+
+/** Zero bytes among the first of the bytes, counted by whether they stand first or second of each pair. */
+function zeroSides(bytes: Uint8Array): { zeros: [number, number]; end: number } {
+	const end = Math.min(bytes.length, SNIFF_BYTES);
+	const zeros: [number, number] = [0, 0];
+	for (let at = 0; at < end; at++) if (bytes[at] === 0) zeros[at % 2]!++;
+	return { zeros, end };
+}
+
+/**
+ * Which way round bytes are UTF-16 written without its mark, or null when they are not that: plain letters, each
+ * beside a zero byte, the zeros all on one side. The zero stands second where the low byte is written first.
+ */
+function unmarkedUtf16(bytes: Uint8Array): "utf-16le" | "utf-16be" | null {
+	const { zeros, end } = zeroSides(bytes);
 	const oneSide = (zeros[0] === 0) !== (zeros[1] === 0);
-	return !(oneSide && end >= 4 && zeros[0]! + zeros[1]! >= end * 0.4);
+	if (!(oneSide && end >= 4 && zeros[0] + zeros[1] >= end * 0.4)) return null;
+	return zeros[1] ? "utf-16le" : "utf-16be";
+}
+
+/**
+ * Which way round bytes are written as UTF-16: by the mark they open with or, without one, by the side their zero
+ * bytes stand on. Null when they are not UTF-16 that can be told. The mark of UTF-32 opens as that of UTF-16 does,
+ * and is not it.
+ */
+export function utf16Kind(bytes: Uint8Array): "utf-16le" | "utf-16be" | null {
+	if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xfe && bytes[2] === 0x00 && bytes[3] === 0x00) return null;
+	if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) return "utf-16le";
+	if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) return "utf-16be";
+	return unmarkedUtf16(bytes);
 }
 
 /** What a file is written in, as it is said to a person. */

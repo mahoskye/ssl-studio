@@ -218,6 +218,23 @@ export function disconnectForTest() {
 	closeActiveSocket = null;
 }
 
+/**
+ * Whether a file is there, asked by its size and not by reading it. A read says no for more than a missing file
+ * (a text too large to open is refused), and what asked "is it there?" by reading then wrote a new file over it.
+ * Where the sizes cannot be had, the answer is the read's, as it was.
+ */
+export function existsBy(sizes: (paths: string[]) => Promise<Record<string, number>>, read: (path: string) => Promise<unknown>, path: string): Promise<boolean> {
+	const byReading = () =>
+		read(path).then(
+			() => true,
+			() => false,
+		);
+	return sizes([path]).then((found) => (found && typeof found === "object" ? path in found : byReading()), byReading);
+}
+
+/** Whether a workspace file is there (`existsBy`, asked of the backend). */
+export const fileExists = (path: string): Promise<boolean> => existsBy(backend.sizes, backend.read, path);
+
 /** `backend.read(path)` and so on: every BackendApi method, called remotely. */
 export const backend = new Proxy({} as BackendApi, {
 	get: (_target, method) => {

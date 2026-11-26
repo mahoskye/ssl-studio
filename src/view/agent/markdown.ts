@@ -3,7 +3,7 @@
 // same step (editor/markdownHtml.ts), plus clickable [[wikilinks]], ticket keys,
 // and file#L12 / file#heading anchors.
 import DOMPurify from "dompurify";
-import { marked } from "marked";
+import { Marked } from "marked";
 import { findHeadingLine } from "../../shared/markdownEdit";
 import { docByName, namedLink } from "../../shared/namedLinks";
 import { isInside, resolvePath } from "../../shared/paths";
@@ -26,14 +26,67 @@ const FORBIDDEN = [
 const FORBIDDEN_ATTRS = [
 	"style", "background", "poster", "src", "srcset", "ping",
 	"action", "formaction", "popover", "popovertarget", "command", "commandfor",
+	// How the window's own styles and scripts find things (see replyKeepsAttribute).
+	"id", "name",
 ];
 
 export const REPLY_PURIFY_CONFIG = {
 	FORBID_TAGS: FORBIDDEN,
 	FORBID_ATTR: FORBIDDEN_ATTRS,
 	ALLOW_DATA_ATTR: false,
-	ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|ticket|wiki|file-ref):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
+	// The hyphens are escaped: unescaped, `.-:` was a range (it took in `/` and the digits and left `-` out), so a
+	// link to `docs/spec.md` or `spec2.md` lost its address while `ms-msdt:` and `search-ms:` kept theirs.
+	ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|ticket|wiki|file-ref):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
 };
+
+/**
+ * Whether an element of a reply keeps an attribute the lists above let through. A class is how the window's own
+ * styles are given, and a reply is not the window: `<div class="overlay"><div class="dialog">…` drew itself over
+ * the whole window as one of the app's dialogs, with a live link in it, and came back with the saved conversation.
+ * The classes kept are the two the Markdown renderer writes itself: a code block's language, which the highlighter
+ * reads, and the drawn box of a task (`taskBox`), on a span and spelled exactly as it is written there.
+ */
+export function replyKeepsAttribute(tag: string, name: string, value: string): boolean {
+	const attr = name.toLowerCase();
+	if (attr === "id" || attr === "name") return false;
+	if (attr === "class") {
+		const element = tag.toLowerCase();
+		return (element === "code" && /^language-[\w+#.-]+$/.test(value)) || (element === "span" && /^task-box(?: checked)?$/.test(value));
+	}
+	return true;
+}
+
+/**
+ * The box of a task in a list, drawn. The Markdown renderer writes `- [ ] step` and `- [x] done` with an `<input>`,
+ * and a reply may hold no input of any kind (FORBIDDEN): the sanitiser took the box out and left a plain bullet,
+ * done or not, while the panel's own starter asks the model for a checklist. So the box is not an input at all. It
+ * is an empty span the stylesheet draws (`.task-box`), which cannot be ticked, focused or sent anywhere: a reply
+ * is not a form. An `<input>` that a reply writes itself, a checkbox among them, is refused as it was.
+ */
+const taskBox = (checked: boolean) => `<span class="task-box${checked ? " checked" : ""}" role="img" aria-label="${checked ? "Done" : "Not done"}"></span> `;
+
+/** The Markdown renderer of the replies: the one every other view uses, but for the box of a task. */
+const replyMarked = new Marked({ renderer: { checkbox: ({ checked }) => taskBox(Boolean(checked)) } });
+
+/** A reply's Markdown as HTML, before it is cleaned: what the sanitiser is given. */
+export function replyMarkup(text: string): string {
+	return replyMarked.parse(rewriteFileLinksBeforeParse(text), { async: false, gfm: true }) as string;
+}
+
+let replySanitizer: typeof DOMPurify | undefined;
+
+/** A sanitiser of the replies' own: the rule above is a hook, and a hook on the shared one would strip the classes of every rendered document. */
+function sanitizer(): typeof DOMPurify {
+	if (!replySanitizer) {
+		replySanitizer = typeof window === "undefined" ? DOMPurify : DOMPurify(window);
+		if (replySanitizer !== DOMPurify) {
+			replySanitizer.addHook("uponSanitizeAttribute", (node, data) => {
+				if (!replyKeepsAttribute(node.nodeName, data.attrName, data.attrValue)) data.keepAttr = false;
+			});
+		}
+	}
+	return replySanitizer;
+}
 
 const WORKSPACE_FILE_EXT = "(?:ssl|srvscr|ds|sql|ddl|pks|pkb|xfd|hl7|astm|ini|config|svg|md|markdown|csv|tsv|json|toml|ya?ml|xml|xsd|txt|ts|tsx|js|css)";
 const SINGLE_FILE_COLON_LINK_RE = new RegExp(`\\[([^\\]]+)\\]\\(([^\\s()/:]+\\.${WORKSPACE_FILE_EXT}:\\d+(?:-\\d+)?)\\)`, "gi");
@@ -120,9 +173,7 @@ export function renderReply(text: string): string {
 			about: [found.title || found.name, found.status ? `(${found.status})` : ""].filter(Boolean).join(" "),
 		};
 	};
-	const prepared = rewriteFileLinksBeforeParse(text);
-	const html = marked.parse(prepared, { async: false, gfm: true }) as string;
-	const clean = DOMPurify.sanitize(html, REPLY_PURIFY_CONFIG);
+	const clean = sanitizer().sanitize(replyMarkup(text), REPLY_PURIFY_CONFIG);
 	return finishMarkdown(clean, { tickets: tickets.length ? tickets : undefined, named });
 }
 

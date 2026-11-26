@@ -3,12 +3,15 @@
 import { Icon, type IconName } from "../Icon";
 import { Menu, type MenuItem } from "../Menu";
 import { showPanel } from "../panels/registry";
-import { createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createStore, For, onCleanup, onSettled, Show, snapshot, untrack } from "solid-js";
+import { createAsyncQuery } from "../asyncQuery";
 import { activeEditor } from "../editor/EditorGroup";
 import { activeLiveEditor, liveSelectionVersion } from "../editor/liveBridge";
+import type { monaco } from "../editor/monaco";
+import { searchableText, searchableTextNow } from "../lsp/facts";
 import { review, openReview, type Check } from "../editor/Review";
 import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, save, scriptsCameTo, setState, state } from "../state";
-import { agent, ask, chooseModel, clearEntries, clearSavedThreads, currentModel, interrupt, resume, safely, setAgent, start, startNewThread, stop, switchThread, syncWorkspaceThreads, type Entry } from "./store";
+import { agent, ask, chatSessionEpoch, chooseModel, clearEntries, clearSavedThreads, currentModel, interrupt, isSessionBreak, resume, safely, setAgent, start, startNewThread, stop, switchThread, syncWorkspaceThreads, type Entry } from "./store";
 import {
 	applySimpleUnifiedDiff,
 	composeQuestion,
@@ -26,16 +29,16 @@ import { notePath, proposalOf, runStep, showReview, startTidy, STEPS, tidy } fro
 import { isAllowedContextPath } from "../plan/assist";
 import { parseCsv } from "../../shared/csv";
 import { checkTables } from "../../shared/docTables";
-import { frontMatter, withFrontMatter } from "../../shared/frontMatter";
+import { frontMatter, many, withFrontMatter } from "../../shared/frontMatter";
 import { extractPlanTestCasesFromMarkdown, formatAgentThreadMarkdown, planMarkdownReviewExtraction, type ExtractedPlanTestCase } from "../../shared/menuBar";
 import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
 import { summarizePlanForPrompt } from "../../shared/planSummary";
 import { DOC_FOLDERS, frontValue, isCatalog, promptText, registryTitle, slug } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
 import { keysIn, ticketColumn } from "../../shared/registryTickets";
-import { extractSchemaPreview, referencedSchemaTables } from "../../shared/schemaIndex";
+import { extractSchemaPreview, hasSchemaTables, referencedSchemaTables } from "../../shared/schemaIndex";
 import { renderTemplate } from "../../shared/templater";
-import { cut, docsGoverningFile, MAX_WORK_PROMPT_CHARS, ticketForFile, ticketWork, workFor, type WorkTextOptions } from "../../shared/workContext";
+import { cut, docsGoverningFile, MAX_WORK_PROMPT_CHARS, ticketAtHand as listedTicketAtHand, ticketForFile, ticketWork, workFor, type WorkTextOptions } from "../../shared/workContext";
 import { backend } from "../backend";
 import { ask as askDialog, browseWorkspaceFile, choose, quickPick, quickPickMany } from "../dialogs";
 import { refreshDocAudit } from "../docAudit";
@@ -59,26 +62,44 @@ export function openAgentWithDraft(text: string, opts?: { cleanContext?: boolean
 /** Attaches a workspace text file to the next Agent turn context and focuses the Agent panel. */
 export function attachFileToAgent(path: string) {
 	ensureAgentWorkspace();
-	const root = state.workspace?.root;
+	const root = snapshot(state).workspace?.root;
 	if (!root || !isInside(root, path)) return notify("That file is not in this workspace.", "error");
 	const rel = relativeTo(root, path).replace(/\\/g, "/");
 	if (!isAllowedContextPath(rel)) return notify("Hidden files and dotfiles cannot be attached to Agent context.", "error");
 	const key = canonical(path);
-	setAttachedFiles((prev) => (prev.some((f) => canonical(f.path) === key) ? prev : [...prev, { path, rel }]));
+	setAgentCtx((s) => {
+		if (!s.attachedFiles.some((f) => canonical(f.path) === key)) {
+			s.attachedFiles.push({ path, rel });
+		}
+	});
 	showPanel("agent");
 	notify(`Attached ${baseName(path)} to Agent context.`);
 }
 
 // Module-level Agent context controls so `Ctrl+Shift+H` (`commands.ts`) and `AgentPanel` share the exact same selections.
 const [withWork, setWithWork] = createSignal(recall("agent.withWork") !== "no");
-const [pickedTicket, setPickedTicket] = createSignal<string | null>(null);
-const [withSchema, setWithSchema] = createSignal(false);
-const [withRefTables, setWithRefTables] = createSignal(false);
-const [withRegistries, setWithRegistries] = createSignal(false);
-const [withState, setWithState] = createSignal(false);
-const [withGitDiff, setWithGitDiff] = createSignal(false);
-const [withGoverningDocs, setWithGoverningDocs] = createSignal(false);
-const [attachedFiles, setAttachedFiles] = createSignal<{ path: string; rel: string }[]>([]);
+type AgentContextState = {
+	root: string | null;
+	pickedTicket: string | null;
+	withSchema: boolean;
+	withRefTables: boolean;
+	withRegistries: boolean;
+	withState: boolean;
+	withGitDiff: boolean;
+	withGoverningDocs: boolean;
+	attachedFiles: { path: string; rel: string }[];
+};
+const [agentCtx, setAgentCtx] = createStore<AgentContextState>({
+	root: null,
+	pickedTicket: null,
+	withSchema: false,
+	withRefTables: false,
+	withRegistries: false,
+	withState: false,
+	withGitDiff: false,
+	withGoverningDocs: false,
+	attachedFiles: [],
+});
 const [sentTick, setSentTick] = createSignal(0);
 /** Synchronous preparing lock held across async context assembly before `ask()` sets `agent.busy`. */
 const [preparing, setPreparing] = createSignal(false);
@@ -95,46 +116,79 @@ let sentContext: { session: string | null; root: string | null; hashes: Map<stri
 let lastWorkspaceRoot: string | null = null;
 
 /** Resets all workspace-scoped Agent context & session state whenever the user opens a different folder. */
-function ensureAgentWorkspace(): void {
-	const curRoot = state.workspace?.root ? canonical(state.workspace.root) : null;
-	if (curRoot === lastWorkspaceRoot) return;
+function ensureAgentWorkspace(): boolean {
+	const rawRoot = snapshot(state).workspace?.root;
+	const curRoot = rawRoot ? canonical(rawRoot) : null;
+	if (curRoot === lastWorkspaceRoot) return false;
 	lastWorkspaceRoot = curRoot;
-	setPickedTicket(null);
-	setWithSchema(false);
-	setWithRefTables(false);
-	setWithRegistries(false);
-	setWithState(false);
-	setWithGitDiff(false);
-	setWithGoverningDocs(false);
-	setAttachedFiles([]);
+	setAgentCtx((s) => {
+		s.root = curRoot;
+		s.pickedTicket = null;
+		s.withSchema = false;
+		s.withRefTables = false;
+		s.withRegistries = false;
+		s.withState = false;
+		s.withGitDiff = false;
+		s.withGoverningDocs = false;
+		s.attachedFiles = [];
+	});
 	sentContext = { session: null, root: curRoot, hashes: new Map() };
 	syncWorkspaceThreads(curRoot);
 	setSentTick((n) => n + 1);
+	return true;
 }
 
-/** Auto-detected ticket: explicit workspace activeTicket > file-specific ticket > single in-progress ticket. */
+/** Auto-detected ticket (reactive): explicit workspace activeTicket > file-specific ticket > single in-progress ticket. */
 function resolvedAutoTicket(): string {
 	return state.settings.activeTicket?.trim() || ticketForFile(docs(), activePath(), state.workspace?.root) || ticketAtHand();
+}
+
+/** Auto-detected ticket (imperative): reads unflushed `snapshot(state)` so workspace/tab/setting switches are seen immediately. */
+function resolvedAutoTicketNow(): string {
+	const cur = snapshot(state);
+	const root = cur.workspace?.root;
+	const curPath = cur.groups[cur.activeGroup]?.active ?? null;
+	const explicit = cur.settings.activeTicket?.trim();
+	if (explicit) return explicit;
+	const allDocs = untrack(docs);
+	const scopedDocs = root ? allDocs.filter((d) => isInside(root, d.path)) : allDocs;
+	const byFile = ticketForFile(scopedDocs, curPath, root);
+	if (byFile) return byFile;
+	if (curPath) {
+		const openDoc = documents.get(curPath);
+		if (openDoc && !openDoc.binary) {
+			if (curPath.toLowerCase().endsWith(".plan.json")) {
+				const t = parsePlan(openDoc.model.getValue()).plan?.ticket;
+				if (typeof t === "string" && t.trim()) return t.trim();
+			} else if (/\.(md|markdown)$/i.test(curPath)) {
+				const { values } = frontMatter(openDoc.model.getValue());
+				const fromOpen = many(values.ticket)[0] ?? many(values.tickets)[0] ?? "";
+				if (fromOpen) return fromOpen;
+			}
+		}
+	}
+	return listedTicketAtHand(scopedDocs, curPath);
 }
 
 /** Current ticket & extra-context options configured in the Agent panel (honored by `Ctrl+Shift+H` too). */
 export function currentAgentContext(): { includeWork: boolean; ticket: string; workOptions: WorkTextOptions } {
 	ensureAgentWorkspace();
-	const picked = pickedTicket();
-	const auto = resolvedAutoTicket();
+	const ctx = snapshot(agentCtx);
+	const picked = ctx.pickedTicket;
+	const auto = resolvedAutoTicketNow();
 	const ticket = picked === null ? auto : picked;
-	const includeWork = Boolean(ticket) && (picked !== null || withWork());
-	const root = state.workspace?.root ?? "";
-	const safeFiles = root
-		? attachedFiles().filter((f) => isInside(root, f.path) && isAllowedContextPath(relativeTo(root, f.path)))
-		: [];
+	const includeWork = Boolean(ticket) && (picked !== null || untrack(withWork));
+	const root = snapshot(state).workspace?.root ?? "";
+	const safeFiles = !root
+		? []
+		: ctx.attachedFiles.filter((f) => isInside(root, f.path) && isAllowedContextPath(relativeTo(root, f.path)));
 	return {
 		includeWork,
 		ticket,
 		workOptions: {
-			includeSchema: withSchema(),
-			includeRegistries: withRegistries(),
-			includeState: withState(),
+			includeSchema: ctx.withSchema,
+			includeRegistries: ctx.withRegistries,
+			includeState: ctx.withState,
 			ticketFiles: safeFiles,
 		},
 	};
@@ -162,8 +216,26 @@ export function selectionContext(): { label: string; code: string } | null {
 	return null;
 }
 
+/**
+ * Where the names of tables are looked for: the selection where there is one, as `selectionContext` finds it, and
+ * the whole of the document if not. A Markdown editor gives its text as it is; a code editor gives its model, so
+ * that the text can be read without its comments (`searchableText`: a table named only in a comment is not used).
+ */
+function tableSearchPlace(doc: { model: monaco.editor.ITextModel; binary?: unknown } | undefined): { text: string } | { model: monaco.editor.ITextModel; selection: monaco.Selection | null } | null {
+	const live = activeLiveEditor();
+	if (live) {
+		if (!live.getSelection().isEmpty()) return { text: live.getSelectedText() };
+	} else {
+		const editor = activeEditor();
+		const model = editor?.getModel();
+		const selection = editor?.getSelection();
+		if (model && selection && !selection.isEmpty()) return { model, selection };
+	}
+	return doc && !doc.binary ? { model: doc.model, selection: null } : null;
+}
+
 async function readForPrompt(path: string): Promise<string | null> {
-	const root = state.workspace?.root;
+	const root = snapshot(state).workspace?.root;
 	if (!root || !isInside(root, path)) return null;
 	const rel = relativeTo(root, path).replace(/\\/g, "/");
 	if (!isAllowedContextPath(rel)) return null;
@@ -225,6 +297,7 @@ function collectGoverningDocsForContext(
 	allDocs: readonly DocFile[],
 	root: string,
 	activeFile: string | null | undefined,
+	gitStatusOverride?: ReturnType<typeof gitStatus>,
 ): GoverningContextItem[] {
 	if (!root) return [];
 	const candidates: string[] = [];
@@ -237,7 +310,7 @@ function collectGoverningDocsForContext(
 		candidates.push(p);
 	};
 	if (activeFile && CODE_FILE_RE.test(activeFile)) addCode(activeFile);
-	const st = gitStatus();
+	const st = gitStatusOverride !== undefined ? gitStatusOverride : gitStatus();
 	if (st) {
 		for (const f of st.files) {
 			if (CODE_FILE_RE.test(f.path)) addCode(f.path);
@@ -293,6 +366,19 @@ async function buildGitDiffSlice(): Promise<string> {
 }
 
 type PreparedContext = PreparedContextResult;
+type ExtraContextFlags = {
+	withGitDiff: boolean;
+	withGoverningDocs: boolean;
+	withRefTables: boolean;
+};
+
+type PreparedContextSnapshot = {
+	root?: string;
+	allDocs?: readonly DocFile[];
+	activePath?: string | null;
+	activeDoc?: ReturnType<typeof activeDoc>;
+	gitStatus?: ReturnType<typeof gitStatus>;
+};
 
 /**
  * Computes the exact pending context delta (ticket work, Git diff, governing docs, schema,
@@ -303,15 +389,28 @@ async function prepareContextDelta(
 	ticket: string,
 	workOpts: WorkTextOptions,
 	alreadySent: ReadonlyMap<string, string>,
+	flags: ExtraContextFlags = (() => {
+		const ctx = snapshot(agentCtx);
+		return {
+			withGitDiff: ctx.withGitDiff,
+			withGoverningDocs: ctx.withGoverningDocs,
+			withRefTables: ctx.withRefTables,
+		};
+	})(),
+	contextSnapshot?: PreparedContextSnapshot,
 ): Promise<PreparedContext> {
-	const root = state.workspace?.root ?? "";
-	const all = docs().filter((d) => d.exists && !isCatalog(d));
+	const curState = snapshot(state);
+	const root = contextSnapshot?.root ?? (curState.workspace?.root ?? "");
+	const all = (contextSnapshot?.allDocs ?? untrack(docs)).filter((d) => d.exists && !isCatalog(d));
+	const activePathNow = contextSnapshot !== undefined ? (contextSnapshot.activePath ?? null) : (curState.groups[curState.activeGroup]?.active ?? null);
+	const activeDocNow = contextSnapshot !== undefined ? contextSnapshot.activeDoc : (activePathNow ? documents.get(activePathNow) : undefined);
+	const gitStatusNow = contextSnapshot !== undefined ? contextSnapshot.gitStatus : untrack(gitStatus);
 	const { addSlice, finish } = createContextAccumulator(alreadySent, MAX_WORK_PROMPT_CHARS, cut);
 
 	// 1. Core ticket work (without standalone toggles so each slice is independently hash-tracked across Turn 1 and Turn 2+).
 	const sentByTicket = new Set<string>();
 	if (ticket) {
-		const work = await workPrompt(ticket, { includeSchema: false, includeRegistries: false, includeState: false, ticketFiles: [] });
+		const work = await untrack(() => workPrompt(ticket, { includeSchema: false, includeRegistries: false, includeState: false, ticketFiles: [] }));
 		if (work) {
 			if (addSlice(`ticket:${ticket.toLowerCase()}`, work.label, work.text)) {
 				const wf = workFor(all, ticket);
@@ -325,14 +424,14 @@ async function prepareContextDelta(
 	}
 
 	// 1b. Compact staged + unstaged Git diff (Wave 1.4).
-	if (withGitDiff()) {
+	if (flags.withGitDiff) {
 		const diffText = await buildGitDiffSlice();
 		if (diffText) addSlice("git-diff", "git diff", diffText);
 	}
 
 	// 1c. Governing docs for active / changed code & SQL files (even across tickets or with Ticket=None).
-	if (withGoverningDocs() && root) {
-		const govItems = collectGoverningDocsForContext(all, root, activePath());
+	if (flags.withGoverningDocs && root) {
+		const govItems = collectGoverningDocsForContext(all, root, activePathNow, gitStatusNow);
 		for (const item of govItems) {
 			const dk = canonical(item.file.path);
 			if (sentByTicket.has(dk)) continue;
@@ -375,9 +474,10 @@ async function prepareContextDelta(
 	}
 
 	// 3b. Targeted schema column tables referenced in the active SSL/SQL editor or selection (Wave 3.1).
-	if (withRefTables()) {
-		const sel = selectionContext();
-		const activeModelText = sel?.code || activeDoc()?.model.getValue() || "";
+	if (flags.withRefTables) {
+		// A project that describes no table has none to send, and the text is not prepared for the search.
+		const place = hasSchemaTables(all) ? tableSearchPlace(activeDocNow) : null;
+		const activeModelText = !place ? "" : "text" in place ? place.text : await searchableText(place.model, place.selection);
 		const refTables = referencedSchemaTables(activeModelText, all, 6);
 		if (refTables.length) {
 			const blocks: string[] = [];
@@ -427,29 +527,56 @@ async function runAskAbout(
 	extra?: { ticket?: string; workOptions?: WorkTextOptions },
 ) {
 	ensureAgentWorkspace();
-	const path = activePath();
-	const root = state.workspace?.root ?? "";
+	const curState = snapshot(state);
+	const path = curState.groups[curState.activeGroup]?.active ?? null;
+	const root = curState.workspace?.root ?? "";
+	const ctx = snapshot(agentCtx);
 	const context = includeSelection ? selectionContext() : null;
 	const file = path ? relativeTo(root, path) : "";
-	const ticket = includeWork ? (extra?.ticket ?? resolvedAutoTicket()) : "";
+	const ticket = includeWork ? (extra?.ticket ?? resolvedAutoTicketNow()) : "";
 	const workOpts = extra?.workOptions ?? {};
 
 	// Reset delta tracker whenever starting a brand-new conversation session or switching workspaces.
 	const curRoot = root ? canonical(root) : null;
-	const sameWorkspace = () => (state.workspace?.root ? canonical(state.workspace.root) : null) === curRoot;
-	if (!agent.chatSession || sentContext.session !== agent.chatSession || sentContext.root !== curRoot) {
-		sentContext = { session: agent.chatSession, root: curRoot, hashes: new Map() };
+	const sameWorkspace = () => {
+		const r = snapshot(state).workspace?.root;
+		return (r ? canonical(r) : null) === curRoot;
+	};
+	const chatSession = snapshot(agent).chatSession;
+	const chatEpoch = chatSessionEpoch();
+	if (!chatSession || sentContext.session !== chatSession || sentContext.root !== curRoot) {
+		sentContext = { session: chatSession, root: curRoot, hashes: new Map() };
 	}
 
-	const prepared = await prepareContextDelta(ticket, workOpts, sentContext.hashes);
+	const prepared = await prepareContextDelta(
+		ticket,
+		workOpts,
+		sentContext.hashes,
+		{
+			withGitDiff: ctx.withGitDiff,
+			withGoverningDocs: ctx.withGoverningDocs,
+			withRefTables: ctx.withRefTables,
+		},
+		{
+			root,
+			allDocs: untrack(docs),
+			activePath: path,
+			activeDoc: path ? documents.get(path) : undefined,
+			gitStatus: untrack(gitStatus),
+		},
+	);
 	if (!sameWorkspace()) return;
+	// The conversation's session was ended while the context was being read (another model was picked, New, opencode
+	// stopped). What was prepared is what that session had not seen yet, and asking with its id would carry on the
+	// session that was just ended, on the model just changed away from: prepared again for the conversation as it is.
+	if (chatSessionEpoch() !== chatEpoch) return runAskAbout(question, includeSelection, includeWork, extra);
 	const text = composeQuestion(question, context && { ...context, file }, prepared.text || undefined);
 	const withWhat = [context ? `${file} ${context.label}` : "", ...prepared.labels].filter(Boolean).join("; ");
 	const isCatalogPrompt = /INDEX\.md|Update catalogs/i.test(question);
 	const reply = await ask(text, {
 		title: "SSL Studio chat",
 		keep: true,
-		sessionID: agent.chatSession ?? undefined,
+		sessionID: chatSession ?? undefined,
 		show: withWhat ? `${question}  (with ${withWhat})` : question,
 		turn: {
 			ticket: ticket || undefined,
@@ -459,8 +586,12 @@ async function runAskAbout(
 	});
 	// Discard post-await session & context hash updates if the workspace changed mid-turn.
 	if (!sameWorkspace()) return;
-	if (reply) {
-		setAgent("chatSession", reply.sessionID);
+	// Ended during the turn (see chatSessionEpoch): the reply's session is not the conversation's any more, so the
+	// next question starts a new one, with the model the picker now shows and the whole context.
+	if (reply && chatSessionEpoch() === chatEpoch) {
+		setAgent((s) => {
+			s.chatSession = reply.sessionID;
+		});
 		// Commit context slice hashes ONLY when the turn actually succeeded (never on failed/interrupted turns!).
 		if (reply.outcome === "succeeded") {
 			if (sentContext.session !== reply.sessionID) {
@@ -480,7 +611,7 @@ export async function askAbout(
 	includeWork = false,
 	extra?: { ticket?: string; workOptions?: WorkTextOptions },
 ) {
-	if (agent.busy || preparingLock) {
+	if (snapshot(agent).busy || preparingLock) {
 		notify("The agent is still working on the last request.");
 		return;
 	}
@@ -494,8 +625,42 @@ export async function askAbout(
 	}
 }
 
+/** A file a reply is compared with, as it was read: its text, or why it has none to compare with. */
+export type ReviewTarget = { text: string } | { refused: "binary" | "unreadable"; reason?: string };
+
+/** Reads the file a reply is to be compared with: from its editor when it is open (unsaved edits and all), else from disk. */
+async function readReviewTarget(path: string): Promise<ReviewTarget> {
+	const open = documents.get(canonical(path));
+	if (open) return open.binary || open.model.isDisposed() ? { refused: "binary" } : { text: open.model.getValue() };
+	try {
+		const file = await backend.read(path);
+		return file.binary ? { refused: "binary" } : { text: file.text };
+	} catch (e: any) {
+		return { refused: "unreadable", reason: String(e?.message ?? e) };
+	}
+}
+
+/**
+ * Why a reply cannot be compared with a file, or put into it, as the file is now; null when it can. `compared` is
+ * the text the comparison was made against, when one has been made: a file that no longer holds that text was
+ * changed since (in its editor or on disk), and the proposal, made for the text as it was, would write over the
+ * change. The rule the tidy steps keep for their own proposals (tidy.ts), here for a file that need not be open.
+ *
+ * A file that could not be read, or is not text, used to be taken as empty: the comparison showed the whole reply
+ * as new lines, and accepting it wrote the reply over the file.
+ */
+export function reviewTargetRefusal(rel: string, now: ReviewTarget, compared?: string): string | null {
+	if ("refused" in now) {
+		const reason = now.reason ? ` (${now.reason})` : "";
+		if (compared === undefined) return `${rel} ${now.refused === "binary" ? "is not text" : `could not be read${reason}`}, so the reply was not compared with it. Nothing was changed.`;
+		return `${rel} ${now.refused === "binary" ? "is no longer text" : `can no longer be read${reason}`}. Nothing was written: reject, and ask for Review diff again.`;
+	}
+	if (compared !== undefined && now.text !== compared) return `${rel} was changed after this proposal was made. Nothing was written: reject, and ask for Review diff again so the changes are not overwritten.`;
+	return null;
+}
+
 /** Extracts the best fenced code/Markdown block (prompting when multiple blocks exist) and opens side-by-side ReviewView against a workspace file. */
-async function reviewProposedEdit(replyText: string, preferredPath?: string) {
+export async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 	const root = state.workspace?.root;
 	if (!root) return notify("Open a folder first.");
 
@@ -525,7 +690,10 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 		targetPath = chosen.path;
 	}
 
-	const original = (await readForPrompt(targetPath)) ?? "";
+	const rel = relativeTo(root, targetPath).replace(/\\/g, "/");
+	const target = await readReviewTarget(targetPath);
+	if ("refused" in target) return notify(reviewTargetRefusal(rel, target) ?? `${rel} could not be read.`, "error");
+	const original = target.text;
 	const targetLang = languageFor(targetPath).toLowerCase();
 	const blocks = extractFencedBlocks(replyText);
 	const extraction = planMarkdownReviewExtraction(targetLang, blocks);
@@ -606,7 +774,6 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 		}
 	}
 
-	const rel = relativeTo(root, targetPath).replace(/\\/g, "/");
 	await openReview({
 		title: `Agent proposal: ${rel}`,
 		path: targetPath,
@@ -621,6 +788,12 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 		onAccept: async (final) => {
 			if (blocked) throw new Error(blocked);
 			const key = canonical(targetPath);
+			// Read again, and held against what the proposal was compared with, before anything is written: the review
+			// may have stood open a while, and the file may have been edited, saved over or opened since.
+			const rootNow = snapshot(state).workspace?.root;
+			if (!rootNow || canonical(rootNow) !== canonical(root)) throw new Error("The workspace changed while this proposal was open. Nothing was written.");
+			const stale = reviewTargetRefusal(rel, await readReviewTarget(targetPath), original);
+			if (stale) throw new Error(stale);
 			if (documents.get(key)) {
 				if (!applyText(key, final)) {
 					throw new Error(`${rel} could not be updated because its editor was closed.`);
@@ -629,7 +802,7 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 				await backend.historyKeep(targetPath).catch(() => {});
 				await backend.write(targetPath, final);
 				void scriptsCameTo(targetPath, targetPath, "file");
-				setState("treeVersion", (v) => v + 1);
+				setState((s) => { s.treeVersion += 1; });
 			}
 			notify(`Applied reviewed edit to ${rel}.`);
 		},
@@ -655,6 +828,19 @@ function withQuestionAnswer(docText: string, answerMd: string): string {
 	const tail = docText.slice(sectionEnd);
 	const body = existingSection ? `${existingSection}${eol}${eol}${cleanAnswer}` : cleanAnswer;
 	return `${before}${eol}${body}${eol}${tail ? `${eol}${tail}` : ""}`;
+}
+
+/**
+ * A question document with a reply written into its `## Answer`, and its status set to answered when that is asked
+ * for. `unmarked` says the status could not be set: the front-matter writer leaves alone a value written over
+ * several lines, and a block that is not closed, and answers null. The answer is written all the same, and the
+ * caller says that the document was not marked: it used to say only that the answer was recorded.
+ */
+export function answeredQuestion(docText: string, answerMd: string, mark: boolean): { text: string; unmarked: boolean } {
+	const text = withQuestionAnswer(docText, answerMd);
+	if (!mark) return { text, unmarked: false };
+	const marked = withFrontMatter(text, "status", "answered");
+	return marked === null ? { text, unmarked: true } : { text: marked, unmarked: false };
 }
 
 /** Creates a new spec document in `docs/specs/` from an Agent reply, pre-linked to the active ticket. */
@@ -703,11 +889,24 @@ async function saveReplyAsSpec(replyText: string, ticketKey?: string): Promise<s
 		notify(String(e?.message ?? e), "error");
 		return null;
 	}
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	refreshDocAudit();
 	await openFile(dest, { keep: true });
 	notify(`Saved spec ${baseName(dest)}${linkedTicket ? ` linked to ${linkedTicket}` : ""}.`);
 	return dest;
+}
+
+/**
+ * Where a session ended and the next question starts another (store.ts, SESSION_BREAK): a note like the thread's
+ * other notes, under a rule drawn across the conversation. The rule is above the words, not to either side of
+ * them: the panel is usually narrow, the words then take two lines, and rules beside them shrank to nothing.
+ */
+function SessionBreakLine(props: { text: string }) {
+	return (
+		<div class="entry note" style={{ "border-top": "1px solid var(--border)", "padding-top": "var(--space-3)", "text-align": "center" }}>
+			<pre>{props.text}</pre>
+		</div>
+	);
 }
 
 /** One entry of the conversation. A reply is Markdown with 1-click actions to capture it into project docs or diff it in ReviewView. */
@@ -718,7 +917,7 @@ function EntryView(props: { entry: Entry }) {
 	const activeTicketForReply = () =>
 		entryTicket() ||
 		state.settings.activeTicket?.trim() ||
-		(pickedTicket() || "").trim() ||
+		(agentCtx.pickedTicket || "").trim() ||
 		ticketForFile(docs(), entryCode(), state.workspace?.root) ||
 		"";
 	const openQuestionsForTicket = createMemo(() => {
@@ -830,7 +1029,7 @@ function EntryView(props: { entry: Entry }) {
 			await backend.historyKeep(pickedPlan.path).catch(() => {});
 			await backend.write(pickedPlan.path, printed);
 		}
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		await openFile(pickedPlan.path, { keep: true });
 		notify(`Added ${added} test ${added === 1 ? "case" : "cases"} to ${baseName(pickedPlan.path)}.`);
 	};
@@ -885,10 +1084,7 @@ function EntryView(props: { entry: Entry }) {
 		const open = documents.get(key);
 		const cur = open ? open.model.getValue() : await backend.read(target.path).then((r) => (r.binary ? null : r.text), () => null);
 		if (cur === null) return notify("Could not read the question document.", "error");
-		let next = withQuestionAnswer(cur, props.entry.text);
-		if (action === WRITE_MARK) {
-			next = withFrontMatter(next, "status", "answered") ?? next;
-		}
+		const { text: next, unmarked } = answeredQuestion(cur, props.entry.text, action === WRITE_MARK);
 		if (open) {
 			const clean = !state.dirty[key];
 			applyText(key, next);
@@ -897,13 +1093,14 @@ function EntryView(props: { entry: Entry }) {
 			await backend.historyKeep(target.path).catch(() => {});
 			await backend.write(target.path, next);
 		}
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		refreshDocAudit();
 		await openFile(target.path, { keep: true });
-		notify(`Recorded answer in ${target.title || baseName(target.path)}.`);
+		if (unmarked) notify(`Recorded answer in ${target.title || baseName(target.path)}, but it was not marked answered: its status is written over several lines, or its front matter is not closed. Change the status in the text.`, "error");
+		else notify(`Recorded answer in ${target.title || baseName(target.path)}.`);
 	};
 	return (
-		<div class={`entry ${props.entry.role}`} classList={{ streaming: Boolean(props.entry.streaming) }} aria-busy={props.entry.streaming ? "true" : undefined}>
+		<div class={["entry", props.entry.role, { streaming: Boolean(props.entry.streaming) }]} aria-busy={props.entry.streaming ? "true" : undefined}>
 			<Show when={props.entry.role === "agent"} fallback={<pre>{props.entry.text}</pre>}>
 				<div class="md" innerHTML={html()} onClick={(e) => void followReplyLink(e)} />
 				<Show when={!props.entry.streaming && props.entry.text.trim()}>
@@ -986,57 +1183,82 @@ async function wordsOf(file: DocFile): Promise<string> {
 const STARTERS = ["Explain what this does, step by step.", "What could go wrong here, and with which input?", "Which cases should a test of this cover?", "Is anything here against the house style?"];
 
 export function AgentPanel() {
-	onMount(() => void resume());
-	createEffect(() => {
-		state.workspace?.root;
-		ensureAgentWorkspace();
+	let unmounted = false;
+	onCleanup(() => {
+		unmounted = true;
 	});
+	onSettled(() => {
+		void resume();
+	});
+	createEffect(
+		() => state.workspace?.root,
+		() => {
+			ensureAgentWorkspace();
+		},
+	);
 	const [draft, setDraft] = createSignal("");
 	/** The box the question is typed in, for a starter to hand the keyboard to. */
 	let box: HTMLTextAreaElement | undefined;
-	createEffect(() => {
-		const handed = pendingDraft();
-		if (!handed) return;
-		setPendingDraft(null);
-		void (async () => {
-			const existing = draft().trim();
-			if (existing && existing !== handed.text.trim()) {
-				const REPLACE = "Replace draft";
-				const picked = await choose("Replace your current Agent draft?", [REPLACE]);
-				if (picked !== REPLACE) return;
-			}
-			if (handed.cleanContext) {
-				setWithSelection(false);
-				setPickedTicket("");
-				setWithSchema(false);
-				setWithRefTables(false);
-				setWithRegistries(false);
-				setWithState(false);
-				setWithGitDiff(false);
-				setWithGoverningDocs(false);
-				setAttachedFiles([]);
-			}
-			setDraft(handed.text);
-			setNotSent("");
-			queueMicrotask(() => box?.focus());
-		})();
-	});
+	createEffect(
+		() => pendingDraft(),
+		(handed) => {
+			if (!handed) return;
+			let cancelled = false;
+			void (async () => {
+				const existing = untrack(draft).trim();
+				if (existing && existing !== handed.text.trim()) {
+					const REPLACE = "Replace draft";
+					const picked = await choose("Replace your current Agent draft?", [REPLACE]);
+					if (cancelled) return;
+					if (picked !== REPLACE) {
+						setPendingDraft((cur) => (cur?.seq === handed.seq ? null : cur));
+						return;
+					}
+				}
+				if (cancelled) return;
+				setPendingDraft((cur) => (cur?.seq === handed.seq ? null : cur));
+				if (handed.cleanContext) {
+					setWithSelection(false);
+					setAgentCtx((s) => {
+						s.pickedTicket = "";
+						s.withSchema = false;
+						s.withRefTables = false;
+						s.withRegistries = false;
+						s.withState = false;
+						s.withGitDiff = false;
+						s.withGoverningDocs = false;
+						s.attachedFiles = [];
+					});
+				}
+				setDraft(handed.text);
+				setNotSent("");
+				queueMicrotask(() => {
+					if (!unmounted) box?.focus();
+				});
+			})();
+			return () => {
+				cancelled = true;
+			};
+		},
+	);
 	const [notSent, setNotSent] = createSignal("");
 	const [withSelection, setWithSelection] = createSignal(true);
 	const isBusy = () => agent.busy || preparing();
 	// Separate content edits from cursor-selection moves so moving the cursor never triggers gitDiff/disk reads.
 	const [contentEdited, setContentEdited] = createSignal(0);
 	const [selectionMoved, setSelectionMoved] = createSignal(0);
-	createEffect(() => {
-		const doc = activeDoc();
-		const editor = activeEditor();
-		const d1 = doc?.model.onDidChangeContent(() => setContentEdited((n) => n + 1));
-		const d2 = editor?.onDidChangeCursorSelection(() => setSelectionMoved((n) => n + 1));
-		onCleanup(() => {
-			d1?.dispose();
-			d2?.dispose();
-		});
-	});
+	const curDoc = createMemo(() => activeDoc());
+	createEffect(
+		() => [curDoc(), activeEditor()] as const,
+		([doc, editor]) => {
+			const d1 = doc?.model.onDidChangeContent(() => setContentEdited((n) => n + 1));
+			const d2 = editor?.onDidChangeCursorSelection(() => setSelectionMoved((n) => n + 1));
+			return () => {
+				d1?.dispose();
+				d2?.dispose();
+			};
+		},
+	);
 	const autoTicket = createMemo(() => (contentEdited(), resolvedAutoTicket()));
 	const allTickets = createMemo(() =>
 		docs()
@@ -1044,7 +1266,7 @@ export function AgentPanel() {
 			.sort((a, b) => (a.ticket ?? "").localeCompare(b.ticket ?? "", undefined, { numeric: true })),
 	);
 	const ticket = createMemo(() => {
-		const picked = pickedTicket();
+		const picked = agentCtx.pickedTicket;
 		return picked === null ? autoTicket() : picked;
 	});
 	const activeTicketDoc = createMemo(() => {
@@ -1057,8 +1279,11 @@ export function AgentPanel() {
 		liveSelectionVersion();
 		const doc = activeDoc();
 		if (!doc || doc.binary) return [] as DocFile[];
-		const txt = selectionContext()?.code || doc.model.getValue() || "";
-		return referencedSchemaTables(txt, docs(), 6);
+		const all = docs();
+		if (!hasSchemaTables(all)) return [] as DocFile[];
+		const place = tableSearchPlace(doc);
+		const txt = !place ? "" : "text" in place ? place.text : searchableTextNow(place.model, place.selection);
+		return referencedSchemaTables(txt, all, 6);
 	});
 	const detectedGoverningDocs = createMemo(() => {
 		const root = state.workspace?.root ?? "";
@@ -1072,21 +1297,34 @@ export function AgentPanel() {
 	});
 	// Real measured next-turn delta size & token budget (approx 1 token ≈ 4 chars), debounced (350ms) and decoupled from cursor-selection moves.
 	const rawDeltaSrc = createMemo(() => {
+		const rawRoot = state.workspace?.root;
+		if (!rawRoot) return null;
+		const curRoot = canonical(rawRoot);
+		// Wait for ensureAgentWorkspace() to reset agentCtx before kicking off an initial or cross-workspace query.
+		if (agentCtx.root !== curRoot) return null;
 		const targetTicket = ticket();
-		const sendWork = Boolean(targetTicket) && (pickedTicket() !== null || withWork());
-		const files = attachedFiles();
+		const sendWork = Boolean(targetTicket) && (agentCtx.pickedTicket !== null || withWork());
+		const files = agentCtx.attachedFiles.map((f) => ({ path: f.path, rel: f.rel }));
+		const allDocs = docs();
+		const curPath = activePath() ?? "";
+		const curDoc = activeDoc();
+		const gitSt = gitStatus();
 		return {
-			root: state.workspace?.root ?? "",
+			root: rawRoot,
 			ticket: sendWork ? targetTicket : "",
-			schema: withSchema(),
-			refTables: withRefTables(),
-			refTableKey: withRefTables() ? detectedRefTables().map((d) => canonical(d.path)).join(",") : "",
-			regs: withRegistries(),
-			st: withState(),
-			gitDiff: withGitDiff(),
-			govDocs: withGoverningDocs(),
+			schema: agentCtx.withSchema,
+			refTables: agentCtx.withRefTables,
+			refTableKey: agentCtx.withRefTables ? detectedRefTables().map((d) => canonical(d.path)).join(",") : "",
+			regs: agentCtx.withRegistries,
+			st: agentCtx.withState,
+			gitDiff: agentCtx.withGitDiff,
+			govDocs: agentCtx.withGoverningDocs,
 			gitVer: gitVersion(),
-			curPath: activePath() ?? "",
+			gitStatusSnapshot: gitSt,
+			docsSnapshot: allDocs,
+			docsSig: `${allDocs.length}:${allDocs.map((d) => `${d.path}|${d.exists ? 1 : 0}|${d.status ?? ""}|${d.rows ?? ""}`).join("\n")}`,
+			curPath,
+			activeDocSnapshot: curDoc,
 			files,
 			filesKey: files.map((f) => `${f.path}|${f.rel}`).join("\n"),
 			tree: state.treeVersion,
@@ -1095,28 +1333,55 @@ export function AgentPanel() {
 			session: agent.chatSession ?? "",
 		};
 	});
-	const [debouncedDeltaSrc, setDebouncedDeltaSrc] = createSignal(rawDeltaSrc());
-	createEffect(() => {
-		const next = rawDeltaSrc();
-		const timer = setTimeout(() => setDebouncedDeltaSrc(next), 350);
-		onCleanup(() => clearTimeout(timer));
-	});
-	const [measuredDelta] = createResource(debouncedDeltaSrc, async (src) => {
-		if (!src.root) return { chars: 0, breakdown: [] as PreparedContext["breakdown"] };
-		const curRoot = canonical(src.root);
-		const already = sentContext.session === (src.session || null) && sentContext.root === curRoot ? sentContext.hashes : new Map<string, string>();
-		const prepared = await prepareContextDelta(
-			src.ticket,
-			{
-				includeSchema: src.schema,
-				includeRegistries: src.regs,
-				includeState: src.st,
-				ticketFiles: src.files,
-			},
-			already,
-		);
-		return { chars: prepared.text.length, breakdown: prepared.breakdown };
-	});
+	const [debouncedDeltaSrc, setDebouncedDeltaSrc] = createSignal<ReturnType<typeof rawDeltaSrc>>(null);
+	let deltaSrcInitialized = false;
+	createEffect(
+		() => rawDeltaSrc(),
+		(next) => {
+			if (!next) {
+				deltaSrcInitialized = false;
+				setDebouncedDeltaSrc(null);
+				return;
+			}
+			if (!deltaSrcInitialized) {
+				deltaSrcInitialized = true;
+				setDebouncedDeltaSrc(next);
+				return;
+			}
+			const timer = setTimeout(() => setDebouncedDeltaSrc(next), 350);
+			return () => clearTimeout(timer);
+		},
+	);
+	const [measuredDelta] = createAsyncQuery(debouncedDeltaSrc, (src) =>
+		untrack(async () => {
+			if (!src.root) return { chars: 0, breakdown: [] as PreparedContext["breakdown"] };
+			const curRoot = canonical(src.root);
+			const already = sentContext.session === (src.session || null) && sentContext.root === curRoot ? sentContext.hashes : new Map<string, string>();
+			const prepared = await prepareContextDelta(
+				src.ticket,
+				{
+					includeSchema: src.schema,
+					includeRegistries: src.regs,
+					includeState: src.st,
+					ticketFiles: src.files,
+				},
+				already,
+				{
+					withGitDiff: src.gitDiff,
+					withGoverningDocs: src.govDocs,
+					withRefTables: src.refTables,
+				},
+				{
+					root: src.root,
+					allDocs: src.docsSnapshot,
+					activePath: src.curPath || null,
+					activeDoc: src.activeDocSnapshot,
+					gitStatus: src.gitStatusSnapshot,
+				},
+			);
+			return { chars: prepared.text.length, breakdown: prepared.breakdown };
+		}),
+	);
 	const preSendEstimate = createMemo(() => {
 		contentEdited();
 		selectionMoved();
@@ -1146,9 +1411,10 @@ export function AgentPanel() {
 		return { tokens, chars, warn, summary: parts.length ? parts.join(" + ") : "No context attached yet" };
 	});
 	const pickContextFile = async () => {
-		const root = state.workspace?.root;
+		const root = snapshot(state).workspace?.root;
 		if (!root) return notify("Open a folder first.");
-		const already = new Set(attachedFiles().map((f) => canonical(f.path)));
+		const curAttached = snapshot(agentCtx).attachedFiles;
+		const already = new Set(curAttached.map((f) => canonical(f.path)));
 		const ticketFiles = (activeTicketDoc()?.ticketFiles ?? []).filter(
 			(f) => !already.has(canonical(f.path)) && isInside(root, f.path) && isAllowedContextPath(relativeTo(root, f.path)),
 		);
@@ -1157,20 +1423,41 @@ export function AgentPanel() {
 			root,
 			pinned: ticketFiles.map((f) => ({ path: f.path, rel: f.rel, detail: f.rel })),
 			pinnedLabel: ticket() || "Ticket",
-			exclude: attachedFiles().map((f) => f.path),
+			exclude: curAttached.map((f) => f.path),
 		});
-		if (!picked || !isInside(root, picked.path)) return;
+		if (!picked || snapshot(state).workspace?.root !== root || !isInside(root, picked.path)) return;
 		const rel = relativeTo(root, picked.path).replace(/\\/g, "/");
 		if (!isAllowedContextPath(rel)) {
 			notify("Hidden files and dotfiles cannot be attached to Agent context.", "error");
 			return;
 		}
-		setAttachedFiles((prev) =>
-			prev.some((f) => canonical(f.path) === canonical(picked.path)) ? prev : [...prev, { path: picked.path, rel }],
-		);
+		setAgentCtx((s) => {
+			if (!s.attachedFiles.some((f) => canonical(f.path) === canonical(picked.path))) {
+				s.attachedFiles.push({ path: picked.path, rel });
+			}
+		});
 	};
 	const modelOf = (ref: string) => agent.models.find((m) => modelRef(m) === ref);
 	const usable = () => agent.models.filter((m) => m.tools);
+	const pickedTicketMissing = createMemo(() => {
+		const picked = agentCtx.pickedTicket;
+		return Boolean(picked) && !allTickets().some((t) => t.ticket === picked);
+	});
+	let modelSelectEl: HTMLSelectElement | undefined;
+	createEffect(
+		() => [usable(), currentModel()] as const,
+		([, model]) => {
+			if (modelSelectEl && modelSelectEl.value !== model) modelSelectEl.value = model;
+		},
+	);
+	let ticketSelectEl: HTMLSelectElement | undefined;
+	createEffect(
+		() => [allTickets(), agentCtx.pickedTicket] as const,
+		([, picked]) => {
+			const wanted = picked === null ? "__auto__" : picked;
+			if (ticketSelectEl && ticketSelectEl.value !== wanted) ticketSelectEl.value = wanted;
+		},
+	);
 
 	// The conversation follows the reply as it is written, until the user scrolls up to read.
 	let scroller!: HTMLDivElement;
@@ -1179,33 +1466,40 @@ export function AgentPanel() {
 		pinned = true;
 		scroller.scrollTop = scroller.scrollHeight;
 	};
-	createEffect(() => {
-		// Text arriving in any entry moves the end, as a new entry does.
-		agent.entries.reduce((n, e) => n + e.text.length, agent.entries.length);
-		agent.busy;
-		if (pinned) scroller.scrollTop = scroller.scrollHeight;
-	});
+	createEffect(
+		() => [agent.entries.reduce((n, e) => n + e.text.length, agent.entries.length), agent.busy] as const,
+		() => {
+			if (pinned && scroller) scroller.scrollTop = scroller.scrollHeight;
+		},
+	);
 	// The reason goes when it no longer holds.
-	createEffect(() => !isBusy() && setNotSent(""));
+	createEffect(
+		() => !isBusy(),
+		(idle) => {
+			if (idle) setNotSent("");
+		},
+	);
 
 	const send = () => {
-		const result = composerSend(draft(), agent.busy || preparingLock);
+		const result = composerSend(untrack(draft), snapshot(agent).busy || preparingLock);
 		setDraft(result.draft);
 		setNotSent(result.why ?? "");
 		if (result.send === null) return;
 		preparingLock = true;
 		setPreparing(true);
 		toEnd();
-		const targetTicket = ticket();
-		const sendWork = Boolean(targetTicket) && (pickedTicket() !== null || withWork());
+		ensureAgentWorkspace();
+		const ctx = snapshot(agentCtx);
+		const targetTicket = ctx.pickedTicket === null ? resolvedAutoTicketNow() : ctx.pickedTicket;
+		const sendWork = Boolean(targetTicket) && (ctx.pickedTicket !== null || untrack(withWork));
 		void safely("The question was not sent", () =>
-			runAskAbout(result.send!, withSelection(), sendWork, {
+			runAskAbout(result.send!, untrack(withSelection), sendWork, {
 				ticket: targetTicket,
 				workOptions: {
-					includeSchema: withSchema(),
-					includeRegistries: withRegistries(),
-					includeState: withState(),
-					ticketFiles: attachedFiles(),
+					includeSchema: ctx.withSchema,
+					includeRegistries: ctx.withRegistries,
+					includeState: ctx.withState,
+					ticketFiles: ctx.attachedFiles,
 				},
 			}),
 		).finally(() => {
@@ -1413,8 +1707,10 @@ export function AgentPanel() {
 	const runDocDriftStarter = () => {
 		const text = docDriftStarterPrompt();
 		if (!text) return;
-		setWithGitDiff(true);
-		setWithGoverningDocs(true);
+		setAgentCtx((s) => {
+			s.withGitDiff = true;
+			s.withGoverningDocs = true;
+		});
 		setWithSelection(false);
 		setDraft(text);
 		setNotSent("");
@@ -1428,8 +1724,10 @@ export function AgentPanel() {
 	const runReleaseNotesStarter = async () => {
 		const key = ticket();
 		if (!key) return;
-		setWithGitDiff(true);
-		setWithState(true);
+		setAgentCtx((s) => {
+			s.withGitDiff = true;
+			s.withState = true;
+		});
 		const commits = await backend.gitTicketLog(key, 25).catch(() => []);
 		const basePrompt = releaseNotesStarterPrompt();
 		let fullPrompt = basePrompt;
@@ -1483,7 +1781,7 @@ export function AgentPanel() {
 			contextual.push({
 				label: "Review active SSL against spec & decisions",
 				run: () => {
-					if (govDocs.length > 0) setWithGoverningDocs(true);
+					if (govDocs.length > 0) setAgentCtx((s) => { s.withGoverningDocs = true; });
 					setDraft(
 						`Review \`${relSsl}\` against its governing spec, plan, and settled project decisions. List any behavioral mismatches, missing guardrails, or house-style issues with exact line references.`,
 					);
@@ -1511,7 +1809,7 @@ export function AgentPanel() {
 			contextual.push({
 				label: "Generate test cases from active spec / ticket",
 				run: () => {
-					if (!ticket() && govDocs.length > 0) setWithGoverningDocs(true);
+					if (!ticket() && govDocs.length > 0) setAgentCtx((s) => { s.withGoverningDocs = true; });
 					const targetLabel = ticket()
 						? `${ticket()} and its linked specs`
 						: activeDocMeta?.title || baseName(curPath) || "the active spec";
@@ -1615,21 +1913,21 @@ export function AgentPanel() {
 			>
 				<label class="agent-model">
 					Model for a new session
-					<select value={currentModel()} onChange={(e) => void pickModel(e.currentTarget)}>
+					<select ref={modelSelectEl} value={currentModel()} onChange={(e) => void pickModel(e.currentTarget)}>
 						{/* A saved model opencode does not list must not read as the first one in the list. */}
 						<Show when={!modelOf(currentModel())?.tools}>
-							<option value={currentModel()} selected disabled>
+							<option value={currentModel()} disabled>
 								{currentModel() ? `${currentModel()} (not in the list below)` : "No model chosen"}
 							</option>
 						</Show>
 						{/* Under headings: a provider may offer hundreds, and the ones on this machine come first. */}
-						<For each={groupModels(usable())}>
+						<For each={groupModels(usable())} keyed={(g) => g.label}>
 							{(group) => (
-								<optgroup label={group.label}>
-									<For each={group.models}>
+								<optgroup label={group().label}>
+									<For each={group().models} keyed={(m) => modelRef(m)}>
 										{(m) => (
-											<option value={modelRef(m)} selected={modelRef(m) === currentModel()}>
-												{m.local ? `${m.name} · ${m.providerID}` : `$ ${m.name}`}
+											<option value={modelRef(m())}>
+												{m().local ? `${m().name} · ${m().providerID}` : `$ ${m().name}`}
 											</option>
 										)}
 									</For>
@@ -1735,7 +2033,11 @@ export function AgentPanel() {
 						</div>
 					}
 				>
-					{(e) => <EntryView entry={e} />}
+					{(e) => (
+						<Show when={isSessionBreak(e)} fallback={<EntryView entry={e} />}>
+							<SessionBreakLine text={e.text} />
+						</Show>
+					)}
 				</For>
 				<Show when={agent.busy && !agent.entries.some((e) => e.streaming)}>
 					<p class="agent-waiting">{agent.stopping ? "Stopping…" : "Waiting for the agent. A local model can take a while before its first words."}</p>
@@ -1758,26 +2060,27 @@ export function AgentPanel() {
 				<label class="check">
 					<input type="checkbox" checked={withSelection()} onChange={(e) => setWithSelection(e.currentTarget.checked)} /> include the selection
 				</label>
-				<Show when={allTickets().length > 0}>
+				<Show when={allTickets().length > 0 || Boolean(agentCtx.pickedTicket)}>
 					<div class="agent-context-bar">
 						<label class="agent-ticket-picker" title="Choose which ticket's context (specs, decisions, open questions) goes with your question">
 							<span class="agent-ticket-label">Ticket:</span>
 							<select
+								ref={ticketSelectEl}
 								class="agent-ticket-select"
 								aria-label="Ticket context for the agent"
-								value={pickedTicket() === null ? "__auto__" : pickedTicket()!}
+								value={agentCtx.pickedTicket === null ? "__auto__" : agentCtx.pickedTicket}
 								onChange={(e) => {
 									const v = e.currentTarget.value;
 									if (v === "__auto__") {
-										setPickedTicket(null);
+										setAgentCtx((s) => { s.pickedTicket = null; });
 										setWithWork(true);
 										remember("agent.withWork", "yes");
 									} else if (v === "") {
-										setPickedTicket("");
+										setAgentCtx((s) => { s.pickedTicket = ""; });
 										setWithWork(false);
 										remember("agent.withWork", "no");
 									} else {
-										setPickedTicket(v);
+										setAgentCtx((s) => { s.pickedTicket = v; });
 										setWithWork(true);
 										remember("agent.withWork", "yes");
 									}
@@ -1785,17 +2088,22 @@ export function AgentPanel() {
 							>
 								<option value="__auto__">Auto{autoTicket() ? ` (${autoTicket()})` : " (none)"}</option>
 								<option value="">None</option>
-								<For each={allTickets()}>
+								<Show when={pickedTicketMissing()}>
+									<option value={agentCtx.pickedTicket!} disabled>
+										{agentCtx.pickedTicket} (not in list)
+									</option>
+								</Show>
+								<For each={allTickets()} keyed={(t) => t.ticket!}>
 									{(t) => (
-										<option value={t.ticket!}>
-											{t.ticket}
-											{t.title ? ` — ${t.title.slice(0, 32)}` : ""}
+										<option value={t().ticket!}>
+											{t().ticket}
+											{t().title ? ` — ${t().title?.slice(0, 32)}` : ""}
 										</option>
 									)}
 								</For>
 							</select>
 						</label>
-						<Show when={pickedTicket() === null && autoTicket()}>
+						<Show when={agentCtx.pickedTicket === null && autoTicket()}>
 							<label class="check agent-work-toggle" title={`Include ${autoTicket()} context on the first turn`}>
 								<input
 									type="checkbox"
@@ -1809,77 +2117,71 @@ export function AgentPanel() {
 				</Show>
 				<Show when={Boolean(state.workspace)}>
 					<div class="agent-ctx-chips" role="group" aria-label="Optional extra project context">
-						<Show when={detectedRefTables().length > 0 || withRefTables()}>
+						<Show when={detectedRefTables().length > 0 || agentCtx.withRefTables}>
 							<button
 								type="button"
-								class="agent-ctx-chip"
-								classList={{ active: withRefTables() }}
-								aria-pressed={withRefTables()}
+								class={["agent-ctx-chip", { active: agentCtx.withRefTables }]}
+								aria-pressed={agentCtx.withRefTables ? "true" : "false"}
 								title={
 									detectedRefTables().length
 										? `Inject exact column definitions for schema tables referenced in this file: ${detectedRefTables().map((d) => d.title || d.name).join(", ")}`
 										: "Table schema injection is active (0 tables detected on the current tab). Click to disable."
 								}
-								onClick={() => setWithRefTables((v) => !v)}
+								onClick={() => setAgentCtx((s) => { s.withRefTables = !s.withRefTables; })}
 							>
 								+ Tables ({detectedRefTables().length})
 							</button>
 						</Show>
 						<button
 							type="button"
-							class="agent-ctx-chip"
-							classList={{ active: withSchema() }}
-							aria-pressed={withSchema()}
+							class={["agent-ctx-chip", { active: agentCtx.withSchema }]}
+							aria-pressed={agentCtx.withSchema ? "true" : "false"}
 							title="Include project schema summaries in the next turn"
-							onClick={() => setWithSchema((v) => !v)}
+							onClick={() => setAgentCtx((s) => { s.withSchema = !s.withSchema; })}
 						>
 							+ Schema
 						</button>
 						<button
 							type="button"
-							class="agent-ctx-chip"
-							classList={{ active: withRegistries() }}
-							aria-pressed={withRegistries()}
+							class={["agent-ctx-chip", { active: agentCtx.withRegistries }]}
+							aria-pressed={agentCtx.withRegistries ? "true" : "false"}
 							title={ticket() ? `Include CSV registry rows mentioning ${ticket()}` : "Include project CSV registry summary"}
-							onClick={() => setWithRegistries((v) => !v)}
+							onClick={() => setAgentCtx((s) => { s.withRegistries = !s.withRegistries; })}
 						>
 							+ Registries
 						</button>
 						<button
 							type="button"
-							class="agent-ctx-chip"
-							classList={{ active: withState() }}
-							aria-pressed={withState()}
+							class={["agent-ctx-chip", { active: agentCtx.withState }]}
+							aria-pressed={agentCtx.withState ? "true" : "false"}
 							title="Include project STATE.md summary"
-							onClick={() => setWithState((v) => !v)}
+							onClick={() => setAgentCtx((s) => { s.withState = !s.withState; })}
 						>
 							+ STATE.md
 						</button>
 						<button
 							type="button"
-							class="agent-ctx-chip"
-							classList={{ active: withGitDiff() }}
-							aria-pressed={withGitDiff()}
+							class={["agent-ctx-chip", { active: agentCtx.withGitDiff }]}
+							aria-pressed={agentCtx.withGitDiff ? "true" : "false"}
 							title={
 								gitStatus()
 									? `Include compact staged + unstaged Git diff (${gitStatus()!.files.length} changed ${gitStatus()!.files.length === 1 ? "file" : "files"})`
 									: "Include compact staged + unstaged Git diff (no git repository detected)"
 							}
-							onClick={() => setWithGitDiff((v) => !v)}
+							onClick={() => setAgentCtx((s) => { s.withGitDiff = !s.withGitDiff; })}
 						>
 							+ Git diff
 						</button>
 						<button
 							type="button"
-							class="agent-ctx-chip"
-							classList={{ active: withGoverningDocs() }}
-							aria-pressed={withGoverningDocs()}
+							class={["agent-ctx-chip", { active: agentCtx.withGoverningDocs }]}
+							aria-pressed={agentCtx.withGoverningDocs ? "true" : "false"}
 							title={
 								detectedGoverningDocs().length
 									? `Include compact excerpts of governing docs for active/changed code files: ${detectedGoverningDocs().map((g) => g.file.title || g.file.name).join(", ")}`
 									: "Include compact excerpts of governing docs for active/changed code files (0 detected right now)"
 							}
-							onClick={() => setWithGoverningDocs((v) => !v)}
+							onClick={() => setAgentCtx((s) => { s.withGoverningDocs = !s.withGoverningDocs; })}
 						>
 							+ Governing docs{detectedGoverningDocs().length ? ` (${detectedGoverningDocs().length})` : ""}
 						</button>
@@ -1891,13 +2193,13 @@ export function AgentPanel() {
 						>
 							+ File…
 						</button>
-						<For each={attachedFiles()}>
+						<For each={agentCtx.attachedFiles}>
 							{(tf) => (
 								<button
 									type="button"
 									class="agent-ctx-chip active"
 									title={`Remove ${tf.rel} from prompt context`}
-									onClick={() => setAttachedFiles((prev) => prev.filter((x) => x.path !== tf.path))}
+									onClick={() => setAgentCtx((s) => { s.attachedFiles = s.attachedFiles.filter((x) => x.path !== tf.path); })}
 								>
 									<span>{tf.rel.split("/").pop()}</span>
 									<Icon name="close" />
@@ -1921,8 +2223,7 @@ export function AgentPanel() {
 					<span class="spacer" />
 					<Show when={preSendEstimate().tokens > 0}>
 						<span
-							class="agent-token-meter"
-							classList={{ warn: preSendEstimate().warn }}
+							class={["agent-token-meter", { warn: preSendEstimate().warn }]}
 							title={`Measured next-turn context: ${preSendEstimate().summary}${preSendEstimate().warn ? " (large for a 4K local model — consider trimming chips)" : ""}`}
 						>
 							~{preSendEstimate().tokens} tok

@@ -415,3 +415,37 @@ export function resolveSearchQuery(params: {
 		hasTaskFilter,
 	};
 }
+
+/**
+ * How a list of results falls short of everything there is to find: "limit" when as many as are ever listed were
+ * found, "time" when the scan ran out of time before every file was read. Null for a list that is whole. A list that
+ * falls short is not replaced from: the matches it does not hold would be left as they were, without a word.
+ */
+export type Shortfall = "limit" | "time" | null;
+
+export function searchShortfall(found: { hits: number; limit: number; truncated: boolean; timedOut: boolean }): Shortfall {
+	if (found.truncated || found.hits >= found.limit) return "limit";
+	return found.timedOut ? "time" : null;
+}
+
+/** Why "Replace all" is refused on a list that falls short; "" for a whole one. */
+export function shortfallBlocksReplace(shortfall: Shortfall, limit: number): string {
+	if (shortfall === "limit") return `There are ${limit} results or more, and only the first are listed: narrow the search before replacing`;
+	if (shortfall === "time") return "The search ran out of time before every file was read, and only part of what is there is listed: narrow the search before replacing";
+	return "";
+}
+
+/** The summary's count: `shown` ("12 results") for a whole list, and for one that falls short, that it does and why. */
+export function shortfallCount(shortfall: Shortfall, shown: string, hits: number, limit: number): string {
+	if (hits >= limit) return `The first ${limit} results`;
+	if (shortfall === "limit") return `Partial results (${shown} shown; hit ${limit}-match limit)`;
+	if (shortfall === "time") return `Partial results (${shown} shown; the search ran out of time before every file was read)`;
+	return shown;
+}
+
+/**
+ * The summary of a scan that ran out of time with nothing to show: nothing in the files it read, which is not
+ * nothing in the workspace. `where` is the summary's own tail (the filters in force).
+ */
+export const timedOutEmpty = (asked: string, where = "") =>
+	`Nothing found for “${asked}”${where} in the files read before the search ran out of time: it did not get to every file. Look in fewer files, and search again.`;

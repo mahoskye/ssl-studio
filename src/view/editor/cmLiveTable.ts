@@ -4,7 +4,8 @@
 //   chance of kicking you out when clicking between cells.
 // - Uses CM6 `WidgetType.updateDOM` to update the DOM in place while preserving cell focus & caret.
 // - Controls bar docks cleanly at the bottom of the active table card so table rows never jump.
-// - Every edit writes cleanly formatted GFM Markdown back to the underlying CM6/Monaco document.
+// - A cell edit writes that cell's own text to the underlying CM6/Monaco document and nothing else; an action on
+//   rows or columns (add, remove, move, sort, align, Format) writes the table again as cleanly formatted GFM.
 import { redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
 import { EditorSelection } from "@codemirror/state";
 import { EditorView, WidgetType } from "@codemirror/view";
@@ -26,6 +27,7 @@ import {
 	setTableAlignment,
 	sortTableByColumn,
 	stepTableCell,
+	tableCellTextEdit,
 	updateTableCell,
 	type MarkdownTable,
 	type TableAlign,
@@ -33,7 +35,7 @@ import {
 } from "../../shared/markdownTables";
 import { baseName, isInside, relativeTo, resolvePath } from "../../shared/paths";
 import type { RowMenuEntry } from "../../shared/contextMenu";
-import { backend, inApp } from "../backend";
+import { backend, fileExists, inApp } from "../backend";
 import { notify, setState, state as appState } from "../state";
 import { createTextareaCompleter, type TextareaCompleter } from "./cmCompletion";
 import {
@@ -107,6 +109,28 @@ export function mergeTsvIntoTable(
 		}
 	}
 	return formatTable(working, safeRow + grid.length - 1, safeCol + maxCols - 1);
+}
+
+/**
+ * What is said of a row that has more cells than the table has columns: the mark drawn at the end of the row
+ * (`+1`) and what it says when pointed at. Null for a row that has none, or none with text in it: empty cells
+ * at the row's end are not counted.
+ *
+ * The table draws the header's columns and no more, as GFM does, and said nothing of the rest: a row such as
+ * `| or | written a | b in SSL |` under two headers looked complete, and the text after its second cell could
+ * only be found by reading the file.
+ */
+export function extraCellsNote(table: MarkdownTable, row: number, readMode: boolean): { label: string; title: string } | null {
+	const more = [...(table.extra?.[row] ?? [])];
+	while (more.length && !more[more.length - 1]!.trim()) more.pop();
+	if (!more.length) return null;
+	const one = more.length === 1;
+	return {
+		label: `+${more.length}`,
+		title: `${one ? "1 more cell" : `${more.length} more cells`} in this row than the table has columns: ${more.join(" | ")}${
+			readMode ? "" : `. Use Raw to edit ${one ? "it" : "them"}.`
+		}`,
+	};
 }
 
 type TableController = {
@@ -346,7 +370,7 @@ export class TableWidget extends WidgetType {
 					return;
 				}
 				try {
-					const exists = await backend.read(dest).then(() => true, () => false);
+					const exists = await fileExists(dest);
 					if (exists) {
 						const OVERWRITE = "Overwrite file";
 						if (
@@ -360,7 +384,9 @@ export class TableWidget extends WidgetType {
 						await backend.create(dest, "file");
 					}
 					await backend.write(dest, csvText);
-					setState("treeVersion", (v) => v + 1);
+					setState((s) => {
+						s.treeVersion += 1;
+					});
 					notify(`Exported table to ${relativeTo(appState.workspace.root, dest)}.`);
 				} catch (err: any) {
 					notify(`Could not export CSV: ${err?.message ?? err}`, "error");
@@ -393,15 +419,31 @@ export class TableWidget extends WidgetType {
 			}
 		};
 
+		/**
+		 * Writes the cell being edited: its own text and nothing else (`tableCellTextEdit`). It wrote the whole table
+		 * again, padded, at every letter: lines the user was not in were rewritten, and a row with more cells than
+		 * the header lost them.
+		 */
 		const commitActiveCell = (): boolean => {
 			if (!ctrl.activeCell || !ctrl.activeTextarea || !ctrl.table) return false;
 			const { row, col } = ctrl.activeCell;
 			const curRaw = ctrl.table.rows[row]?.[col] ?? "";
 			const nextVal = ctrl.activeTextarea.value;
 			if (cellValueForEdit(curRaw) === nextVal) return false;
-			const edit = updateTableCell(ctrl.table, row, col, nextVal);
-			if (edit.text === ctrl.raw) return false;
-			dispatchEdit(edit, undefined);
+			const edit = tableCellTextEdit(ctrl.raw, ctrl.table, row, col, nextVal);
+			if (!edit) return false;
+			// The cell's place was measured in the table's text: nothing is written unless that text is what stands there.
+			const at = Math.min(ctrl.from, ctrl.view.state.doc.length);
+			if (ctrl.view.state.sliceDoc(at, at + ctrl.raw.length) !== ctrl.raw) return false;
+			ctrl.selfDispatching = true;
+			try {
+				ctrl.view.dispatch({
+					changes: { from: at + edit.from, to: at + edit.to, insert: edit.insert },
+					userEvent: "input.table",
+				});
+			} finally {
+				ctrl.selfDispatching = false;
+			}
 			return true;
 		};
 
@@ -499,6 +541,19 @@ export class TableWidget extends WidgetType {
 				inner.append(viewBox, sortBtn);
 				cellEl.appendChild(inner);
 				return;
+			}
+			// A row with more cells than the table has columns says so at its end (see extraCellsNote).
+			const more =
+				ctrl.table && Number(cellEl.dataset.col) === ctrl.table.alignments.length - 1
+					? extraCellsNote(ctrl.table, Number(cellEl.dataset.row), ctrl.readMode)
+					: null;
+			if (more) {
+				const note = document.createElement("span");
+				note.className = "cm-tbl-extra";
+				note.textContent = more.label;
+				note.title = more.title;
+				note.setAttribute("aria-label", more.title);
+				viewBox.appendChild(note);
 			}
 			cellEl.appendChild(viewBox);
 		};
@@ -941,14 +996,16 @@ export class TableWidget extends WidgetType {
 						const latest = parseTableRaw(updated.text) ?? ctrl.table;
 						const atVeryStart = dir === -1 && clampedRow === 0 && clampedCol === 0;
 						const atVeryEnd = dir === 1 && clampedRow === latest.rows.length - 1 && clampedCol === cols - 1;
+						// Tab and Enter write the cell that was being edited and move on. They wrote the whole table whenever
+						// it was not in padded form, though nothing in it had changed.
 						if (atVeryStart) {
-							if (updated.text !== ctrl.raw) dispatchEdit(updated, undefined);
+							commitActiveCell();
 							ctrl.openCell(0, 0, { select: true });
 						} else if (atVeryEnd) {
 							const edit = stepTableCell(latest, clampedRow, clampedCol, 1);
 							dispatchEdit(edit, { row: edit.focusRow, col: edit.focusCol, select: true });
 						} else {
-							if (updated.text !== ctrl.raw) dispatchEdit(updated, undefined);
+							commitActiveCell();
 							const nextCol = dir === 1 ? (clampedCol + 1 < cols ? clampedCol + 1 : 0) : clampedCol > 0 ? clampedCol - 1 : cols - 1;
 							const nextRow =
 								dir === 1
@@ -974,7 +1031,7 @@ export class TableWidget extends WidgetType {
 							const edit = enterTableRow(latest, clampedRow, clampedCol);
 							dispatchEdit(edit, { row: edit.focusRow, col: edit.focusCol, select: true });
 						} else {
-							if (updated.text !== ctrl.raw) dispatchEdit(updated, undefined);
+							commitActiveCell();
 							ctrl.openCell(clampedRow + 1, clampedCol, { select: true });
 						}
 						return;

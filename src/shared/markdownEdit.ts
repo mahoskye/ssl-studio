@@ -699,3 +699,20 @@ export function markdownStats(markdown: string): { words: number; tasksDone: num
 	}
 	return { words, tasksDone, tasksTotal };
 }
+
+/**
+ * The parts of `from`..`to` that each lie on one line, given where the line a position is on ends. The live
+ * editor hides markup by replacing it, and an editor plugin may not replace a line break: a link whose
+ * `(address "title")` wraps onto the next line is hidden as these parts, with the break between them left alone.
+ */
+export function lineSegments(from: number, to: number, lineEndAt: (pos: number) => number): [number, number][] {
+	const parts: [number, number][] = [];
+	for (let pos = from; pos < to; ) {
+		const lineEnd = lineEndAt(pos);
+		const end = Math.min(to, lineEnd);
+		if (pos < end) parts.push([pos, end]);
+		// Past the break; a line end that does not move on (it should not happen) ends the walk, not the editor.
+		pos = Math.max(lineEnd + 1, pos + 1);
+	}
+	return parts;
+}

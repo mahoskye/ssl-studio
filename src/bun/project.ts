@@ -2,7 +2,7 @@
 // README.md and an AGENTS.md at its root. The IDE writes all three once, from
 // the templates below, and after that only reads them: project.toml is edited
 // as text, so its comments survive.
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmdirSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, rmdirSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { decode, decodePart, textOf } from "./encoding";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -25,7 +25,7 @@ import { classifyTicketEntries, type ScannedTicketEntry } from "../shared/ticket
 import type { AuditCitationIssue, DocAuditResult, DocFile, LinkTo, ManifestFile, NameIn, OpenTaskItem, Project, SchemaDriftItem, Settings, UndocumentedSchemaRef, WorkspaceDocIssue } from "../shared/protocol";
 import { workspaceDir } from "./paths";
 import { isLocalModelRef } from "./agent";
-import { WorkspaceFiles } from "./workspace";
+import { assertPathInsideRoot, isPathInsideRoot, withSep, WorkspaceFiles } from "./workspace";
 
 export const PROJECT_FILE = "project.toml";
 export const DOC_LIMIT = 500;
@@ -50,10 +50,17 @@ const folder = (value: unknown, fallback: string) => {
 
 export async function readProject(root: string): Promise<Project> {
 	const path = join(workspaceDir(root), PROJECT_FILE);
-	const project: Project = { configured: existsSync(path), path, name: basename(root), description: "", docs: "docs", schema: "schema", tests: "tests", code: "src", plans: "design" };
+	const inside = isPathInsideRoot(root, path, true);
+	const project: Project = { configured: inside && existsSync(path), path, name: basename(root), description: "", docs: "docs", schema: "schema", tests: "tests", code: "src", plans: "design" };
+	if (!inside) {
+		project.error = `outside the workspace: ${path}`;
+		return project;
+	}
 	if (!project.configured) return project;
+	let written = "";
 	try {
-		const toml = Bun.TOML.parse(await Bun.file(path).text()) as Record<string, any>;
+		written = await Bun.file(path).text();
+		const toml = Bun.TOML.parse(written) as Record<string, any>;
 		project.name = text(toml.project?.name) ?? project.name;
 		project.description = text(toml.project?.description) ?? "";
 		for (const key of ["docs", "schema", "tests", "code"] as const) project[key] = folder(toml.folders?.[key], project[key]);
@@ -61,7 +68,11 @@ export async function readProject(root: string): Promise<Project> {
 		const preset = text(toml.style?.preset);
 		if (preset === "house" || preset === "server") project.stylePreset = preset;
 	} catch (e: any) {
-		project.error = String(e?.message ?? e);
+		// A file that is not TOML is told as the editor tells it, in plain words and with its line. What the reader
+		// throws was shown as it came: "Unexpected end of file" on the runtime the tests ran on, "TOML Parse error:
+		// Missing value after '='; values must be on the same line" on the one the app ships with, and no line.
+		const problem = written ? tomlProblem(written) : null;
+		project.error = problem ? `line ${problem.line}: ${problem.message}` : String(e?.message ?? e);
 	}
 	return project;
 }
@@ -87,35 +98,17 @@ function found(root: string, name: string): string | undefined {
 const fileStamp = (st: { size: number; mtimeMs: number; ctimeMs: number; ino: number }) =>
 	`${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.ino}`;
 
-/** Lexical + realpath containment check ensuring `target` stays inside `root` (blocks `..` and escaping symlinks). */
-function isInsideWorkspace(root: string, target: string): boolean {
+const ESCAPES_RELATIVE = /^\.\.(?:[\\/]|$)/;
+const foldFsPath = (p: string) => (process.platform === "win32" || process.platform === "darwin" ? p.toLowerCase() : p);
+const isUnderDir = (path: string, dir: string) => foldFsPath(path).startsWith(withSep(foldFsPath(dir)));
+
+/** Lexical + realpath containment check ensuring `target` stays inside `root` (blocks `..`, escaping symlinks, and dangling symlink escapes). */
+export function isInsideWorkspace(root: string, target: string): boolean {
 	const resolvedRoot = resolve(root);
 	const resolvedTarget = resolve(target);
 	const rel = relative(resolvedRoot, resolvedTarget);
-	if (rel.startsWith("..") || isAbsolute(rel)) return false;
-	try {
-		const realRoot = realpathSync(resolvedRoot);
-		const realTarget = realpathSync(resolvedTarget);
-		const realRel = relative(realRoot, realTarget);
-		return !realRel.startsWith("..") && !isAbsolute(realRel);
-	} catch {
-		// Target may not exist; verify its nearest existing ancestor does not symlink outside root.
-		try {
-			const realRoot = realpathSync(resolvedRoot);
-			let cur = dirname(resolvedTarget);
-			while (cur && cur !== dirname(cur)) {
-				if (existsSync(cur)) {
-					const realCur = realpathSync(cur);
-					const curRel = relative(realRoot, realCur);
-					return !curRel.startsWith("..") && !isAbsolute(curRel);
-				}
-				cur = dirname(cur);
-			}
-		} catch {
-			return false;
-		}
-		return true;
-	}
+	if (ESCAPES_RELATIVE.test(rel) || isAbsolute(rel)) return false;
+	return isPathInsideRoot(resolvedRoot, resolvedTarget, false);
 }
 
 /** Checks workspace containment BEFORE probing existence, then verifies realpath containment to avoid outside-root oracles. */
@@ -123,16 +116,9 @@ function existsInWorkspace(root: string, target: string): boolean {
 	const resolvedRoot = resolve(root);
 	const resolvedTarget = resolve(target);
 	const rel = relative(resolvedRoot, resolvedTarget);
-	if (rel.startsWith("..") || isAbsolute(rel)) return false;
-	if (!existsSync(resolvedTarget)) return false;
-	try {
-		const realRoot = realpathSync(resolvedRoot);
-		const realTarget = realpathSync(resolvedTarget);
-		const realRel = relative(realRoot, realTarget);
-		return !realRel.startsWith("..") && !isAbsolute(realRel);
-	} catch {
-		return false;
-	}
+	if (ESCAPES_RELATIVE.test(rel) || isAbsolute(rel)) return false;
+	if (!isPathInsideRoot(resolvedRoot, resolvedTarget, false)) return false;
+	return existsSync(resolvedTarget);
 }
 
 /** The most of a small snippet that is read for its header comment. */
@@ -295,7 +281,7 @@ function markdownCodeRefs(root: string, path: string, text: string, precomputedL
 		if (!CODE_FILE_EXT_RE.test(link.file)) continue;
 		const target = linkTarget(root, path, link.file);
 		const rel = relative(root, target).split(sep).join("/");
-		if (!rel.startsWith("..") && !isAbsolute(rel)) refs.add(rel);
+		if (!ESCAPES_RELATIVE.test(rel) && !isAbsolute(rel)) refs.add(rel);
 	}
 	if (text.includes("`")) {
 		const fences = fenced(text);
@@ -459,7 +445,7 @@ function checkMissingSource(source: string | undefined, root?: string, path?: st
 	if (!clean) return undefined;
 	const target = path && /^\.{1,2}[\\/]/.test(clean) ? resolve(dirname(path), clean) : join(root, clean);
 	const rel = relative(resolve(root), resolve(target));
-	if (rel.startsWith("..") || isAbsolute(rel)) return undefined;
+	if (ESCAPES_RELATIVE.test(rel) || isAbsolute(rel)) return undefined;
 	return !existsInWorkspace(root, target) ? source : undefined;
 }
 
@@ -666,7 +652,7 @@ function brokenLinksFrom(root: string, path: string, links: readonly DocLink[], 
 			const target = linkTarget(root, path, link.file);
 			// What is outside the project is not this project's to say: it may well be there on another machine.
 			const from = relative(resolve(root), resolve(target));
-			return !from.startsWith("..") && !isAbsolute(from) && !existsInWorkspace(root, target);
+			return !ESCAPES_RELATIVE.test(from) && !isAbsolute(from) && !existsInWorkspace(root, target);
 		})
 		.map(({ href, file, line, column }) => {
 			// One file of that name elsewhere in the project is where it went, most likely. Two, and it is not ours to pick.
@@ -1116,10 +1102,10 @@ export function docsTruncated(
 	const customTemplatesRel = (options?.templatesFolder ?? "").trim().replace(/\\/g, "/").replace(/^[./]+|\/+$/g, "");
 	const customTemplatesDir = customTemplatesRel ? join(root, customTemplatesRel) : "";
 	const inArea = (path: string) =>
-		(Object.keys(DOC_FOLDERS) as DocArea[]).some((name) => path.startsWith(area(name) + sep)) ||
-		path.startsWith(templatesDir + sep) ||
-		path.startsWith(exportsDir + sep) ||
-		Boolean(customTemplatesDir && path.startsWith(customTemplatesDir + sep));
+		(Object.keys(DOC_FOLDERS) as DocArea[]).some((name) => isUnderDir(path, area(name))) ||
+		isUnderDir(path, templatesDir) ||
+		isUnderDir(path, exportsDir) ||
+		Boolean(customTemplatesDir && isUnderDir(path, customTemplatesDir));
 
 	const out: { folder: string; limit: number; total: number }[] = [];
 	const seen = new Set<string>();
@@ -1168,6 +1154,13 @@ export async function listDocs(
 		options?.truncatedOut?.push({ folder: rel, limit });
 		options?.truncatedWithTotalsOut?.push({ folder: rel, limit, total });
 	};
+	// The one rule for every file this listing reads at a path it put together itself (a name found in a folder, a
+	// plan's chart beside its document, a folder's catalog, a document already in the list): such a path may be a
+	// link, and one that leads out of the workspace is not read through. What the walks below yield needs no asking:
+	// they follow no link. The rule was held where README's own text is read and nowhere else, so the pass over
+	// the links by name read the same README after all and listed what it names, a plan document's linked chart gave
+	// its title, ticket and scripts, and a linked catalog its links.
+	const held = (path: string) => isInsideWorkspace(root, path);
 	// The project's files by name, read once and only when a link leads nowhere.
 	let names: Map<string, string[]> | undefined;
 	const named = (name: string) => {
@@ -1188,7 +1181,11 @@ export async function listDocs(
 	for (const name of Object.keys(PLACEHOLDER)) {
 		const actual = found(root, name);
 		const path = join(root, actual ?? name);
-		const text = actual ? await textOf(path) : "";
+		// A README that is a link to a file outside the workspace is there by name, and is listed, but it is not read
+		// through: its headings and links are another project's, and opening it is refused in the same way. Nor is it
+		// asked when it was last changed: that is the other file's too.
+		const ours = Boolean(actual) && held(path);
+		const text = ours ? await textOf(path) : "";
 		const untouched = actual ? text.includes(PLACEHOLDER[name]!) : undefined;
 		const codeRefs = actual ? markdownCodeRefs(root, path, text) : [];
 		const headings = actual
@@ -1196,7 +1193,7 @@ export async function listDocs(
 					.slice(0, 60)
 					.map((h) => ({ level: h.level, text: h.text, slug: h.anchor, line: h.line }))
 			: [];
-		const mtime = actual ? mtimeOf(path) : undefined;
+		const mtime = ours ? mtimeOf(path) : undefined;
 		list.push({
 			path,
 			name: actual ?? name,
@@ -1211,8 +1208,10 @@ export async function listDocs(
 	}
 	list.push({ path: project.path, name: PROJECT_FILE, group: "project", exists: project.configured, ...(project.configured ? { mtime: mtimeOf(project.path) } : {}) });
 	const docs = join(root, project.docs);
-	const state = isFolder(docs) ? found(docs, STATE_FILE) : undefined;
-	if (state) {
+	// The state file is read from the docs folder directly, not through the workspace's listing: it is held to the
+	// workspace here, or a docs folder that is a link elsewhere had its state file listed with its title and summary.
+	const state = isFolder(docs) && held(docs) ? found(docs, STATE_FILE) : undefined;
+	if (state && held(join(docs, state))) {
 		const statePath = join(docs, state);
 		const summary = await cachedMdSummary(root, statePath);
 		if (summary) {
@@ -1242,10 +1241,10 @@ export async function listDocs(
 	const customTemplatesRel = (options?.templatesFolder ?? "").trim().replace(/\\/g, "/").replace(/^[./]+|\/+$/g, "");
 	const customTemplatesDir = customTemplatesRel ? join(root, customTemplatesRel) : "";
 	const inArea = (path: string) =>
-		(Object.keys(DOC_FOLDERS) as DocArea[]).some((name) => path.startsWith(area(name) + sep)) ||
-		path.startsWith(templatesDir + sep) ||
-		path.startsWith(exportsDir + sep) ||
-		Boolean(customTemplatesDir && path.startsWith(customTemplatesDir + sep));
+		(Object.keys(DOC_FOLDERS) as DocArea[]).some((name) => isUnderDir(path, area(name))) ||
+		isUnderDir(path, templatesDir) ||
+		isUnderDir(path, exportsDir) ||
+		Boolean(customTemplatesDir && isUnderDir(path, customTemplatesDir));
 
 	// Keep summaries indexed during this listing pass so the broken-wikilink check reuses them with zero extra I/O.
 	const passSummaries = new Map<string, CachedMdSummary>();
@@ -1509,7 +1508,9 @@ export async function listDocs(
 			const said = describedWithLiveSource(mdSummary, root, path);
 			const chartPath = path.replace(/\.plan\.md$/i, ".plan.json");
 			const chartExists = existsSync(chartPath);
-			const paired = chartExists
+			// The chart's path is made from the document's, not found by the walk: a chart that is a link out of the
+			// workspace is named as the document's pair and not read, as a README that leads out is.
+			const paired = chartExists && held(chartPath)
 				? await planSays(chartPath)
 				: { ticket: "", title: "", status: "", codeRefs: [], testScripts: [], planTests: [], nodeDocs: [] };
 			if (paired.title && !mdSummary.fmTitle && !mdSummary.hasH1) said.title = paired.title;
@@ -1617,13 +1618,17 @@ export async function listDocs(
 		// 3. Guarded Levenshtein fuzzy match for typos (never suggest a different ticket number like DEMO-103 for DEMO-104)
 		if (qNorm.length >= 4 && !/^[A-Za-z]{2,12}-\d+$/.test(baseNoExt)) {
 			const maxDist = qNorm.length >= 7 ? 2 : 1;
+			const qDigits = qNorm.replace(/\D+/g, "");
+			const sameDigits = (norm: string) => norm.replace(/\D+/g, "") === qDigits;
 			let bestDist = maxDist + 1;
 			let bestDoc: DocFile | null = null;
 			let tied = false;
 			for (const c of candidateDocs) {
 				if (c.doc.path === sourceDoc.path) continue;
-				const dStem = c.stemNorm ? boundedLevenshtein(qNorm, c.stemNorm, maxDist) : maxDist + 1;
-				const dTitle = c.titleNorm ? boundedLevenshtein(qNorm, c.titleNorm, maxDist) : maxDist + 1;
+				// A name that differs in a digit is another note (the next release's, the second test plan), not a
+				// slip of the hand: only a name with the same digits is offered.
+				const dStem = c.stemNorm && sameDigits(c.stemNorm) ? boundedLevenshtein(qNorm, c.stemNorm, maxDist) : maxDist + 1;
+				const dTitle = c.titleNorm && sameDigits(c.titleNorm) ? boundedLevenshtein(qNorm, c.titleNorm, maxDist) : maxDist + 1;
 				const dist = Math.min(dStem, dTitle);
 				if (dist > maxDist) continue;
 				if (dist < bestDist) {
@@ -1650,7 +1655,9 @@ export async function listDocs(
 	for (const doc of list) {
 		if (!doc.exists || !MARKDOWN.test(doc.path)) continue;
 		try {
-			const summary = passSummaries.get(doc.path) ?? (await cachedMdSummary(root, doc.path));
+			// What the walks did not read (README, AGENTS.md, the state file) is read here, and held to the workspace
+			// here as well: a README that leads out had the names it links to listed as broken.
+			const summary = passSummaries.get(doc.path) ?? (held(doc.path) ? await cachedMdSummary(root, doc.path) : null);
 			const places = summary?.names ?? [];
 			if (!places.length) continue;
 			const brokenWiki: { href: string; line: number; column: number; instead?: string }[] = [];
@@ -1688,7 +1695,9 @@ export async function listDocs(
 		if (!isFolder(folder) || !catalogued(name, folder, root, seen)) continue;
 		seen.push(resolve(folder));
 		const file = join(folder, found(folder, CATALOG_FILE) ?? CATALOG_FILE);
-		if (!existsSync(file)) continue;
+		// A catalog that is a link out of the workspace (or in a folder that is one) is not read: whether it has a
+		// place for the list cannot be said, so it is not marked, like a person's own file of that name below.
+		if (!existsSync(file) || !held(file)) continue;
 		const text = await textOf(file);
 		// In a folder that may do without a catalog, a file of that name with no place for the list is a person's own
 		// document: it is not marked, and nothing is written into it.
@@ -1819,35 +1828,60 @@ const withKinds = (catalog: string) =>
  */
 export async function setupProject(root: string, dryRun = false): Promise<string[]> {
 	const project = await readProject(root);
-	const made: string[] = [];
-	const wrote = new Map<string, string>();
-	const put = async (path: string, content: string) => {
-		if (existsSync(path)) return;
-		made.push(relative(root, path));
-		if (dryRun) return;
-		mkdirSync(dirname(path), { recursive: true });
-		await Bun.write(path, content);
-		wrote.set(path, content);
+	// What is to be written is worked out and checked first, and only then written. A target that turns out to be
+	// outside the folder (through a link, or a path in project.toml) used to be found half-way, with the first
+	// files already written and nothing recorded for Undo to take back.
+	const plan: [path: string, content: string][] = [];
+	const want = (path: string, content: string) => {
+		if (!existsSync(path)) plan.push([path, content]);
 	};
-	await put(project.path, projectToml(project.name));
-	if (!found(root, "README.md")) await put(join(root, "README.md"), readme(project));
-	if (!found(root, "AGENTS.md")) await put(join(root, "AGENTS.md"), agents(project));
-	// A folder that is already there is left as it is. A new one starts as its catalog, which says what the folder is
-	// for and lists what comes to be in it: nothing is written once and left to go stale.
-	const start = async (dir: string, area: "docs" | "tests" | "code") => {
-		if (!existsSync(join(root, dir))) await put(join(root, dir, CATALOG_FILE), catalogTemplate(area));
+	want(project.path, projectToml(project.name));
+	if (!found(root, "README.md")) want(join(root, "README.md"), readme(project));
+	if (!found(root, "AGENTS.md")) want(join(root, "AGENTS.md"), agents(project));
+	// A folder that is already there is left as it is, also one that is a link to a folder somewhere else: nothing is
+	// written in it. A new one starts as its catalog, which says what the folder is for and lists what comes to be
+	// in it: nothing is written once and left to go stale.
+	const start = (dir: string, area: "docs" | "tests" | "code" | "schema") => {
+		const dirFull = join(root, dir);
+		// There already, or about to be: a folder made on the way to another area's catalog inside it is not a new one.
+		if (existsSync(dirFull) || plan.some(([path]) => path.startsWith(dirFull + sep))) return;
+		// The schema folder's names the kinds it can hold; a kind's folder is made with the first thing described in it.
+		want(join(dirFull, CATALOG_FILE), area === "schema" ? withKinds(catalogTemplate("schema")) : catalogTemplate(area));
 	};
-	await start(project.docs, "docs");
-	// The schema folder's names the kinds it can hold; a kind's folder is made with the first thing described in it.
-	if (!existsSync(join(root, project.schema))) await put(join(root, project.schema, CATALOG_FILE), withKinds(catalogTemplate("schema")));
+	start(project.docs, "docs");
+	start(project.schema, "schema");
 	// A folder for the code only where there is none yet: an export brings its own layout. The code before the tests:
 	// where a project keeps both in one folder, that folder is its code, and its catalog says so.
 	let scripts = false;
 	for (const path of new WorkspaceFiles(root).files()) if ((scripts = SCRIPT.test(path))) break;
-	if (!scripts) await start(project.code, "code");
+	if (!scripts) start(project.code, "code");
 	// Tests kept in the code's own folder: the folder is the code's, whichever of the two makes it.
-	await start(project.tests, resolve(root, project.tests) === resolve(root, project.code) ? "code" : "tests");
-	if (!dryRun) lastSetup.set(root, wrote);
+	start(project.tests, resolve(root, project.tests) === resolve(root, project.code) ? "code" : "tests");
+	// Two areas in one folder ask for the same catalog: the first asked for is the one written.
+	const targets = plan.filter(([path], i) => plan.findIndex(([other]) => other === path) === i);
+	// Every target and the folder it goes in, before the first write. A link that leads nowhere counts as outside.
+	for (const [path] of targets) {
+		assertPathInsideRoot(root, dirname(path), false);
+		assertPathInsideRoot(root, path, true);
+	}
+	const made = targets.map(([path]) => relative(root, path));
+	if (dryRun) return made;
+	const wrote = new Map<string, string>();
+	try {
+		for (const [path, content] of targets) {
+			// Never overwrites: something may have come to be there since the plan was made.
+			if (existsSync(path)) continue;
+			const dir = dirname(path);
+			assertPathInsideRoot(root, dir, false);
+			mkdirSync(dir, { recursive: true });
+			assertPathInsideRoot(root, path, true);
+			await Bun.write(path, content);
+			wrote.set(path, content);
+		}
+	} finally {
+		// Also when a write failed part of the way: what was written before it can still be taken back.
+		lastSetup.set(root, wrote);
+	}
 	return made;
 }
 
@@ -1867,15 +1901,24 @@ export async function undoSetup(root: string): Promise<{ removed: string[]; kept
 	const kept: string[] = [];
 	const name = (path: string) => relative(root, path);
 	for (const [path, content] of wrote ?? []) {
+		assertPathInsideRoot(root, path, true);
 		if (!existsSync(path)) continue;
+		if (lstatSync(path).isSymbolicLink()) {
+			kept.push(name(path));
+			continue;
+		}
 		if ((await Bun.file(path).text()) !== content) {
 			kept.push(name(path));
 			continue;
 		}
+		assertPathInsideRoot(root, path, true);
 		unlinkSync(path);
 		removed.push(name(path));
 		// The folder it was in, and the one above, when the file was all they held.
-		for (let dir = dirname(path); dir !== root && dir.startsWith(root) && !readdirSync(dir).length; dir = dirname(dir)) rmdirSync(dir);
+		for (let dir = dirname(path); isPathInsideRoot(root, dir, true); dir = dirname(dir)) {
+			if (lstatSync(dir).isSymbolicLink() || readdirSync(dir).length) break;
+			rmdirSync(dir);
+		}
 	}
 	return { removed, kept };
 }
@@ -1958,33 +2001,124 @@ ${PLACEHOLDER["AGENTS.md"]}
 - \`${project.plans}/\`: plans and tidy notes.
 `;
 
-/** What a TOML reader's own words come to, where they are a parser's and not a person's. */
+const TOML_ONE_TO_A_LINE = "A key is followed by = and a value, one to a line.";
+const TOML_NO_VALUE = "The value is missing: it comes after the =, on the same line.";
+const TOML_NOT_CLOSED = "This string is not closed.";
+/**
+ * What a TOML reader's own words come to, where they are a parser's and not a person's. They are asked last, for
+ * what the questions in tomlProblem do not settle, because they are not the same from one version of the runtime
+ * to the next: the one the tests ran on said "Unexpected end of file" and "Expected t_equal but found ...", the
+ * one the app ships with says "Missing value after '='" and "Expected '=' after a key but found ...". Both are
+ * here. Words that are neither get a plain sentence with the reader's own after it.
+ */
 const TOML_WORDS: [RegExp, (found: RegExpExecArray) => string][] = [
-	[/^Expected t_equal\b/i, () => "A key is followed by = and a value, one to a line."],
+	[/^Cannot redefine key '(.+?)'/i, (found) => `${found[1]} is set twice.`],
+	[/^Cannot redefine table '(.+?)'/i, (found) => `The table ${found[1]} is started twice.`],
+	[/^Expected t_equal\b|^Expected '=' after a key|^Expected a newline or end of file after/i, () => TOML_ONE_TO_A_LINE],
+	[/^Missing value|^Expected a value but found/i, () => TOML_NO_VALUE],
 	[/^Unexpected end of file/i, () => "The file ends in the middle of a value: something is not finished or not closed."],
-	[/^Unterminated .*string/i, () => "This string is not closed."],
-	[/^Cannot redefine key '(.+)'/i, (found) => `${found[1]} is set twice.`],
+	[/^Unterminated .*string/i, () => TOML_NOT_CLOSED],
+	[/^Strings must be quoted: (".*")$/i, (found) => `${found[1]} does not read as a value: text goes in quotes.`],
+	[/^Expected (?:a )?key but found/i, () => "A line starts with a key: a name, then = and its value."],
+	[/escape sequence|Unicode escape|hex escape/i, () => "A backslash in a string in double quotes starts a code. Write it twice, or put the string in single quotes."],
 	[/^Expected (?:t_)?(\w+) but found (?:t_)?(.+)$/i, (found) => `${found[1]!.replace(/_/g, " ")} was expected here, not ${found[2]!.replace(/_/g, " ")}.`],
 ];
+/**
+ * The most text handed to the reader while a mistake's line is looked for, in characters: every line of a file
+ * of some six hundred lines can be asked about, in a few hundredths of a second. Past it the line is the best
+ * one known, and the message says so.
+ */
+const TOML_SEARCH = 6_000_000;
+/** A text longer than this is read once and not again: halving it alone would hand the reader several times TOML_SEARCH. */
+const TOML_SEARCHED = 500_000;
+/** A line longer than this is not read piece by piece for where on it the reader stops. */
+const TOML_LINE = 400;
+
+const readsToml = (text: string): boolean => {
+	try {
+		Bun.TOML.parse(text);
+		return true;
+	} catch {
+		return false;
+	}
+};
 
 /**
  * The first thing that keeps a text from being TOML, and where; null when it
  * can be read. Read by the runtime's own TOML reader, the one project.toml is
  * read with, so what is marked is what would not load.
+ *
+ * The reader is asked only whether a text reads, never where it stopped. What it throws is not the same thing
+ * from one version of the runtime to the next: one gave a place with each error, the next (the one the app
+ * ships with) gives none, and the `line` its error carries is a line of this program. Read as the place, that
+ * put every mistake on the file's last line, under the reader's own words, in the packaged app and in no test.
  */
 export function tomlProblem(text: string): { message: string; line: number; column: number } | null {
 	if (!text.trim()) return null;
+	let said = "";
 	try {
 		Bun.TOML.parse(text);
 		return null;
 	} catch (e: any) {
-		const first = e?.errors?.[0] ?? e;
-		const said = String(first?.message ?? e?.message ?? e);
-		const worded = TOML_WORDS.map(([pattern, words]) => [pattern.exec(said), words] as const).find(([found]) => found);
-		const lines = text.split(/\r?\n/).length;
-		const line = Math.min(Math.max(Number(first?.position?.line ?? e?.line ?? 1), 1), lines);
-		return { message: worded ? worded[1](worded[0]!) : said, line, column: Math.max(Number(first?.position?.column ?? 1), 1) };
+		// One version throws a list of errors, the next a single one; either may one day be neither.
+		const told = (e?.errors?.[0] ?? e)?.message ?? e;
+		said = typeof told === "string" ? told.replace(/^TOML Parse error:\s*/i, "") : "";
 	}
+	const worded = (what: string) => {
+		const known = TOML_WORDS.map(([pattern, words]) => [pattern.exec(said), words] as const).find(([found]) => found);
+		return known ? known[1](known[0]!) : `${what} does not read as TOML${said ? ` (the reader says: ${said})` : ""}.`;
+	};
+	// A place that is not known is not shown as one (ADR 0018): the mark is at the top, and the message says why.
+	if (text.length > TOML_SEARCHED) return { message: `${worded("The file")} The file is too long for the place to be looked for.`, line: 1, column: 1 };
+	// Where each line starts. The first `count` lines are the text before the start of the next one.
+	const starts = [0];
+	for (const end of text.matchAll(/\r?\n/g)) starts.push(end.index + end[0].length);
+	const first = (count: number) => text.slice(0, starts[count]);
+	// The mistake is on the line after the longest beginning of the text that reads on its own. Halving finds a
+	// beginning that reads with a line after it that does not; but a beginning cut in the middle of a list or a
+	// string of several lines does not read either, so every longer one is asked about as well, and the longest
+	// that reads is kept.
+	let good = 0;
+	let bad = starts.length;
+	while (bad - good > 1) {
+		const mid = (good + bad) >> 1;
+		if (readsToml(first(mid))) good = mid;
+		else bad = mid;
+	}
+	let spent = 0;
+	let next = bad + 1;
+	for (; next < starts.length && spent <= TOML_SEARCH; next++) {
+		spent += starts[next]!;
+		if (readsToml(first(next))) good = next;
+	}
+	const head = first(good);
+	const line = text.slice(starts[good], starts[good + 1] ?? text.length).replace(/\r?\n$/, "");
+	const at = (message: string, column: number) => ({ message, line: good + 1, column });
+	const edge = line.length - line.trimStart().length + 1;
+	// Not every longer beginning was asked about: this line may be where a long list opens, above the mistake.
+	// The message says as much, and nothing is said of this line itself.
+	if (next < starts.length) return at(`${worded("The file")} The file is long: the mistake is on this line or further down.`, edge);
+	// What kind of mistake it is, by what would mend the line: the reader is asked whether the text up to the
+	// line's end reads once something is put after it. The answers are the same whatever the reader calls it.
+	const fits = (more: string) => readsToml(head + line + more);
+	const after = line.length + 1;
+	// Any value at all would do, text or a number: there is none.
+	if (fits('""') && fits("0")) return at(TOML_NO_VALUE, after);
+	if (fits('"') || fits("'") || fits('\n"""') || fits("\n'''")) return at(TOML_NOT_CLOSED, after);
+	if (fits("]") || fits("]]") || fits("\n]")) return at("The [ on this line is not closed with ], or something inside it does not read.", after);
+	if (fits("}")) return at("The { on this line is not closed with }.", after);
+	// The line reads up to a point and then goes on: a second value, or one written in a form the reader does not
+	// take. Asked of the line alone, which is short; one that reads alone is at odds with what is above it, and
+	// the reader's words say with what.
+	if (line.length <= TOML_LINE && !readsToml(line)) {
+		let part = line.length - 1;
+		while (part > 0 && !(line.slice(0, part).trim() && readsToml(line.slice(0, part)))) part--;
+		if (part) {
+			const apart = /\s/.test(line[part - 1]!);
+			return at(apart ? TOML_ONE_TO_A_LINE : "This value does not read: a number or a date has a fixed form, and any other text goes in quotes.", line.length - line.slice(part).trimStart().length + 1);
+		}
+	}
+	return at(worded("This line"), edge);
 }
 
 /** The kinds of file a ticket system exports, as a file dialog takes them. */

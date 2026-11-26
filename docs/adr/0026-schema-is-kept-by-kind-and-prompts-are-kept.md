@@ -155,3 +155,30 @@ what the Explorer says), the user answered "Yes, those too". So:
 - **Where they show**: the docs' as the Catalog row at the end of the
   Docs list; the tests' and the code's with the project's own files,
   since those folders have no list of their own in the panel.
+
+**2026-11-25, on the user's word.** One thing under "Not decided" no
+longer stands as written:
+
+- **The language server is not asked for the tables a script uses.** The
+  request (LSP-REQUESTS, L6) is withdrawn and its issue closed. The user:
+  "I don't want to bloat the lsp by adding ide features when it should not
+  be the lsps responsibility." Which tables a script names is the IDE's own
+  to find, from the names of the tables a project describes; the server is
+  asked only where comments and strings are (LSP-REQUESTS, L9). Whether the
+  agent is told a project's schema is no longer waiting on the server.
+
+**2026-11-25, later, on the user's word.** How much the tables count for:
+
+- **Table information is an extra, and the IDE's own.** The user: "any
+  connection with table information and data sources / sql will need to be
+  handled in the application itself. it is atypical that we would normally
+  have database information and it should be treated as a bonus feature
+  built into the app." So nothing the IDE does may depend on a project
+  describing its tables, and nothing about SQL is asked of the language
+  server.
+- **In the code**, as of that day: the comments in a data source's SQL
+  are found by the IDE (`withoutComments`, `src/shared/lexicalTokens.ts`);
+  and a project that describes no table is put to no work for the feature,
+  with no request sent to the server for it (`hasSchemaTables`,
+  `src/shared/schemaIndex.ts`). That second point is how the first was
+  read, not something the user said.

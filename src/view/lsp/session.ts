@@ -1,12 +1,12 @@
 // One language-server session for the open workspace: documents, diagnostics
 // and every Monaco provider the server's capabilities allow.
-import { createSignal } from "solid-js";
-import { createStore, reconcile } from "solid-js/store";
+import { createSignal, createStore, reconcile } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { LEGEND, onSemanticThemeChange, refreshSemanticTokens, translateTokens } from "../editor/semantic";
 import { backend, on } from "../backend";
 import { LspClient } from "./client";
 import { applyTextEdits, trimEdit } from "./edits";
+import { decodeNameTokens, type LexToken, type NameToken } from "../../shared/lexicalTokens";
 import { baseName } from "../../shared/paths";
 
 export type Diagnostic = {
@@ -59,12 +59,17 @@ function setOwnerDiagnostics(uri: string, owner: string, list: Diagnostic[] | nu
 	}
 	const current = diagnosticsByOwner.get(uri);
 	if (!current || !current.size) {
-		setDiagnostics(uri, undefined!);
+		setDiagnostics((s) => {
+			delete s[uri];
+		});
 		return;
 	}
 	const merged: Diagnostic[] = [];
-	for (const items of current.values()) merged.push(...items);
-	setDiagnostics(uri, reconcile(merged));
+	for (const items of current.values()) for (const item of items) merged.push({ ...item });
+	setDiagnostics((s) => {
+		if (s[uri]) reconcile(merged, null)(s[uri]);
+		else s[uri] = merged;
+	});
 }
 
 function clearOwnerDiagnostics(owner: string) {
@@ -232,6 +237,52 @@ export class LspSession {
 		if (!legend) return null;
 		const result = await this.request("textDocument/semanticTokens/full", { textDocument: { uri: model.uri.toString() } });
 		return result ? translateTokens(result.data ?? [], legend) : null;
+	}
+
+	/**
+	 * Where an open document's comments, strings and keywords are, as the server's lexer reads them
+	 * (`ssl/lexicalTokens`, since starlims-lsp 0.32.0). Null from a server without the request, for a document it
+	 * does not hold, and for one that changed while it was asked: the ranges would be of another text.
+	 */
+	async lexicalTokens(model: monaco.editor.ITextModel): Promise<LexToken[] | null> {
+		await this.ready();
+		if (!this.supports("ssl/lexicalTokens")) return null;
+		const uri = model.uri.toString();
+		if (!((this.versions.get(uri) ?? 0) > 0)) return null;
+		const result = await this.request("ssl/lexicalTokens", { textDocument: { uri } });
+		if (!result || result.version !== this.versions.get(uri)) return null;
+		return result.tokens ?? [];
+	}
+
+	/** The server's semantic tokens by name, for asking what kind of name a word is. Null as for `lexicalTokens`. */
+	async nameTokens(model: monaco.editor.ITextModel): Promise<NameToken[] | null> {
+		await this.ready();
+		const legend = this.capabilities.semanticTokensProvider?.legend;
+		if (!legend) return null;
+		const uri = model.uri.toString();
+		const sent = this.versions.get(uri) ?? 0;
+		if (!(sent > 0)) return null;
+		const result = await this.request("textDocument/semanticTokens/full", { textDocument: { uri } });
+		if (!result || sent !== this.versions.get(uri)) return null;
+		return decodeNameTokens(result.data ?? [], legend);
+	}
+
+	/**
+	 * The lexical tokens of text that is not in any editor. `name` is the file's own name: the server tells a script
+	 * from a data source by it, and reads an SQL data source as no SSL at all.
+	 */
+	async scratchLexical(text: string, name = "text.ssl"): Promise<LexToken[] | null> {
+		await this.ready();
+		if (!this.supports("ssl/lexicalTokens")) return null;
+		const myEpoch = this.epoch;
+		const ending = /(\.(?:ssl|ds)\.txt|\.[A-Za-z0-9]+)$/.exec(name)?.[1] ?? ".ssl";
+		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/lexical-${++this.scratchCount}${ending}`).toString();
+		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
+		try {
+			return (await this.client.request("ssl/lexicalTokens", { textDocument: { uri } }))?.tokens ?? null;
+		} finally {
+			if (this.epoch === myEpoch && this.readyFlag) this.client.notify("textDocument/didClose", { textDocument: { uri } });
+		}
 	}
 
 	/** Sends a changed style profile; the server re-checks open documents. */

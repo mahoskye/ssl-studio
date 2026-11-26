@@ -137,10 +137,12 @@ describe("Round 4C — htmlToMarkdown.ts safety, nesting, and single-pass decodi
 	});
 
 	test("does not double-decode HTML entities or strip decoded tags across recursive inline passes", () => {
-		expect(htmlToMarkdown("<strong>&lt;div&gt;</strong>")).toBe("**<div>**");
-		expect(htmlToMarkdown("<p>&amp;lt;b&amp;gt;</p>")).toBe("&lt;b&gt;");
-		expect(htmlToMarkdown("<strong>&amp;lt;b&amp;gt;</strong>")).toBe("**&lt;b&gt;**");
-		expect(htmlToMarkdown("<strong><em>&lt;span&gt;</em></strong>")).toBe("***<span>***");
+		// The page showed these characters as text, so the Markdown has to show them as text too: written bare, a
+		// decoded `<div>` was a live tag in the saved document (and nothing at all once rendered).
+		expect(htmlToMarkdown("<strong>&lt;div&gt;</strong>")).toBe("**&lt;div>**");
+		expect(htmlToMarkdown("<p>&amp;lt;b&amp;gt;</p>")).toBe("&amp;lt;b&amp;gt;");
+		expect(htmlToMarkdown("<strong>&amp;lt;b&amp;gt;</strong>")).toBe("**&amp;lt;b&amp;gt;**");
+		expect(htmlToMarkdown("<strong><em>&lt;span&gt;</em></strong>")).toBe("***&lt;span>***");
 		expect(htmlToMarkdown('<a href="https://example.com">https://example.com</a>')).toBe("<https://example.com>");
 		expect(htmlToMarkdown('<strong><a href="https://example.com">Spec</a></strong>')).toBe("**[Spec](https://example.com)**");
 	});

@@ -6,6 +6,8 @@
 import { bannerTemplate } from "../../shared/houseStyle";
 import { decisionsOf, hashText, planTargetsOf, readBlocks, type NodeMap, type SpecUnit } from "./assist";
 import { nodeDocsOf, type Plan } from "./model";
+import { isLocalModelRef } from "../../shared/agentModels";
+import { languageFor } from "../../shared/languages";
 
 /** `kept`: already built, and the chart has not touched it. It is never sent to the agent or reprinted. */
 export type UnitStatus = "pending" | "running" | "passed" | "stuck" | "skipped" | "kept";
@@ -24,11 +26,32 @@ export type BuildUnit = SpecUnit & {
 	feedback?: string;
 	/** It edits a procedure that exists, rather than adding one. */
 	change?: boolean;
+	/**
+	 * Set when this unit's code is accepted into its script: a print of the two (`givenPrint`). What a run kept of an
+	 * accepting used to be the script's name alone, and a script once accepted was never offered for review again: a
+	 * unit that passed afterwards (it was stuck, and tried again) never reached the file, and was recorded as built.
+	 */
+	given?: string;
+	/**
+	 * For a unit accepted into the editor: prints of the texts its script would hold again were the accepting taken
+	 * back, which are its text just before, what was saved of it then where that differed, and the same of the units
+	 * the script was given earlier (`textPrint`). Accepting is an edit that can be undone, or thrown away with the
+	 * buffer, and a script that reads as one of these again no longer holds this unit (`takenBack`). A unit whose
+	 * file the accepting created has none: no undo takes the file away.
+	 */
+	was?: string[];
 };
 export type RunStatus = "running" | "stopped" | "budget" | "built";
 export type BuildRun = {
 	version: 1;
 	planHash: string;
+	/**
+	 * Each node of the plan this run was begun from, as a build sees it (`nodePrints`, built.ts). The hash says only
+	 * whether the chart is still that plan, and the chart can be changed between a build and the accepting of it:
+	 * what is then recorded as built is these, and not the chart as it stands by then. A run made before they were
+	 * kept is given them where it is taken up again (`loadRun`, `startBuild`), which is only ever with its own plan.
+	 */
+	prints?: Record<string, string>;
 	model: string;
 	status: RunStatus;
 	tokens: number;
@@ -38,7 +61,9 @@ export type BuildRun = {
 	map: NodeMap[];
 	/** The second opinion: advisory. */
 	review?: string;
-	/** Scripts you have accepted. */
+	/** The print of the passed units the second opinion was last asked about (`passedPrint`, buildRun.ts). */
+	reviewOf?: string;
+	/** Scripts you have accepted, and that have no unit waiting for review (`settleAccepted`). */
 	accepted: string[];
 };
 
@@ -62,10 +87,11 @@ export function readSpecFile(text: string): { units: SpecUnit[]; map: NodeMap[] 
 	return { units: Array.isArray(units) ? units.filter((u) => typeof u?.name === "string") : [], map: Array.isArray(map) ? map.filter((m) => typeof m?.node === "string") : [] };
 }
 
-export function newRun(plan: { hash: string; model: string }, units: SpecUnit[], map: NodeMap[], budget: { cost?: number; tokens?: number } = {}): BuildRun {
+export function newRun(plan: { hash: string; model: string; prints?: Record<string, string> }, units: SpecUnit[], map: NodeMap[], budget: { cost?: number; tokens?: number } = {}): BuildRun {
 	return {
 		version: 1,
 		planHash: plan.hash,
+		...(plan.prints ? { prints: plan.prints } : {}),
 		model: plan.model,
 		status: "running",
 		tokens: 0,
@@ -74,6 +100,37 @@ export function newRun(plan: { hash: string; model: string }, units: SpecUnit[],
 		units: units.map((u) => ({ ...u, status: "pending", attempts: 0 })),
 		map,
 		accepted: [],
+	};
+}
+
+const isRecord = (value: unknown): value is Record<string, any> => typeof value === "object" && value !== null && !Array.isArray(value);
+/** A count or a sum as a file holds it: a number above zero, or nothing. */
+const amount = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
+const RUN_STATUSES: readonly RunStatus[] = ["running", "stopped", "budget", "built"];
+
+/**
+ * A run as its file holds it, made safe to carry on; null for what is not a run at all. The file used to be taken
+ * as it came. One with no budget, as an earlier version or a hand may have left it, ended every build of its plan
+ * with "undefined is not an object (evaluating 'run.budget.cost')"; one whose budget held no token count had no
+ * token limit at all, since nothing is ever over a limit that is not a number. What is missing, or does not read as
+ * a number above zero, is put right here: nothing spent is nothing spent, a missing token budget is the default
+ * one, and a cost budget that does not read is no cost budget, which a build asks for before any turn goes to a
+ * model that may cost money (`unbudgeted`). A limit that is missing is never no limit.
+ */
+export function mendRun(raw: unknown): BuildRun | null {
+	if (!isRecord(raw) || !Array.isArray(raw.units) || !Array.isArray(raw.accepted) || !Array.isArray(raw.map)) return null;
+	const budget = isRecord(raw.budget) ? raw.budget : {};
+	const cost = amount(budget.cost);
+	return {
+		...(raw as BuildRun),
+		model: typeof raw.model === "string" ? raw.model : "",
+		status: RUN_STATUSES.includes(raw.status) ? raw.status : "stopped",
+		tokens: amount(raw.tokens),
+		cost: amount(raw.cost),
+		budget: { ...(cost ? { cost } : {}), tokens: amount(budget.tokens) || DEFAULT_TOKEN_BUDGET },
+		units: raw.units.filter((u): u is BuildUnit => isRecord(u) && typeof u.name === "string"),
+		map: raw.map.filter((m): m is NodeMap => isRecord(m) && typeof m.node === "string"),
+		accepted: raw.accepted.filter((s): s is string => typeof s === "string"),
 	};
 }
 
@@ -100,7 +157,128 @@ export function nextUnit(run: BuildRun): BuildUnit | null {
 	return null;
 }
 
-export const overBudget = (run: BuildRun) => run.tokens >= run.budget.tokens || (run.budget.cost !== undefined && run.cost >= run.budget.cost);
+/**
+ * Puts back in the queue what an earlier attempt left marked as being built. A unit is marked before its first
+ * turn, and an attempt that ended there (an error, or the folder changed under it) never unmarked it: `nextUnit`
+ * takes only what is waiting, so the unit was not built again and the run ended "built" around it.
+ * Says whether anything was put back.
+ */
+export function requeueRunning(run: BuildRun): boolean {
+	let found = false;
+	for (const unit of run.units) {
+		if (unit.status !== "running") continue;
+		unit.status = "pending";
+		found = true;
+	}
+	return found;
+}
+
+export const overTokens = (run: BuildRun) => run.tokens >= run.budget.tokens;
+export const overCost = (run: BuildRun) => run.budget.cost !== undefined && run.cost >= run.budget.cost;
+export const overBudget = (run: BuildRun) => overTokens(run) || overCost(run);
+
+/**
+ * What a build does next: builds a unit, or ends. With nothing left to build it is built, whatever it has spent:
+ * the budget used to be looked at first, so a run whose last unit took it over was "stopped at its budget" with
+ * nothing to carry on with. With a unit waiting and the budget reached, it stops there.
+ */
+export function nextStep(run: BuildRun): { unit: BuildUnit } | { ends: "built" | "budget" } {
+	const unit = nextUnit(run);
+	if (!unit) return { ends: "built" };
+	return overBudget(run) ? { ends: "budget" } : { unit };
+}
+
+/**
+ * Whether the budget ran out on a unit that still had tries to come. Such a unit has not had its tries, so it is
+ * not stuck: it goes back to waiting, and is built when the build is carried on with more to spend. Marked stuck,
+ * it had to be tried again by hand before a carried-on build would take it, and what calls it was passed over as
+ * waiting on a stuck unit.
+ */
+export const cutShort = (run: BuildRun, attempt: number) => overBudget(run) && attempt < MAX_ATTEMPTS;
+
+/**
+ * What a run must be given before it is carried on, because it has reached that budget and has units waiting to
+ * be built; null when it can simply go on. A run that stopped at its budget used to be started again with the
+ * budget it had already reached: it stopped at once, and the only way on was to discard it, and with it every
+ * unit that had passed. A run with nothing waiting is asked for nothing: there is nothing to spend it on.
+ */
+export function spentUp(run: BuildRun): { cost: boolean; tokens: boolean } | null {
+	if (!run.units.some((u) => u.status === "pending" || u.status === "running")) return null;
+	const [cost, tokens] = [overCost(run), overTokens(run)];
+	return cost || tokens ? { cost, tokens } : null;
+}
+
+/**
+ * The cost budget offered when a run that stopped at its budget is carried on: twice the one it had, or, when one
+ * turn has taken it past that already, as much again on top of what is spent. Always above what is spent.
+ */
+export function nextCostBudget(run: BuildRun): number {
+	const had = run.budget.cost ?? 0;
+	if (had * 2 > run.cost) return had * 2;
+	const more = Math.round((run.cost + had) * 100) / 100;
+	return more > run.cost ? more : run.cost + 1;
+}
+
+/** A cost budget as it was typed, for a run that has spent `spent`: a number above zero and above that, or null. */
+export function readCostBudget(answer: string, spent = 0): number | null {
+	const cost = Number(answer.trim());
+	return answer.trim() && Number.isFinite(cost) && cost > 0 && cost > spent ? cost : null;
+}
+
+/**
+ * What a run that reached its budget may spend from here: the cost budget it is given, and another token budget
+ * on top of the tokens it has used. Only what was agreed to is raised, so a run with one of the two still used
+ * up stops again at once. Its units are left as they are: what has passed is not built again.
+ */
+export function raiseBudget(run: BuildRun, more: { cost?: number; tokens?: boolean }) {
+	if (more.cost !== undefined) run.budget.cost = more.cost;
+	if (more.tokens) run.budget.tokens = run.tokens + DEFAULT_TOKEN_BUDGET;
+}
+
+/**
+ * Whether a model is known to cost nothing: opencode lists it as local, or its name is a local provider's (or one
+ * of the user's own models), which is the rule the backend goes by (src/shared/agentModels.ts). Any other model
+ * the list does not hold is not known to be free, and counts as one that may cost money. The list is empty until
+ * opencode has started, and a model missing from it once counted as local, so a build on a paid model could
+ * start with no cost budget. Names are compared as opencode compares them, without regard to case.
+ */
+export function modelIsLocal(models: readonly { providerID: string; id: string; local: boolean }[], ref: string, ownModels?: readonly string[]): boolean {
+	const wanted = ref.trim().toLowerCase();
+	if (!wanted) return false;
+	return models.some((m) => m.local && `${m.providerID}/${m.id}`.toLowerCase() === wanted) || isLocalModelRef(ref, ownModels);
+}
+
+/**
+ * Whether a build's next turn would go to a model that may cost money with no cost budget agreed to. The budget
+ * was asked for once, as the build began, of the model chosen then: a build begun on a local model went on, turn
+ * after turn, on a paid one chosen while it ran, and no budget had ever been set for it. Asked before every turn,
+ * of the model in use at that moment. With no model chosen opencode takes a local one or refuses the turn.
+ */
+export function unbudgeted(run: Pick<BuildRun, "budget">, models: readonly { providerID: string; id: string; local: boolean }[], model: string, ownModels?: readonly string[]): boolean {
+	return Boolean(model.trim()) && run.budget.cost === undefined && !modelIsLocal(models, model, ownModels);
+}
+
+/**
+ * What the assistant says beside the model's name about its cost, and why; null when there is nothing to warn of.
+ * With no model chosen opencode takes a local one or refuses the turn. A model the list does not hold is said to
+ * be one that may cost money, in the words of the build's budget question: until opencode has started the list
+ * is empty, and the note used to be left out then, as if the model were known to be local.
+ */
+export function modelCostNote(
+	models: readonly { providerID: string; id: string; local: boolean }[],
+	ref: string,
+	ownModels?: readonly string[],
+): { words: string; why: string } | null {
+	const wanted = ref.trim().toLowerCase();
+	if (!wanted || modelIsLocal(models, ref, ownModels)) return null;
+	if (models.some((m) => `${m.providerID}/${m.id}`.toLowerCase() === wanted)) return { words: "paid model", why: "opencode lists this model as one that is not local." };
+	return {
+		words: "may cost money",
+		why: models.length
+			? "opencode does not list this model, so it is not known to be a local one."
+			: "opencode has not started, so it has not said whether this model is a local one. A build asks before it spends anything.",
+	};
+}
 
 /** Words that mean a step was described and not done, in any language's comments. */
 const PLACEHOLDER = /\b(todo|fixme|placeholder|stub|not implemented|to be implemented|implement (the )?(actual|real)|replace with (the )?(actual|real)|your (code|logic) here|logic (goes )?here)\b/i;
@@ -188,6 +366,135 @@ export function unbuiltNodes(plan: Plan, run: BuildRun): string[] {
 
 export const scriptOf = (unit: SpecUnit, plan: Plan) =>
 	unit.script?.trim() || planTargetsOf(plan)[0] || `${plan.title.replace(/[^\w-]+/g, "") || "Plan"}.ssl`;
+
+/**
+ * Why a build may not write a script, or null when it may. A build writes SSL scripts in the workspace's own
+ * folders: the path is relative to the workspace and does not step out of it, no folder on the way is hidden and
+ * the file is not (.git, .ssl-studio, .github and the like), and it is a file SSL Studio itself takes for SSL
+ * (.ssl, .srvscr, .ds, or one of those saved as .txt: the language catalog's rule).
+ *
+ * A unit's script comes from the plan doc, which a model wrote, or from the plan's target scripts. The backend
+ * refuses a path outside the workspace, and that was the only check: inside it a unit could name a git hook or
+ * the project's own settings, and the review offered to create that file, or to rewrite it, as SSL.
+ */
+export function scriptProblem(script: string): string | null {
+	const norm = script.trim().replace(/\\/g, "/");
+	const parts = norm.split("/").filter((part) => part && part !== ".");
+	if (!parts.length || norm.includes("\0")) return "it names no file";
+	if (norm.startsWith("/") || /^[A-Za-z]:/.test(norm) || parts.includes("..")) return "it is not a path inside the workspace";
+	if (parts.some((part) => part.startsWith("."))) return "it is hidden, or in a hidden folder";
+	if (languageFor(norm) !== "ssl") return "it is not an SSL file (.ssl, .srvscr or .ds)";
+	return null;
+}
+
+/** The first unit a build would write whose script it may not, and why. A unit kept as it is, is not written. */
+export function unwritableUnit(units: readonly (SpecUnit & { status?: UnitStatus })[], plan: Plan): { unit: string; script: string; why: string } | null {
+	for (const unit of units) {
+		if (unit.status === "kept") continue;
+		const script = scriptOf(unit, plan);
+		const why = scriptProblem(script);
+		if (why) return { unit: unit.name, script, why };
+	}
+	return null;
+}
+
+// --- what a script has been given, and what a review is of -------------------------------
+
+/** A text with one kind of line ending: the editor gives a file one kind, and what is accepted into it takes the buffer's. */
+const oneEnding = (text: string) => text.replace(/\r\n?/g, "\n");
+
+/** A script's text as one print, line endings aside. */
+export const textPrint = (text: string) => hashText(oneEnding(text));
+
+/** Whether two readings of a script are the same text, line endings aside. No file is the same as no file only. */
+export const sameText = (a: string | null, b: string | null) => (a === null || b === null ? a === b : oneEnding(a) === oneEnding(b));
+
+/** A unit's code in a script, as one print: what `BuildUnit.given` holds once the script has been given it. */
+export const givenPrint = (script: string, code: string | undefined) => hashText(JSON.stringify([script, code ?? ""]));
+
+/** Whether a unit's code, as it is now, has been accepted into the script it goes to now. */
+export const isGiven = (unit: BuildUnit, plan: Plan) => unit.given !== undefined && unit.given === givenPrint(scriptOf(unit, plan), unit.code);
+
+/** The units that wait for review: passed, and their code not accepted into their script. */
+export const unitsToReview = (run: BuildRun, plan: Plan): BuildUnit[] => run.units.filter((u) => u.status === "passed" && !isGiven(u, plan));
+
+/**
+ * Holds `accepted` to what it says: a script that has been given a unit is in it, and one with a unit waiting
+ * for review is not, accepted before or not. Called wherever a unit passes, is given to its script, or goes back.
+ */
+export function settleAccepted(run: BuildRun, plan: Plan) {
+	const waits = new Set(unitsToReview(run, plan).map((u) => scriptOf(u, plan)));
+	const holds = run.units.filter((u) => u.status === "passed" && isGiven(u, plan)).map((u) => scriptOf(u, plan));
+	run.accepted = [...new Set([...run.accepted, ...holds])].filter((script) => !waits.has(script));
+}
+
+/**
+ * A run saved before units were marked says only which scripts were accepted: each passed unit of those is taken
+ * as given, which is what that version went by. A run that marks its units is left alone.
+ */
+export function givenFromAccepted(run: BuildRun, plan: Plan) {
+	if (run.units.some((u) => u.given !== undefined)) return;
+	for (const unit of run.units) if (unit.status === "passed" && run.accepted.includes(scriptOf(unit, plan))) unit.given = givenPrint(scriptOf(unit, plan), unit.code);
+}
+
+/**
+ * Whether a script reads again as it would with a unit's accepting taken back (`BuildUnit.was`, which a file may
+ * hold as anything). A script that is gone says nothing: it may have been moved, which the chart reports.
+ */
+export const takenBack = (was: unknown, text: string | null) => text !== null && Array.isArray(was) && was.includes(textPrint(text));
+
+/** Takes the accepting of units out of a run, by the print each was given under: they wait for review again. */
+export function takeBack(run: BuildRun, given: ReadonlySet<string>, plan: Plan) {
+	for (const unit of run.units) {
+		if (unit.given === undefined || !given.has(unit.given)) continue;
+		delete unit.given;
+		delete unit.was;
+	}
+	settleAccepted(run, plan);
+}
+
+/** What a review of a build shows, kept from the moment it opens: the script, and each unit as a print of its code there. */
+export type Shown = { script: string; units: { name: string; print: string }[] };
+export const shownOf = (script: string, units: readonly BuildUnit[]): Shown => ({ script, units: units.map((u) => ({ name: u.name, print: givenPrint(script, u.code) })) });
+
+/** The units of a run that are still as a review shows them: passed, with that code, for that script, and not yet given to it. */
+export const stillShown = (shown: Shown, run: BuildRun, plan: Plan): BuildUnit[] =>
+	unitsToReview(run, plan).filter((u) => shown.units.some((s) => s.name === u.name && s.print === givenPrint(scriptOf(u, plan), u.code)));
+
+/**
+ * Marks the units a review showed as given to its script, those still as it showed them (`stillShown`). `was` is
+ * what the script read as before, for an accepting into the editor; the units it was given earlier are taken back
+ * with these when the script reads as it did before them, since undo goes back through the later edit first.
+ */
+export function giveTo(run: BuildRun, shown: Shown, plan: Plan, was: readonly string[]) {
+	const earlier = run.units.filter((u) => u.status === "passed" && isGiven(u, plan) && scriptOf(u, plan) === shown.script).flatMap((u) => (Array.isArray(u.was) ? u.was : []));
+	for (const unit of stillShown(shown, run, plan)) {
+		unit.given = givenPrint(shown.script, unit.code);
+		if (was.length) unit.was = [...new Set([...was, ...earlier])];
+		else delete unit.was;
+	}
+	settleAccepted(run, plan);
+}
+
+/**
+ * Why accepting a review would not act on what it shows, in words that follow "Not accepted:"; null when it would.
+ * A review is of one run and one target script, and stays open for as long as you like. Accepting used to act on
+ * whatever was stored by then: a new build begun meanwhile had the old review's script marked as accepted, and
+ * with the plan's target script changed the old target was written and the plan recorded nothing. Every unit the
+ * review shows must still be passed in the run as it is now, with the code shown, for the script shown.
+ */
+export function reviewStale(shown: Shown, run: BuildRun | null | undefined, plan: Plan): string | null {
+	if (!run) return "the build this review was of has been discarded, so nothing was written";
+	for (const { name, print } of shown.units) {
+		const unit = run.units.find((u) => u.name === name);
+		const script = unit && scriptOf(unit, plan);
+		if (unit?.status === "passed" && script !== shown.script && givenPrint(shown.script, unit.code) === print)
+			return `the plan now puts ${name} in ${script}, not in ${shown.script}, so nothing was written. Reject this review and open it again`;
+	}
+	const still = stillShown(shown, run, plan);
+	if (!shown.units.every((s) => still.some((u) => u.name === s.name && givenPrint(shown.script, u.code) === s.print))) return "the build has changed since this review was opened, so nothing was written. Reject this review and open it again";
+	return null;
+}
 
 /** Sanitizes free-text titles/stage names for single-line SSL comments (`/* ... ;`). */
 const sanitizeSslComment = (text: string): string =>

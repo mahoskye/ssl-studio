@@ -44,11 +44,12 @@ export async function loadGraph(progress: (done: number, total: number) => void,
 		throwIfAborted(signal);
 		progress(1, 1);
 		const toPath = (uri: string) => monaco.Uri.parse(uri).fsPath;
-		const scriptPaths = (result?.nodes ?? []).filter((n: any) => n.kind === "script" && n.location?.uri).map((n: any) => toPath(n.location.uri));
+		const scratch = (path: string) => /[\\/]\.ssl-studio[\\/]/.test(path);
+		const scriptPaths = (result?.nodes ?? []).filter((n: any) => n.kind === "script" && n.location?.uri).map((n: any) => toPath(n.location.uri)).filter((path: string) => !scratch(path));
 		const sizes = new Map(Object.entries(await backend.sizes(scriptPaths).catch(() => ({}))));
 		throwIfAborted(signal);
 		// Calls and class relations alike are the server's (L2, L4): nothing of a file is read here.
-		const graph = fromCallGraph({ nodes: result?.nodes ?? [], edges: result?.edges ?? [] }, toPath, sizes);
+		const graph = fromCallGraph({ nodes: result?.nodes ?? [], edges: result?.edges ?? [] }, toPath, sizes, scratch);
 		// While the server is still indexing, calls into unindexed files show as unresolved.
 		return { ...graph, truncated: Boolean(result?.indexing) };
 	}

@@ -3,14 +3,14 @@
 // plans. Which folders those are comes from .ssl-studio/project.toml.
 import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
-import { createContext, createEffect, createMemo, createSignal, For, on, onCleanup, Show, useContext } from "solid-js";
+import { createContext, createEffect, createMemo, createSignal, For, onSettled, Show, useContext } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
 import { ask, choose, quickPick, type QuickPickOption } from "../dialogs";
 import { localDay } from "../../shared/dates";
 import { docChecks } from "../../shared/docChecks";
 import { aggregateDocIssues, applyMultiSelectClick, hasAnyDocIssue, type DocIssueSummary } from "../../shared/docSelection";
-import { addToFrontMatterList, frontMatter, one, withFrontMatter } from "../../shared/frontMatter";
+import { addToFrontMatterList, frontMatter, frontMatterRefusal, one, withFrontMatter } from "../../shared/frontMatter";
 import { CATALOG_AREAS, DOC_FOLDERS, docMatches, isCatalog, KNOWLEDGE, progress, progressShort, projectDocLabel, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
 import { normalizeTag, tagSearchPattern, workspaceTags } from "../../shared/tags";
 import { descendantTickets, ticketWork } from "../../shared/workContext";
@@ -53,8 +53,9 @@ import {
 	unarchiveTicket,
 	updateCatalogs,
 	updateManifest,
+	whyNotRead,
 } from "../projectDocs";
-import { searchFor } from "./Search";
+import { codeExcludeGlob, searchFor } from "./Search";
 import { manageTemplates, newNoteFromTemplate } from "../templater";
 import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, newOfKind, plainSection, schemaFolderOf, schemaOf, sectionFolder, sectionMenuEntries, SHOW_FOLDER, type DocSection } from "../../shared/docSections";
 import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
@@ -87,17 +88,47 @@ const DocsPanelContext = createContext<DocsPanelContextValue>({
 	openBulkMenu: async () => {},
 });
 
-const isBulkSelectable = (file: DocFile) => file.exists && !isCatalog(file) && /\.(md|markdown)$/i.test(file.name);
+/**
+ * Whether a document can be one of several changed at once (status, tag, release, governance, archive): a Markdown
+ * document that is there and is not a catalog. The project's own files (README.md, AGENTS.md, STATE.md) are not:
+ * front matter written into a README is hardly ever meant, and "Select all visible" took them with everything
+ * else. They are changed one at a time, from their own row or in the Inspector.
+ */
+export const isBulkSelectable = (file: DocFile) => file.exists && file.group !== "project" && !isCatalog(file) && /\.(md|markdown)$/i.test(file.name);
 
-async function editDocFrontMatter(path: string, transform: (text: string) => string | null): Promise<boolean> {
+/**
+ * The documents that can be selected and have a row drawn now, in the order their rows are drawn. `drawnRows` are
+ * the keys of the rows on the page: a document inside a folded list, under a folded ticket or behind "Show the
+ * finished" has none. "Select all visible" took every document the filter let through, drawn or not: with every
+ * list folded it said "26 selected" over an empty panel, and the next bulk change was written to all of them.
+ */
+export function drawnSelectable(selectable: readonly string[], drawnRows: readonly string[]): string[] {
+	const can = new Set(selectable);
+	return [...new Set(drawnRows)].filter((key) => can.has(key));
+}
+
+/** What the bar over a selection says of it: how many documents, and how many of those have no row drawn now. */
+export const selectionSaid = (selected: number, notShown: number) => (notShown ? `${selected} selected, ${notShown} of them not shown` : `${selected} selected`);
+
+/** Said where documents are selected to be changed together: which are left out, and how they are changed. */
+const NOT_IN_BULK = "The project's own files (README.md, AGENTS.md, STATE.md) are never selected: they are changed one at a time.";
+
+/**
+ * Changes one document's front matter; true when the document changed, false when it already read that way. A
+ * change the writer refuses (null) is raised, for the caller's own notice to name the document: it was once passed
+ * over like a value already set, and a selection was told it "already had" a status that one of its documents
+ * did not take. A document that cannot be read is raised the same way, with why: it was passed over like the
+ * refusal once was, and counted among those that "already had" the value.
+ */
+export async function editDocFrontMatter(path: string, field: string, transform: (text: string) => string | null): Promise<boolean> {
 	const key = canonical(path);
 	const open = documents.get(key);
-	if (open?.binary) return false;
 	const liveOpen = open && !open.binary && !open.model.isDisposed() ? open : undefined;
-	const cur = liveOpen ? liveOpen.model.getValue() : await backend.read(path).then((r) => (r.binary ? null : r.text), () => null);
-	if (cur === null) return false;
+	const cur = open?.binary ? null : liveOpen ? liveOpen.model.getValue() : await backend.read(path).then((r) => (r.binary ? null : r.text), () => null);
+	if (cur === null) throw new Error(await whyNotRead(path));
 	const next = transform(cur);
-	if (next === null || next === cur) return false;
+	if (next === null) throw new Error(frontMatterRefusal(cur, field));
+	if (next === cur) return false;
 	if (liveOpen) {
 		const clean = !state.dirty[key];
 		if (!applyText(key, next)) throw new Error(`Could not update open buffer for ${baseName(path)}.`);
@@ -287,19 +318,23 @@ async function archiveSpecOrDecision(file: DocFile): Promise<void> {
 		await backend.rename(file.path, dest);
 		fileRenamed(file.path, dest);
 	} catch (e: any) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => {
+			s.treeVersion += 1;
+		});
 		notify(String(e?.message ?? e), "error");
 		return;
 	}
 	// Update status on the moved path directly without invoking the interactive supersede wizard mid-archive.
 	if (picked === ARCHIVE_MARK) {
 		try {
-			await editDocFrontMatter(dest, (text) => withFrontMatter(text, "status", targetStatus));
+			await editDocFrontMatter(dest, "status", (text) => withFrontMatter(text, "status", targetStatus));
 		} catch (e: any) {
 			notify(`Archived, but could not update status on ${baseName(dest)}: ${e?.message ?? e}`, "error");
 		}
 	}
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => {
+		s.treeVersion += 1;
+	});
 	refreshDocAudit();
 	try {
 		await followRename(file.path, dest, beforeDocs);
@@ -398,7 +433,9 @@ async function archiveAllDoneTickets(): Promise<void> {
 		}
 	}
 	if (archived) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => {
+			s.treeVersion += 1;
+		});
 		refreshDocAudit();
 		notify(`Archived ${archived} done ${archived === 1 ? "ticket" : "tickets"} to ${relArchive}/${skipped.length ? ` (skipped: ${skipped.join(", ")})` : ""}.`);
 	} else if (skipped.length) {
@@ -593,14 +630,7 @@ async function rowMenu(file: DocFile, at: Point) {
 	else if (picked === LINK_SQL_SOURCE) await linkSchemaDocToSql(file.path);
 	else if (picked === FIND_IN_CODE) {
 		const rawStem = (file.name.split(/[\\/]/).pop() || file.title || "").replace(/\.[^.]+$/, "").trim();
-		const cleanDir = (dir?: string) => (dir ?? "").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
-		const dRel = cleanDir(state.project?.docs ?? "docs");
-		const pRel = cleanDir(state.project?.plans ?? "design");
-		const sRel = cleanDir(state.project?.schema ?? "schema");
-		const exc = [dRel ? `${dRel}/**` : "", pRel ? `${pRel}/**` : "", sRel ? `${sRel}/**` : "", "README.md", "AGENTS.md", "**/INDEX.md"]
-			.filter(Boolean)
-			.join(", ");
-		if (rawStem) searchFor(rawStem, { wholeWord: true, include: "", exclude: exc });
+		if (rawStem) searchFor(rawStem, { wholeWord: true, include: "", exclude: codeExcludeGlob() });
 	}
 	else if (picked === ARCHIVE_TICKET) await archiveTicket(file);
 	else if (picked === UNARCHIVE_TICKET) await unarchiveTicket(file);
@@ -754,7 +784,7 @@ function ItemRow(props: {
 			</Show>
 			<Show when={props.note}>
 				{/* In a narrow panel a note that has a shorter way of saying itself says it that way, and the title keeps the room. */}
-				<span class="meta" classList={{ aside: props.aside, shortens: Boolean(props.short) }} title={props.short ? props.note : undefined}>
+				<span class={["meta", { aside: props.aside, shortens: Boolean(props.short) }]} title={props.short ? props.note : undefined}>
 					<span class="long">{props.note}</span>
 					<Show when={props.short}>
 						<span class="short" aria-hidden="true">
@@ -936,33 +966,48 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const archiveExpanded = () => Boolean(props.filtered) || archiveOpen();
 	const activeTicketCount = createMemo(() => list().rows.filter((r) => r.kind === "ticket").length);
 	const fold = (row: ReturnType<typeof rows>[number]) => ({ parent: row.parent, shut: row.shut, locked: props.filtered ? LOCKED : undefined, toggle: () => setFold(ticketFold(row.file), !row.shut) });
-	const renderWorkRow = (row: ReturnType<typeof rows>[number], isArchived = false) =>
-		row.kind === "ticket" ? (
-			<ItemRow file={row.file} depth={row.depth + (isArchived ? 1 : 0)} lead={row.file.ticket} linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
-		) : row.kind === "plan" ? (
-			<ItemRow file={{ ...row.file, title: row.file.name.replace(/\.plan\.json$/i, "") }} depth={row.depth + (isArchived ? 1 : 0)} note="plan" linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
-		) : row.kind === "plan-doc" ? (
-			<ItemRow file={{ ...row.file, title: row.file.title || row.file.name.replace(/\.plan\.md$/i, "") }} depth={row.depth + (isArchived ? 1 : 0)} note="plan doc" linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
-		) : (
-			<ItemRow file={row.file} depth={row.depth + (isArchived ? 1 : 0)} note="spec" linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
+	const workRowFile = (row: ReturnType<typeof rows>[number]): DocFile =>
+		row.kind === "plan"
+			? { ...row.file, title: row.file.name.replace(/\.plan\.json$/i, "") }
+			: row.kind === "plan-doc"
+				? { ...row.file, title: row.file.title || row.file.name.replace(/\.plan\.md$/i, "") }
+				: row.file;
+	const workRowNote = (row: ReturnType<typeof rows>[number]): string | undefined =>
+		row.kind === "ticket" ? undefined : row.kind === "plan" ? "plan" : row.kind === "plan-doc" ? "plan doc" : "spec";
+	const renderWorkRow = (row: () => ReturnType<typeof rows>[number], isArchived = false) => {
+		const file = createMemo(() => workRowFile(row()));
+		const rowFold = createMemo(() => fold(row()));
+		return (
+			<ItemRow
+				file={file()}
+				depth={row().depth + (isArchived ? 1 : 0)}
+				lead={row().kind === "ticket" ? row().file.ticket : undefined}
+				note={workRowNote(row())}
+				linkDetail={row().link?.detail}
+				archived={isArchived}
+				fold={rowFold()}
+			/>
 		);
+	};
 	return (
 		<RowGroup fold="docs:work" label="Work" onMenu={(at) => void headMenu("work", "Work", at)} open={props.filtered} count={props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && !isCatalog(d)).length} head={<Head title="Work" folder={folderOf("work")} />} rows={props.files.some((d) => d.group === "tickets" || d.group === "specs")} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
 			<Show when={activeTicketCount() > 1}>
 				<div class="docs-work-sort" role="group" aria-label="Sort tickets">
 					<span class="docs-sort-label">Sort</span>
-					<button type="button" classList={{ on: sort() === "status" }} onClick={() => chooseSort("status")}>
+					<button type="button" class={{ on: sort() === "status" }} onClick={() => chooseSort("status")}>
 						Status
 					</button>
-					<button type="button" classList={{ on: sort() === "key" }} onClick={() => chooseSort("key")}>
+					<button type="button" class={{ on: sort() === "key" }} onClick={() => chooseSort("key")}>
 						Key
 					</button>
-					<button type="button" classList={{ on: sort() === "title" }} onClick={() => chooseSort("title")}>
+					<button type="button" class={{ on: sort() === "title" }} onClick={() => chooseSort("title")}>
 						Title
 					</button>
 				</div>
 			</Show>
-			<For each={rows()}>{(row) => renderWorkRow(row, false)}</For>
+			<For each={rows()} keyed={(row) => `${row.kind}:${row.file.path}`}>
+				{(row) => renderWorkRow(row, false)}
+			</For>
 			{/* What is done or set aside is not what the list is opened for: beyond a few, it waits behind its count. */}
 			<Show when={everything()}>
 				<Row class="tree-row doc-row doc-more" key="finished-tickets" title={all() ? "Leave out the tickets that are done or set aside" : "Show the tickets that are done or set aside"} onActivate={() => setAll(!all())}>
@@ -970,7 +1015,9 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 				</Row>
 			</Show>
 			{/* The same room for a twisty as the rows above, so that the marks line up down the list. */}
-			<For each={list().loose}>{(spec) => <ItemRow file={spec} note={spec.tickets?.length ? `for ${spec.tickets.join(", ")}` : "spec, no ticket"} fold={NO_FOLD} />}</For>
+			<For each={list().loose} keyed={(spec) => spec.path}>
+				{(spec) => <ItemRow file={spec()} note={spec().tickets?.length ? `for ${spec().tickets!.join(", ")}` : "spec, no ticket"} fold={NO_FOLD} />}
+			</For>
 			<Show when={archivedTicketCount() > 0}>
 				<Row
 					class="group-head doc-kind foldable docs-archive-head"
@@ -985,14 +1032,16 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 					<span class="head-words">Archive ({archivedTicketCount()})</span>
 				</Row>
 				<Show when={archiveExpanded()}>
-					<For each={archivedRows()}>{(row) => renderWorkRow(row, true)}</For>
+					<For each={archivedRows()} keyed={(row) => `${row.kind}:${row.file.path}`}>
+						{(row) => renderWorkRow(row, true)}
+					</For>
 				</Show>
 			</Show>
-			<For each={catalogs()}>
+			<For each={catalogs()} keyed={(catalog) => catalog.path}>
 				{(catalog) => (
 					<ItemRow
-						file={catalog}
-						label={catalog.group === "tickets" ? "Ticket Catalog" : catalog.group === "specs" ? "Spec Catalog" : undefined}
+						file={catalog()}
+						label={catalog().group === "tickets" ? "Ticket Catalog" : catalog().group === "specs" ? "Spec Catalog" : undefined}
 						fold={NO_FOLD}
 					/>
 				)}
@@ -1008,16 +1057,20 @@ function Knowledge(props: { files: DocFile[]; empty?: string; filtered?: boolean
 	return (
 		<RowGroup fold="docs:knowledge" label="Knowledge base" onMenu={(at) => void headMenu("knowledge", "Knowledge base", at)} open={props.filtered} count={files().filter((d) => !isCatalog(d)).length} role="group" head={<Head title="Knowledge base" folder={folderOf("knowledge")} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
 			{/* Each kind is a group of its own inside: it folds by itself. */}
-			<For each={kinds()}>
+			<For each={kinds()} keyed={(kind) => kind.id || "other"}>
 				{(kind) => (
-					<RowGroup fold={`docs:knowledge:${kind.id || "other"}`} label={kind.name} onMenu={kind.id ? (at) => void headMenu(`knowledge:${kind.id}` as DocSection, kind.name, at) : undefined} open={props.filtered} count={kind.files.length} headClass="doc-kind" head={kind.name}>
-						<For each={kind.files}>{(file) => <ItemRow file={file} depth={1} />}</For>
+					<RowGroup fold={`docs:knowledge:${kind().id || "other"}`} label={kind().name} onMenu={kind().id ? (at) => void headMenu(`knowledge:${kind().id}` as DocSection, kind().name, at) : undefined} open={props.filtered} count={kind().files.length} headClass="doc-kind" head={kind().name}>
+						<For each={kind().files} keyed={(file) => file.path}>
+							{(file) => <ItemRow file={file()} depth={1} />}
+						</For>
 					</RowGroup>
 				)}
 			</For>
 			<Show when={files().some(isCatalog)}>
 				<div role="listbox" aria-label="The knowledge base's catalog">
-					<For each={files().filter(isCatalog)}>{(catalog) => <ItemRow file={catalog} />}</For>
+					<For each={files().filter(isCatalog)} keyed={(catalog) => catalog.path}>
+						{(catalog) => <ItemRow file={catalog()} />}
+					</For>
 				</div>
 			</Show>
 		</RowGroup>
@@ -1032,22 +1085,29 @@ function Knowledge(props: { files: DocFile[]; empty?: string; filtered?: boolean
  */
 function Schema(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const list = createMemo(() => schemaList(props.files, { configured: state.project?.configured, filtered: props.filtered }));
-	const renderSchemaRows = (items: DocFile[], baseDepth: number, titleDepth: number) => {
-		const mdStems = new Set(
-			items
-				.filter((f) => /\.(md|markdown)$/i.test(f.name))
-				.map((f) => f.name.replace(/\.(md|markdown)$/i, "").toLowerCase()),
+	const SchemaRows = (p: { items: DocFile[]; baseDepth: number; titleDepth: number }) => {
+		const mdStems = createMemo(
+			() =>
+				new Set(
+					p.items
+						.filter((f) => /\.(md|markdown)$/i.test(f.name))
+						.map((f) => f.name.replace(/\.(md|markdown)$/i, "").toLowerCase()),
+				),
 		);
 		return (
-			<For each={items}>
+			<For each={p.items} keyed={(file) => file.path}>
 				{(file) => {
-					const pairedSql =
-						/\.(sql|ddl)$/i.test(file.name) && mdStems.has(file.name.replace(/\.(sql|ddl)$/i, "").toLowerCase());
+					const pairedSql = createMemo(
+						() =>
+							/\.(sql|ddl)$/i.test(file().name) &&
+							mdStems().has(file().name.replace(/\.(sql|ddl)$/i, "").toLowerCase()),
+					);
+					const displayFile = createMemo(() => ({ ...file(), title: schemaRowTitle(file(), p.titleDepth) }));
 					return (
 						<ItemRow
-							file={{ ...file, title: schemaRowTitle(file, titleDepth) }}
-							depth={baseDepth + (pairedSql ? 1 : 0)}
-							note={pairedSql ? "DDL" : undefined}
+							file={displayFile()}
+							depth={p.baseDepth + (pairedSql() ? 1 : 0)}
+							note={pairedSql() ? "DDL" : undefined}
 						/>
 					);
 				}}
@@ -1056,20 +1116,20 @@ function Schema(props: { files: DocFile[]; empty?: string; filtered?: boolean })
 	};
 	return (
 		<RowGroup fold="docs:schema" label="Schema" onMenu={(at) => void headMenu("schema", "Schema", at)} open={props.filtered} count={list().count} role="group" head={<Head title="Schema" folder={folderOf("schema")} />} rows={list().kinds.length + list().top.length > 0 || Boolean(list().catalog)} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
-			<For each={list().kinds}>
+			<For each={list().kinds} keyed={(kind) => kind.id}>
 				{(kind) => (
-					<RowGroup fold={`docs:schema:${kind.id}`} label={kind.name} onMenu={(at) => void headMenu(`schema:${kind.folder}`, kind.name, at)} open={props.filtered} count={kind.count} role={kind.parts.length ? "group" : undefined} headClass="doc-kind" head={kind.name}>
-						<Show when={kind.parts.length} fallback={renderSchemaRows(kind.files, 1, 1)}>
+					<RowGroup fold={`docs:schema:${kind().id}`} label={kind().name} onMenu={(at) => void headMenu(`schema:${kind().folder}`, kind().name, at)} open={props.filtered} count={kind().count} role={kind().parts.length ? "group" : undefined} headClass="doc-kind" head={kind().name}>
+						<Show when={kind().parts.length} fallback={<SchemaRows items={kind().files} baseDepth={1} titleDepth={1} />}>
 							{/* With folders inside it, a kind holds groups: what lies in the kind's own folder is a list beside them. */}
-							<Show when={kind.files.length}>
-								<div role="listbox" aria-label={`${kind.name}, not in a folder of its own`}>
-									{renderSchemaRows(kind.files, 1, 1)}
+							<Show when={kind().files.length}>
+								<div role="listbox" aria-label={`${kind().name}, not in a folder of its own`}>
+									<SchemaRows items={kind().files} baseDepth={1} titleDepth={1} />
 								</div>
 							</Show>
-							<For each={kind.parts}>
+							<For each={kind().parts} keyed={(part) => part.folder}>
 								{(part) => (
-									<RowGroup fold={`docs:schema:${kind.id}/${part.name}`} label={part.name} onMenu={(at) => void headMenu(`schema:${part.folder}`, part.name, at)} open={props.filtered} count={part.files.length} headClass="doc-kind doc-part" head={part.name}>
-										{renderSchemaRows(part.files, 2, 2)}
+									<RowGroup fold={`docs:schema:${kind().id}/${part().name}`} label={part().name} onMenu={(at) => void headMenu(`schema:${part().folder}`, part().name, at)} open={props.filtered} count={part().files.length} headClass="doc-kind doc-part" head={part().name}>
+										<SchemaRows items={part().files} baseDepth={2} titleDepth={2} />
 									</RowGroup>
 								)}
 							</For>
@@ -1079,7 +1139,7 @@ function Schema(props: { files: DocFile[]; empty?: string; filtered?: boolean })
 			</For>
 			<Show when={list().top.length}>
 				<RowGroup fold={SCHEMA_TOP} label="At the top" open={props.filtered} count={list().top.length} headClass="doc-kind" head="At the top">
-					{renderSchemaRows(list().top, 1, 0)}
+					<SchemaRows items={list().top} baseDepth={1} titleDepth={0} />
 				</RowGroup>
 			</Show>
 			<Show when={list().catalog}>
@@ -1096,8 +1156,12 @@ function Registries(props: { files: DocFile[]; empty?: string; filtered?: boolea
 	const files = () => props.files.filter((d) => d.group === "registries");
 	return (
 		<RowGroup fold="docs:registries" label="Registries" onMenu={(at) => void headMenu("registries", "Registries", at)} open={props.filtered} count={files().filter((d) => !isCatalog(d)).length} head={<Head title="Registries" folder={folderOf("registries")} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
-			<For each={files().filter((d) => !isCatalog(d))}>{(file) => <ItemRow file={{ ...file, title: registryTitle(file.name) }} note={progress(file)} short={progressShort(file)} />}</For>
-			<For each={files().filter(isCatalog)}>{(catalog) => <ItemRow file={catalog} />}</For>
+			<For each={files().filter((d) => !isCatalog(d))} keyed={(file) => file.path}>
+				{(file) => <ItemRow file={{ ...file(), title: registryTitle(file().name) }} note={progress(file())} short={progressShort(file())} />}
+			</For>
+			<For each={files().filter(isCatalog)} keyed={(catalog) => catalog.path}>
+				{(catalog) => <ItemRow file={catalog()} />}
+			</For>
 		</RowGroup>
 	);
 }
@@ -1132,9 +1196,13 @@ function Group(props: { title: string; folder?: string; group: DocFile["group"];
 				</Show>
 			}
 		>
-			<For each={nonCatalog()}>{(file) => <DocRow file={file} depth={rowDepth(file)} />}</For>
+			<For each={nonCatalog()} keyed={(file) => file.path}>
+				{(file) => <DocRow file={file()} depth={rowDepth(file())} />}
+			</For>
 			{/* The folder's own catalog last and apart, as the other lists have theirs. */}
-			<For each={files().filter(own)}>{(catalog) => <ItemRow file={catalog} />}</For>
+			<For each={files().filter(own)} keyed={(catalog) => catalog.path}>
+				{(catalog) => <ItemRow file={catalog()} />}
+			</For>
 		</RowGroup>
 	);
 }
@@ -1165,51 +1233,58 @@ export function Docs() {
 	const [truncated, setTruncated] = createSignal<{ folder: string; limit: number; total: number }[]>([]);
 	let truncSeq = 0;
 	let prevRoot: string | undefined;
-	onCleanup(() => {
-		truncSeq++;
-	});
 	createEffect(
-		on(
-			() => [state.workspace?.root, state.treeVersion, docs().length] as const,
-			([root]) => {
-				const seq = ++truncSeq;
-				const rootChanged = root !== prevRoot;
-				prevRoot = root;
-				if (rootChanged) {
-					setTruncated([]);
-					setSelectedPaths(new Set<string>());
-					anchorPath = null;
-				}
-				if (!root) {
-					setTruncated([]);
-					return;
-				}
-				void backend
-					.docsTruncated()
-					.then((list) => {
-						if (seq === truncSeq) setTruncated(list);
-					})
-					.catch(() => {
-						if (seq === truncSeq) setTruncated([]);
-					});
-			},
-		),
+		() => [state.workspace?.root, state.treeVersion, docs().length] as const,
+		([root]) => {
+			const seq = ++truncSeq;
+			const rootChanged = root !== prevRoot;
+			prevRoot = root;
+			if (rootChanged) {
+				setTruncated([]);
+				setSelectedPaths(new Set<string>());
+				anchorPath = null;
+			}
+			if (!root) {
+				setTruncated([]);
+				return () => {
+					truncSeq++;
+				};
+			}
+			void backend
+				.docsTruncated()
+				.then((list) => {
+					if (seq === truncSeq) setTruncated(list);
+				})
+				.catch(() => {
+					if (seq === truncSeq) setTruncated([]);
+				});
+			return () => {
+				truncSeq++;
+			};
+		},
 	);
 
 	const focusedTicket = () => state.settings.activeTicket?.trim() || "";
-	createEffect(() => {
-		if (!focusedTicket() && mode() === "ticket") setMode("all");
-	});
+	createEffect(
+		() => !focusedTicket() && mode() === "ticket",
+		(shouldReset) => {
+			if (shouldReset) setMode("all");
+		},
+	);
 	const releases = createMemo(() =>
 		[...new Set(docs().filter((d) => d.exists && !isCatalog(d) && d.release?.trim()).map((d) => d.release!.trim()))].sort((a, b) =>
 			a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }),
 		),
 	);
-	createEffect(() => {
-		if (releaseFilter() && !releases().some((r) => r.toLowerCase() === releaseFilter().toLowerCase())) {
-			setReleaseFilter("");
-		}
-	});
+	createEffect(
+		() => {
+			const rel = releaseFilter();
+			return Boolean(rel && !releases().some((r) => r.toLowerCase() === rel.toLowerCase()));
+		},
+		(staleRelease) => {
+			if (staleRelease) setReleaseFilter("");
+		},
+	);
 	const tags = createMemo(() => workspaceTags(docs()));
 	const filtering = () => Boolean(filter().trim()) || mode() !== "all" || Boolean(activeTag()) || Boolean(releaseFilter());
 	const hasIssue = (d: DocFile) => hasAnyDocIssue(d, issuesByPath(), canonical);
@@ -1289,17 +1364,22 @@ export function Docs() {
 		let failed = 0;
 		for (const doc of targets) {
 			try {
+				// The status is set whether or not the day it was answered can be: an `answered:` the document writes
+				// over several lines is left as it is, and said.
+				let answeredLeft = false;
 				if (targets.length === 1) {
 					await setStatus(doc.path, picked);
 					changed++;
 				} else if (
-					await editDocFrontMatter(doc.path, (text) => {
+					await editDocFrontMatter(doc.path, "status", (text) => {
 						let next = withFrontMatter(text, "status", picked);
 						if (next === null) return null;
 						if (doc.group === "knowledge" && doc.kind === "questions" && toneOf(picked) === "done") {
 							const fm = frontMatter(next);
 							if (!one(fm.values.answered)) {
-								next = withFrontMatter(next, "answered", todayStr) ?? next;
+								const dated = withFrontMatter(next, "answered", todayStr);
+								if (dated === null) answeredLeft = true;
+								else next = dated;
 							}
 						}
 						return next;
@@ -1307,6 +1387,7 @@ export function Docs() {
 				) {
 					changed++;
 				}
+				if (answeredLeft) notify(`${baseName(doc.path)} has its status, but not the day it was answered: its answered: is written over several lines. Change it in the text.`, "error");
 			} catch (e: any) {
 				failed++;
 				notify(`Could not update ${baseName(doc.path)}: ${e?.message ?? e}`, "error");
@@ -1314,7 +1395,9 @@ export function Docs() {
 		}
 		if (targets.length > 1) {
 			if (changed) {
-				setState("treeVersion", (v) => v + 1);
+				setState((s) => {
+					s.treeVersion += 1;
+				});
 				refreshDocAudit();
 			}
 			if (changed) {
@@ -1373,14 +1456,16 @@ export function Docs() {
 		let failed = 0;
 		for (const doc of targets) {
 			try {
-				if (await editDocFrontMatter(doc.path, (text) => addToFrontMatterList(text, "tags", tag))) changed++;
+				if (await editDocFrontMatter(doc.path, "tags", (text) => addToFrontMatterList(text, "tags", tag))) changed++;
 			} catch (e: any) {
 				failed++;
 				notify(`Could not update ${baseName(doc.path)}: ${e?.message ?? e}`, "error");
 			}
 		}
 		if (changed) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => {
+				s.treeVersion += 1;
+			});
 			refreshDocAudit();
 		}
 		if (changed) {
@@ -1433,14 +1518,16 @@ export function Docs() {
 		let failed = 0;
 		for (const doc of targets) {
 			try {
-				if (await editDocFrontMatter(doc.path, (text) => withFrontMatter(text, "release", val))) changed++;
+				if (await editDocFrontMatter(doc.path, "release", (text) => withFrontMatter(text, "release", val))) changed++;
 			} catch (e: any) {
 				failed++;
 				notify(`Could not update ${baseName(doc.path)}: ${e?.message ?? e}`, "error");
 			}
 		}
 		if (changed) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => {
+				s.treeVersion += 1;
+			});
 			refreshDocAudit();
 		}
 		if (changed) {
@@ -1502,14 +1589,16 @@ export function Docs() {
 		let failed = 0;
 		for (const doc of targets) {
 			try {
-				if (await editDocFrontMatter(doc.path, (text) => withFrontMatter(text, field, value))) changed++;
+				if (await editDocFrontMatter(doc.path, field, (text) => withFrontMatter(text, field, value))) changed++;
 			} catch (e: any) {
 				failed++;
 				notify(`Could not update ${baseName(doc.path)}: ${e?.message ?? e}`, "error");
 			}
 		}
 		if (changed) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => {
+				s.treeVersion += 1;
+			});
 			refreshDocAudit();
 		}
 		if (changed) {
@@ -1682,7 +1771,9 @@ export function Docs() {
 			});
 		}
 		if (archived) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => {
+				s.treeVersion += 1;
+			});
 			refreshDocAudit();
 			notify(`Archived ${archived} ${archived === 1 ? "document" : "documents"}${skipped.length ? ` (skipped: ${skipped.join(", ")})` : ""}.`);
 		} else if (skipped.length) {
@@ -1738,37 +1829,62 @@ export function Docs() {
 	/** Whether a list has anything to show: while filtering, one that has nothing is left out, heading and all. */
 	const has = (...groups: DocFile["group"][]) => !filtering() || shown().some((d) => groups.includes(d.group));
 	const visibleSelectablePaths = createMemo(() => shown().filter(isBulkSelectable).map((d) => d.path));
+	/** The keys of the rows the panel has drawn, in their order on the page. */
+	const rowsDrawn = (): string[] => (panelEl ? [...panelEl.querySelectorAll<HTMLElement>("[data-row]")].map((el) => el.dataset.row ?? "") : []);
+	// What passes the filter is not what is on the screen: each list folds by its own rule (a group, a ticket, the
+	// finished tickets, the archive), so which rows are drawn is read from the page, and read again when it changes.
+	const [drawnRows, setDrawnRows] = createSignal<readonly string[]>([], { equals: (a, b) => a.length === b.length && a.every((key, i) => key === b[i]) });
+	onSettled(() => {
+		if (!panelEl || typeof MutationObserver === "undefined") return;
+		const read = () => setDrawnRows(rowsDrawn());
+		const observer = new MutationObserver(read);
+		observer.observe(panelEl, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-row"] });
+		read();
+		return () => observer.disconnect();
+	});
+	const drawnSelectablePaths = createMemo(() => drawnSelectable(visibleSelectablePaths(), drawnRows()));
 	const selectedDocs = createMemo(() => {
 		const sel = selectedPaths();
 		if (!sel.size) return [] as DocFile[];
 		return shown().filter((d) => sel.has(d.path) && isBulkSelectable(d));
 	});
 	// Prune multi-selected paths against currently visible selectable docs (`shown()`) so hidden/filtered docs are never bulk-mutated.
-	createEffect(() => {
-		const valid = new Set(visibleSelectablePaths());
-		setSelectedPaths((prev) => {
-			if (!prev.size) return prev;
-			let changed = false;
-			const next = new Set<string>();
-			for (const p of prev) {
-				if (valid.has(p)) next.add(p);
-				else changed = true;
-			}
-			return changed ? next : prev;
-		});
-		if (anchorPath && !valid.has(anchorPath)) anchorPath = null;
-	});
+	createEffect(
+		() => visibleSelectablePaths(),
+		(paths) => {
+			const valid = new Set(paths);
+			setSelectedPaths((prev) => {
+				if (!prev.size) return prev;
+				let changed = false;
+				const next = new Set<string>();
+				for (const p of prev) {
+					if (valid.has(p)) next.add(p);
+					else changed = true;
+				}
+				return changed ? next : prev;
+			});
+			if (anchorPath && !valid.has(anchorPath)) anchorPath = null;
+		},
+	);
 	const allVisibleSelected = createMemo(() => {
-		const vis = visibleSelectablePaths();
+		const vis = drawnSelectablePaths();
 		const sel = selectedPaths();
 		return vis.length > 0 && vis.every((p) => sel.has(p));
 	});
-	const bulkSelectAllVisible = () =>
+	/** How many of the selected documents have no row drawn now: selected, and then folded away. The bar says so. */
+	const selectedNotShown = createMemo(() => {
+		const drawn = new Set(drawnRows());
+		return selectedDocs().filter((d) => !drawn.has(d.path)).length;
+	});
+	// "Visible" is what is drawn: the rows on the page at the click, not every document the filter lets through.
+	const bulkSelectAllVisible = () => {
+		const drawn = drawnSelectable(visibleSelectablePaths(), rowsDrawn());
 		setSelectedPaths((prev) => {
 			const next = new Set(prev);
-			for (const p of visibleSelectablePaths()) next.add(p);
+			for (const p of drawn) next.add(p);
 			return next;
 		});
+	};
 	const bulkClearSelection = () => {
 		setSelectedPaths(new Set<string>());
 		anchorPath = null;
@@ -1820,7 +1936,7 @@ export function Docs() {
 		openBulkMenu,
 	};
 	return (
-		<DocsPanelContext.Provider value={panelCtx}>
+		<DocsPanelContext value={panelCtx}>
 		<div
 			ref={panelEl}
 			class="panel-body"
@@ -1869,7 +1985,7 @@ export function Docs() {
 				</Menu>
 				<IconButton label="Collapse all" title={filtering() ? `Collapse all: not while filtering. ${LOCKED}.` : "Collapse all: shut every group and ticket"} icon="collapse-all" disabled={filtering()} onClick={() => setFolds(allFolds(), true)} />
 				<IconButton label="Expand all" title={filtering() ? `Expand all: not while filtering. ${LOCKED}.` : "Expand all: open every group and ticket"} icon="expand-all" disabled={filtering()} onClick={() => setFolds(allFolds(), false)} />
-				<IconButton label="Refresh the document list" title="Refresh" icon="refresh" onClick={() => setState("treeVersion", (v) => v + 1)} />
+				<IconButton label="Refresh the document list" title="Refresh" icon="refresh" onClick={() => setState((s) => { s.treeVersion += 1; })} />
 			</div>
 			<Show when={state.project?.description}>
 				<p class="hint">{state.project!.description}</p>
@@ -1962,16 +2078,16 @@ export function Docs() {
 						onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
 					/>
 					<div class="docs-filter-pills" role="group" aria-label="Document filter mode">
-						<button type="button" classList={{ on: mode() === "all" }} onClick={() => setMode("all")}>
+						<button type="button" class={{ on: mode() === "all" }} onClick={() => setMode("all")}>
 							All
 						</button>
-						<button type="button" classList={{ on: mode() === "active" }} title="Active and waiting work (excludes archived tickets)" onClick={() => setMode("active")}>
+						<button type="button" class={{ on: mode() === "active" }} title="Active and waiting work (excludes archived tickets)" onClick={() => setMode("active")}>
 							Active
 						</button>
 						<Show when={focusedTicket()}>
 							<button
 								type="button"
-								classList={{ on: mode() === "ticket" }}
+								class={{ on: mode() === "ticket" }}
 								title={`Show only ${focusedTicket()} and its linked specs, plans, decisions, questions, schemas, and registries`}
 								onClick={() => setMode("ticket")}
 							>
@@ -1980,7 +2096,7 @@ export function Docs() {
 						</Show>
 						<button
 							type="button"
-							classList={{ on: mode() === "problems" }}
+							class={{ on: mode() === "problems" }}
 							title="Documents with broken links, missing files, stale catalogs, audit issues, citation drift, or governance warnings"
 							onClick={() => setMode("problems")}
 						>
@@ -2049,12 +2165,15 @@ export function Docs() {
 					}}
 				>
 					<div style={{ display: "flex", "align-items": "center", "justify-content": "space-between", gap: "var(--space-2)", "flex-wrap": "wrap" }}>
-						<span style={{ "font-weight": "500", color: "var(--fg)" }} title="Hold Ctrl/Cmd+Click to toggle docs, Shift+Click for a range, or Escape to clear">
-							{selectedDocs().length} selected
+						<span
+							style={{ "font-weight": "500", color: "var(--fg)" }}
+							title={`Hold Ctrl/Cmd+Click to toggle docs, Shift+Click for a range, or Escape to clear. ${NOT_IN_BULK}${selectedNotShown() ? " A selected document that is not shown (its list or its ticket is folded) is still changed by the actions below." : ""}`}
+						>
+							{selectionSaid(selectedDocs().length, selectedNotShown())}
 						</span>
 						<div style={{ display: "flex", "align-items": "center", gap: "4px" }}>
-							<Show when={visibleSelectablePaths().length > 0 && !allVisibleSelected()}>
-								<button type="button" class="docs-stale-btn" onClick={bulkSelectAllVisible}>
+							<Show when={drawnSelectablePaths().length > 0 && !allVisibleSelected()}>
+								<button type="button" class="docs-stale-btn" title={`Select every document whose row is shown below: not those inside a folded list or under a folded ticket. ${NOT_IN_BULK}`} onClick={bulkSelectAllVisible}>
 									Select all visible
 								</button>
 							</Show>
@@ -2126,34 +2245,38 @@ export function Docs() {
 				</Show>
 				<Show when={tags().length > 0}>
 					<RowGroup fold="docs:tags" label="Tags" count={tags().length} head={<Head title="Tags" />} rows={true}>
-						<For each={tags()}>
+						<For each={tags()} keyed={(bucket) => bucket.tag}>
 							{(bucket) => (
 								<Row
 									class="tree-row doc-row"
-									classList={{ active: activeTag()?.toLowerCase() === bucket.tag.toLowerCase() }}
-									key={`tag:${bucket.tag}`}
-									title={`#${bucket.tag} (${bucket.count} ${bucket.count === 1 ? "document" : "documents"}). Click to filter; right-click to search or rename.`}
-									onActivate={() => setActiveTag((cur) => (cur?.toLowerCase() === bucket.tag.toLowerCase() ? null : bucket.tag))}
+									classList={{ active: activeTag()?.toLowerCase() === bucket().tag.toLowerCase() }}
+									key={`tag:${bucket().tag}`}
+									title={`#${bucket().tag} (${bucket().count} ${bucket().count === 1 ? "document" : "documents"}). Click to filter; right-click to search or rename.`}
+									onActivate={() => {
+										const tag = bucket().tag;
+										setActiveTag((cur) => (cur?.toLowerCase() === tag.toLowerCase() ? null : tag));
+									}}
 									onMenu={(at) => {
+										const tag = bucket().tag;
 										void (async () => {
-											const FILTER = activeTag()?.toLowerCase() === bucket.tag.toLowerCase() ? "Clear tag filter" : `Filter Docs by #${bucket.tag}`;
-											const SEARCH = `Search workspace for #${bucket.tag} (YAML + prose)`;
-											const RENAME_TAG = `Rename #${bucket.tag} across workspace…`;
-											const picked = await chooseFromMenu(`Tag #${bucket.tag}`, [FILTER, SEARCH, "separator", RENAME_TAG], at);
+											const FILTER = activeTag()?.toLowerCase() === tag.toLowerCase() ? "Clear tag filter" : `Filter Docs by #${tag}`;
+											const SEARCH = `Search workspace for #${tag} (YAML + prose)`;
+											const RENAME_TAG = `Rename #${tag} across workspace…`;
+											const picked = await chooseFromMenu(`Tag #${tag}`, [FILTER, SEARCH, "separator", RENAME_TAG], at);
 											if (!picked) return;
-											if (picked === FILTER) setActiveTag((cur) => (cur?.toLowerCase() === bucket.tag.toLowerCase() ? null : bucket.tag));
+											if (picked === FILTER) setActiveTag((cur) => (cur?.toLowerCase() === tag.toLowerCase() ? null : tag));
 											else if (picked === SEARCH) {
-												searchFor(tagSearchPattern(bucket.tag), { regex: true, include: "", exclude: "" });
+												searchFor(tagSearchPattern(tag), { regex: true, include: "", exclude: "" });
 											} else if (picked === RENAME_TAG) {
 												const { renameTagAcrossWorkspace } = await import("../projectDocs");
-												await renameTagAcrossWorkspace(bucket.tag);
+												await renameTagAcrossWorkspace(tag);
 											}
 										})();
 									}}
 								>
 									<Icon name="tag" class="icon" />
-									<span class="label">#{bucket.tag}</span>
-									<span class="meta">{bucket.count}</span>
+									<span class="label">#{bucket().tag}</span>
+									<span class="meta">{bucket().count}</span>
 								</Row>
 							)}
 						</For>
@@ -2161,6 +2284,6 @@ export function Docs() {
 				</Show>
 			</Rows>
 		</div>
-		</DocsPanelContext.Provider>
+		</DocsPanelContext>
 	);
 }

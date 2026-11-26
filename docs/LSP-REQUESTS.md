@@ -4,7 +4,7 @@ What SSL Studio asked of `starlims-lsp`, filed there as #359 and #360
 (2026-11-01). The language server owns the design; this says what the IDE
 needs and why.
 
-**Released in starlims-lsp 0.29.0 (2026-11-03)**, SSL Studio's pinned
+**Released in starlims-lsp 0.29.0 (2026-11-03)**, then SSL Studio's pinned
 version (mahoskye/starlims-lsp#359, #360, PR #361). The server advertises them as
 `capabilities.experimental.ssl.{syntaxTree, callGraph}: 1` (shape version 1,
 its `docs/features/custom-requests.md`). SSL Studio reads shape version 1
@@ -85,6 +85,9 @@ in by itself, because it does not read SSL (ADR 0003). Filed on
 
 L5 needed no request: shape version 1 already gives it.
 
+L6 was withdrawn on 2026-11-25, and its issue closed as not planned: see
+its section.
+
 ### L4: classes in the call graph
 
 **Why:** the graph draws `ExecFunction`, `DoProc`, `RunDS` and `:INCLUDE`
@@ -92,7 +95,7 @@ edges. A project built on classes shows little of its real structure:
 `SetSampleDueDates` has no line to the rule it creates or to the method it
 calls on it.
 
-**Released in starlims-lsp 0.31.0 (2026-11-18)**, SSL Studio's pinned
+**Released in starlims-lsp 0.31.0 (2026-11-18)**, then SSL Studio's pinned
 version (mahoskye/starlims-lsp#369, PR #373). `ssl/callGraph` sends three
 more edge kinds, and the shape version stays 1:
 
@@ -137,6 +140,15 @@ Parameters and Returns parts, for the vision's "doc block as a form".
 
 ### L6: the tables a script reads and writes
 
+**Withdrawn on 2026-11-25.** Which tables a script's SQL names is a
+feature of the IDE, not a fact about the language: it only means something
+beside a project's own description of its tables, which few projects keep.
+The user: "I don't want to bloat the lsp by adding ide features when it
+should not be the lsps responsibility." The IDE finds the tables itself, by
+their names in a script's text outside its comments; what it needs of the
+server for that is where the comments and strings are (L9). What was asked
+is kept below as it was written.
+
 **Why:** a project keeps its tables under `schema/database/` (ADRs 0006
 and 0026). Nothing
 connects a script's SQL to them: the agent is not given the tables a script
@@ -169,6 +181,14 @@ raise-only (it raises, or lets an error out, and returns no failure value),
 or a field on the diagnostic that says "this is the required exception", so
 the IDE can show it as confirmed and not as a finding.
 
+**Released in starlims-lsp 0.32.0 (2026-11-25)**, SSL Studio's pinned
+version (mahoskye/starlims-lsp#371, PR #376). The note is left off a
+`/*@private;` procedure that holds a `RaiseError` which leaves it: one that
+no `:TRY` with a `:CATCH`, and no `:ERROR` handler of that procedure,
+catches. A helper that raises nothing itself and only lets an error pass is
+still reported, and so is `/*@protected;`. The IDE needed no change: it
+shows what the server reports.
+
 ### L8: what the server accepts and STARLIMS does not
 
 **Why:** the demo project was clean under `--validate --strict` and did not
@@ -194,3 +214,112 @@ STARLIMS itself:
 
 **The other way round:** the server reports `doproc_in_class` for `DoProc`
 in a method of a class that includes a script; the runner runs it.
+
+**The first row is released in starlims-lsp 0.32.0 (2026-11-25)**, as the
+error `doproc_args_not_array_literal`, verified on STARLIMS 12. It reports a
+one-part literal name whose arguments are not written as `{...}`, and
+nothing else: a name held in a variable, a dotted name and `ExecFunction`
+are left alone. The same release reports junk after a block keyword
+(`:ENDIF 1;`) and a malformed declaration list or header (`:DECLARE nA nB;`)
+as `unexpected_token`; both used to pass. The demo project is still clean
+under it.
+
+**Still open** in mahoskye/starlims-lsp#372: the other two rows, and
+`doproc_in_class`. Each waits on a run on STARLIMS itself.
+
+## Asked on 2026-11-25
+
+Found by the fourth audit of the IDE. `stripCodeComments` in
+`src/shared/schemaIndex.ts` and `SSL_DECL_LINE_RE` in
+`src/view/editor/schemaHover.ts` read SSL by hand (ADR 0003), and 0.31.0
+has no tokens to put in their place: they stay until it has. The Blocks
+view's range format met an answer that reached past the lines it asked for.
+Filed on `starlims-lsp` as one issue. It asks for no feature of the IDE:
+ordinary semantic tokens, and a defect mended.
+
+**Both are released in starlims-lsp 0.32.0 (2026-11-25)**, SSL Studio's
+pinned version (mahoskye/starlims-lsp#375, PR #376). The two readers named
+above are gone from the IDE.
+
+| Request | Issue |
+| --- | --- |
+| L9 | mahoskye/starlims-lsp#375 |
+| L10 | mahoskye/starlims-lsp#375 |
+
+### L9: tokens for comments, strings, class names, labels and keywords
+
+**Why:** the IDE looks for a described table's name in a script outside its
+comments (column hover and completion, the schema sent to the agent, the
+graph's tables), and offers no table hover or link on a keyword or on a
+name that is being declared. Both need facts about SSL that the IDE may not
+work out itself: where a comment or a string begins and ends, and what kind
+of word a word is. The semantic tokens of 0.31.0 are function, method,
+parameter, variable, property and class only.
+
+**Needs:**
+
+- `comment` and `string` semantic tokens for every comment and string
+  literal of a document, comments inside a statement included.
+- A semantic token on the name in `:CLASS Name;` and in `:LABEL name;`, and
+  `keyword` tokens.
+
+**What came (0.32.0):** not semantic tokens for comments, strings and
+keywords, which would paint over what the grammar colours inside a string,
+but a request of their own. `ssl/lexicalTokens` answers, for an open
+document, the ranges of its comments, strings and keywords, and of the two
+spans the server does not read into: the text a `:REGION` keeps and a code
+block. It is advertised as `capabilities.experimental.ssl.lexicalTokens: 1`.
+The names in `:CLASS Name;` and `:LABEL name;` are semantic tokens, `class`
+and `label`, each with `declaration`.
+
+**In the IDE:**
+
+- `src/shared/lexicalTokens.ts` places the server's ranges in the text;
+  `src/view/lsp/facts.ts` asks once for each version of a document.
+- The search for a table's name is given the text without its comments
+  (`withoutComments`). A file that is not open is asked about as a scratch
+  document under its own file ending (`session.scratchLexical`).
+- A word is no table where it is a keyword, a member after `:`, or a name
+  its statement declares (`isSslOwnWord`), from the keyword tokens and the
+  semantic tokens.
+- `label` is in the editor's legend, coloured as the grammar colours one.
+- The Call Graph leaves out the IDE's own scratch documents, which the
+  server counts while they are open.
+
+**With an older server** the comments are the ones highlighting reads from
+the grammar, and a keyword is not known to be one: a table called `REGION`
+is linked from `:REGION`. With no server nothing is known of a word.
+
+**Not the server's to say:** where the comments are in the SQL of a data
+source. It reads such a body as no SSL and answers no tokens in it, and
+that is where its part ends. What connects a project's tables to its SQL
+is the IDE's own (the user, 2026-11-25; ADR 0026's change log). The IDE
+finds SQL's two kinds of comment itself, in the text of a data source that
+the server did not read as SSL (`withoutComments`).
+
+**Asked only where there is a table.** Few projects describe their
+tables. In one that does not, none of this runs: no text is prepared for
+the search and the server is sent none of these requests
+(`hasSchemaTables`, `src/shared/schemaIndex.ts`).
+
+### L10: a range format that keeps to its range
+
+**Why:** a visual edit is a text edit and then a range format of the lines
+it touched (ADR 0002). Asked for one line whose statement has no end (a
+bracket left open), 0.31.0 answers for every line to the end of the
+procedure and pushes them in. The IDE now applies an answer only when it
+stays inside the lines asked for (`formatStaysWithin`,
+`src/view/blocks/model.ts`), so the edited line is left unformatted there.
+
+**Needs:** an answer that keeps to the range asked for, or no answer, when
+the statement in it cannot be read to its end.
+
+**What came (0.32.0):** a `;` now ends the brackets its statement left
+open, so a line with a bracket left open is answered for that line alone,
+and a full format no longer pushes the rest of the file in under it.
+
+**In the IDE:** the edited line is formatted there again. `formatStaysWithin`
+stays, because one case still reaches past the line asked for, and rightly:
+a statement with no `;` at all runs on into the next line, for the server
+as for STARLIMS. That answer is not applied
+(`test/pass4Regressions.test.ts` asks the pinned server both).

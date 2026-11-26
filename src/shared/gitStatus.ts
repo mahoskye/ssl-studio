@@ -16,6 +16,8 @@ export type GitFile = {
 	unstaged: Change | null;
 	/** The name it had, for a file that was renamed. */
 	from?: string;
+	/** Set for an entry that is no file: a folder with a git repository of its own (src/bun/git.ts, `status`). */
+	repository?: true;
 };
 
 export type GitStatus = {

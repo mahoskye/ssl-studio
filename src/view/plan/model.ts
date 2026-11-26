@@ -233,11 +233,18 @@ const outOf = (plan: Plan, id: string) => plan.edges.filter((e) => e.from === id
 const into = (plan: Plan, id: string) => plan.edges.filter((e) => e.to === id);
 const nodeOf = (plan: Plan, id: string) => plan.nodes.find((n) => n.id === id);
 
+/**
+ * The label for a decision's next way out: one none of its ways out has. The number was the count of labels in
+ * use plus one, which is taken as soon as a way out has been removed (yes, no, option 4: the next was "option 4"
+ * again), and two branches of one decision then read the same on the chart and in the test paths.
+ */
 function nextLabel(plan: Plan, id: string) {
-	const used = new Set(outOf(plan, id).map((e) => (typeof e.label === "string" ? e.label.toLowerCase() : undefined)));
+	const used = new Set(outOf(plan, id).map((e) => (typeof e.label === "string" ? e.label.trim().toLowerCase() : undefined)));
 	if (!used.has("yes")) return "yes";
 	if (!used.has("no")) return "no";
-	return `option ${used.size + 1}`;
+	let n = used.size + 1;
+	while (used.has(`option ${n}`)) n++;
+	return `option ${n}`;
 }
 
 function make(plan: Plan, kind: NodeKind, text: string, near?: PlanNode, ref?: string): PlanNode {
@@ -312,10 +319,11 @@ export function removeNode(plan: Plan, id: string): Edit {
 		edges.push({ ...restIn, to: outs[0]!.to } as PlanEdge);
 	}
 	// Keep any business test cases attached to the removed node as plan-level tests (ADR 0009: nothing lost silently).
-	const existingTests = planTestsOf(plan);
+	// Every other entry stays as it was read (`testEntries`).
+	const existingTests = testEntries(plan);
 	const nextTests = existingTests.length
 		? existingTests.map((t) => {
-				if (t.node !== id) return t;
+				if (!isTestCase(t) || t.node !== id) return t;
 				const { node: _dropped, ...rest } = t;
 				return rest as PlanTestCase;
 			})
@@ -326,21 +334,32 @@ export function removeNode(plan: Plan, id: string): Edit {
 	};
 }
 
+const isTestCase = (t: unknown): t is PlanTestCase => isObject(t) && typeof t.id === "string" && typeof t.title === "string";
+
 /** Valid plain-English business test cases saved in this plan. */
 export function planTestsOf(plan: Plan): PlanTestCase[] {
 	if (!Array.isArray(plan.tests)) return [];
-	return plan.tests.filter((t): t is PlanTestCase => isObject(t) && typeof t.id === "string" && typeof t.title === "string");
+	return plan.tests.filter(isTestCase);
 }
 
-function nextTestId(tests: PlanTestCase[]): string {
-	const used = tests.map((t) => /^t(\d+)$/.exec(t.id)?.[1]).filter(Boolean).map(Number);
+/**
+ * Everything under "tests" as it was read: the cases, and the entries this version cannot make sense of (one with
+ * no id it can use, or no title). Adding, editing or removing a case used to write back the cases alone, so the
+ * first edit of any one of them took every other entry out of the plan's text. An edit changes the case it is of,
+ * and leaves the rest of the list as it was read, as it does every other field this version does not know.
+ */
+const testEntries = (plan: Plan): PlanTestCase[] => (Array.isArray(plan.tests) ? plan.tests : []);
+
+/** An id no entry has, one this version cannot read included: a case must not come to share its id with one. */
+function nextTestId(tests: readonly unknown[]): string {
+	const used = tests.map((t) => (isObject(t) && typeof t.id === "string" ? /^t(\d+)$/.exec(t.id)?.[1] : undefined)).filter(Boolean).map(Number);
 	return `t${Math.max(0, ...used) + 1}`;
 }
 
 export function addPlanTest(plan: Plan, input: PlanTestInput): Plan {
 	const title = input.title.trim();
 	if (!title) return plan;
-	const current = planTestsOf(plan);
+	const current = testEntries(plan);
 	const journey = typeof input.journey === "number" && Number.isInteger(input.journey) && input.journey > 0 ? input.journey : undefined;
 	const entry: PlanTestCase = {
 		id: nextTestId(current),
@@ -355,10 +374,10 @@ export function addPlanTest(plan: Plan, input: PlanTestInput): Plan {
 }
 
 export function updatePlanTest(plan: Plan, id: string, patch: PlanTestPatch): Plan {
-	const current = planTestsOf(plan);
-	if (!current.some((t) => t.id === id)) return plan;
+	const current = testEntries(plan);
+	if (!current.some((t) => isTestCase(t) && t.id === id)) return plan;
 	const next = current.map((t) => {
-		if (t.id !== id) return t;
+		if (!isTestCase(t) || t.id !== id) return t;
 		const title = patch.title !== undefined ? patch.title.trim() || t.title : t.title;
 		const node = patch.node !== undefined ? patch.node.trim() : t.node;
 		const journey =
@@ -387,8 +406,8 @@ export function updatePlanTest(plan: Plan, id: string, patch: PlanTestPatch): Pl
 }
 
 export function removePlanTest(plan: Plan, id: string): Plan {
-	const current = planTestsOf(plan);
-	const next = current.filter((t) => t.id !== id);
+	const current = testEntries(plan);
+	const next = current.filter((t) => !isTestCase(t) || t.id !== id);
 	if (next.length === current.length) return plan;
 	if (!next.length) {
 		const { tests: _empty, ...rest } = plan;
@@ -544,8 +563,14 @@ export function renameGroup(plan: Plan, groupId: string, nextName: string): Plan
 	return { ...plan, groups: plan.groups.map((g) => (g.id === groupId ? { ...g, name: wanted } : g)) };
 }
 
+/**
+ * A way on from one node to another. Both must be nodes of the plan: the chart also draws what the assistant only
+ * suggests, under ids the plan's text does not hold, and a wire dropped on one of those was written as an edge to
+ * a node that does not exist (the check then reported it, and accepting the suggestion did not mend it, since the
+ * accepted step takes a new id).
+ */
 export function connect(plan: Plan, from: string, to: string): Plan {
-	if (from === to || plan.edges.some((e) => e.from === from && e.to === to)) return plan;
+	if (from === to || !nodeOf(plan, from) || !nodeOf(plan, to) || plan.edges.some((e) => e.from === from && e.to === to)) return plan;
 	const label = nodeOf(plan, from)?.kind === "decision" ? nextLabel(plan, from) : undefined;
 	return { ...plan, edges: [...plan.edges, { from, to, ...(label ? { label } : {}) }] };
 }

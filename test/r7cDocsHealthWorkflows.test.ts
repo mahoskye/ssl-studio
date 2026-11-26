@@ -16,6 +16,8 @@ if (typeof (globalThis as any).localStorage === "undefined") {
 if (typeof (globalThis as any).window === "undefined") {
 	(globalThis as any).window = {
 		Error,
+		Map,
+		Set,
 		innerWidth: 1280,
 		innerHeight: 900,
 		addEventListener() {},
@@ -23,8 +25,10 @@ if (typeof (globalThis as any).window === "undefined") {
 		location: { href: "http://localhost/", protocol: "http:", host: "127.0.0.1:5190" },
 		matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
 	};
-} else if (!(globalThis as any).window.Error) {
-	(globalThis as any).window.Error = Error;
+} else {
+	if (!(globalThis as any).window.Error) (globalThis as any).window.Error = Error;
+	if (!(globalThis as any).window.Map) (globalThis as any).window.Map = Map;
+	if (!(globalThis as any).window.Set) (globalThis as any).window.Set = Set;
 }
 if (typeof (globalThis as any).document === "undefined") {
 	(globalThis as any).document = {
@@ -366,7 +370,7 @@ describe("Round 7B source invariants across Docs.tsx, Health.tsx, project.ts, do
 		// P1-11: editDocFrontMatter checks binary/disposed & save() return value; selection pruned against visibleSelectablePaths / shown()
 		expect(src).toContain("!open.binary && !open.model.isDisposed()");
 		expect(src).toContain("await save(key, { format: false })");
-		expect(src).toContain("const valid = new Set(visibleSelectablePaths())");
+		expect(src).toMatch(/visibleSelectablePaths\(\),[\s\S]*?const valid = new Set\(paths\)/);
 		expect(src).toContain("return shown().filter((d) => sel.has(d.path) && isBulkSelectable(d))");
 
 		// P1-12: archiveSpecOrDecision renames first and updates status on moved path without setStatus wizard

@@ -11,6 +11,8 @@ import type { LiveEditorHandle } from "../src/view/editor/liveBridge";
 if (typeof (globalThis as any).window === "undefined") {
 	(globalThis as any).window = {
 		Error,
+		Map,
+		Set,
 		addEventListener() {},
 		removeEventListener() {},
 		location: { href: "http://localhost/", protocol: "http:", host: "127.0.0.1:5190" },
@@ -18,6 +20,8 @@ if (typeof (globalThis as any).window === "undefined") {
 	};
 } else {
 	if (!(globalThis as any).window.Error) (globalThis as any).window.Error = Error;
+	if (!(globalThis as any).window.Map) (globalThis as any).window.Map = Map;
+	if (!(globalThis as any).window.Set) (globalThis as any).window.Set = Set;
 	if (!(globalThis as any).window.location) (globalThis as any).window.location = { href: "http://localhost/", protocol: "http:", host: "127.0.0.1:5190" };
 	if (!(globalThis as any).window.location.protocol) (globalThis as any).window.location.protocol = "http:";
 	if (!(globalThis as any).window.location.host) (globalThis as any).window.location.host = "127.0.0.1:5190";
@@ -395,16 +399,22 @@ describe("Round 4A — imageResolve path traversal rejection, untitled paste & b
 
 	afterEach(() => {
 		invalidateImageCache();
-		setState("workspace", null);
-		setState("project", null);
-		setState("settings", "attachmentsFolder", undefined);
+		setState((s) => {
+			s.workspace = null;
+			s.project = null;
+			s.settings.attachmentsFolder = undefined;
+		});
 		mockWorkspaceFiles = [];
 		mockImageReads = 0;
 		lastWrittenImagePath = null;
 	});
 
 	test("rejects path traversal in resolveImageTarget and attachmentsFolder in saveImageAttachment", async () => {
-		setState("workspace", { root: ROOT, name: "project" });
+		const { flush } = await import("solid-js");
+		setState((s) => {
+			s.workspace = { root: ROOT, name: "project" };
+		});
+		flush();
 		mockWorkspaceFiles = [`${ROOT}/assets/secret.png`, `${ROOT}/assets/logo.png`];
 
 		expect(await resolveImageTarget("../../../etc/passwd.png", `${ROOT}/docs/note.md`)).toBeNull();
@@ -417,13 +427,19 @@ describe("Round 4A — imageResolve path traversal rejection, untitled paste & b
 		});
 
 		// Configured attachmentsFolder escaping workspace is rejected.
-		setState("settings", "attachmentsFolder", "../../outside");
+		setState((s) => {
+			s.settings.attachmentsFolder = "../../outside";
+		});
+		flush();
 		const blob = new Blob(["png"], { type: "image/png" });
 		expect(await saveImageAttachment(blob, `${ROOT}/docs/note.md`)).toBeNull();
 		expect(lastWrittenImagePath).toBeNull();
 
 		// Untitled doc falls back to docs/attachments inside workspace with a clean root-relative link.
-		setState("settings", "attachmentsFolder", undefined);
+		setState((s) => {
+			s.settings.attachmentsFolder = undefined;
+		});
+		flush();
 		const saved = await saveImageAttachment(blob, "untitled:1");
 		expect(saved).not.toBeNull();
 		expect(saved!.path.startsWith(`${ROOT}/docs/attachments/`)).toBe(true);
@@ -431,7 +447,11 @@ describe("Round 4A — imageResolve path traversal rejection, untitled paste & b
 	});
 
 	test("evicts oldest cached images when exceeding the 40-entry LRU limit and clears via invalidateImageCache", async () => {
-		setState("workspace", { root: ROOT, name: "project" });
+		const { flush } = await import("solid-js");
+		setState((s) => {
+			s.workspace = { root: ROOT, name: "project" };
+		});
+		flush();
 		const files = Array.from({ length: 50 }, (_, i) => `${ROOT}/assets/img-${i}.png`);
 		mockWorkspaceFiles = files;
 

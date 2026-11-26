@@ -66,6 +66,38 @@ export function serializePrefixedCalloutBlock(
 		.join("\n");
 }
 
+/** What a callout card reads from its block and writes back to it. */
+export type CalloutValues = { type: string; title: string; fold: "+" | "-" | null; body: string };
+
+/**
+ * The text a callout card writes over its block, or null when it writes nothing.
+ *
+ * The card writes what was changed in it, never what it merely shows (AGENTS.md: text is the source of truth).
+ * A block written back is spelt the card's way: `[!NOTE]` becomes `[!note]`, a title that is the type's own name
+ * is left out, `>text` becomes `> text`, a last empty `>` line goes. The card used to write on every blur, so a
+ * click into a callout and out again, or a reveal that put the caret in one, rewrote the block and marked the
+ * file changed with nothing typed. So while `next` is what was read from the block (`shown`), the block stays
+ * as it is written.
+ *
+ * The one write without a change is to the card's own text. While the body is typed in, its last empty line is
+ * kept (`keepEmptyBodyLine`), and leaving the card takes that line away again. `typed` is the block as the card
+ * last wrote it that way, and only a block that still reads so is tidied: one that was undone back to how it was
+ * written is not the card's to tidy.
+ */
+export function calloutCommitText(
+	shown: CalloutValues,
+	next: CalloutValues,
+	existing: string,
+	keepEmptyBodyLine: boolean,
+	linePrefix: string,
+	typed: string | null,
+): string | null {
+	const same = next.type === shown.type && next.title === shown.title && next.fold === shown.fold && next.body === shown.body;
+	if (same && (keepEmptyBodyLine || existing !== typed)) return null;
+	const serialized = serializePrefixedCalloutBlock(next.type, next.title, next.fold, next.body, keepEmptyBodyLine, linePrefix);
+	return serialized === existing ? null : serialized;
+}
+
 /** Remembered callout fold toggles so collapsing/expanding persists across Live <-> Read switches. */
 const CALLOUT_FOLD_STATE_MAX = 200;
 const calloutFoldState = new Map<string, boolean>();
@@ -326,17 +358,27 @@ export class CalloutWidget extends WidgetType {
 			renderPicker();
 		};
 
+		// The block as this card last wrote it with the body's last empty line kept (see calloutCommitText).
+		let typedBlock: string | null = null;
 		const commitCallout = (patch: { type?: string; title?: string; fold?: "+" | "-" | null; body?: string; keepEmptyBodyLine?: boolean }) => {
 			const nextType = patch.type ?? ctrl.parsed.spec.type;
 			const nextTitle = patch.title ?? (document.activeElement === titleInput ? titleInput.value : ctrl.parsed.title);
 			const nextFold = patch.fold !== undefined ? patch.fold : ctrl.parsed.fold;
 			const nextBody = patch.body ?? (ctrl.bodyTextarea ? ctrl.bodyTextarea.value : ctrl.bodyMarkdown);
 			const keepEmpty = patch.keepEmptyBodyLine ?? (ctrl.editingBody || document.activeElement === titleInput || ctrl.pickerOpen);
-			const serialized = serializePrefixedCalloutBlock(nextType, nextTitle, nextFold, nextBody, keepEmpty, ctrl.linePrefix);
 			const curFrom = Math.min(ctrl.from, ctrl.view.state.doc.length);
 			const curTo = Math.min(ctrl.to, ctrl.view.state.doc.length);
 			const existing = ctrl.view.state.sliceDoc(curFrom, curTo);
-			if (serialized === existing) return;
+			const serialized = calloutCommitText(
+				{ type: ctrl.parsed.spec.type, title: ctrl.parsed.title, fold: ctrl.parsed.fold, body: ctrl.bodyMarkdown },
+				{ type: nextType, title: nextTitle, fold: nextFold, body: nextBody },
+				existing,
+				keepEmpty,
+				ctrl.linePrefix,
+				typedBlock,
+			);
+			if (serialized === null) return;
+			typedBlock = keepEmpty ? serialized : null;
 			ctrl.selfDispatching = true;
 			try {
 				ctrl.view.dispatch({

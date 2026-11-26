@@ -3,7 +3,8 @@
 // Right: view-appropriate essentials only (hides text/JSON metadata in visual modes;
 // keeps encoding, LF/CRLF, cursor, and clickable Language Mode selector in code/text views).
 import { Icon } from "./Icon";
-import { createEffect, createMemo, createResource, createSignal, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, Show } from "solid-js";
+import { createAsyncQuery } from "./asyncQuery";
 import { placeAnchoredMenu } from "../shared/contextMenu";
 import { markdownStats } from "../shared/markdownEdit";
 import {
@@ -36,12 +37,16 @@ const [size, setSize] = createSignal<SizeReport | null>(null);
 export { size };
 
 function useSizeMeter() {
-	let timer: ReturnType<typeof setTimeout> | undefined;
+	const active = createMemo(
+		() => ({ key: `${activePath() ?? ""}\0${state.kindVersion}`, doc: activeDoc() }),
+		{ equals: (a, b) => a.key === b.key },
+	);
 	createEffect(
-		on([activePath, () => state.kindVersion], () => {
-			const doc = activeDoc();
+		() => active(),
+		({ doc }) => {
 			setSize(null);
 			if (!doc || doc.binary || doc.model.isDisposed() || doc.model.getLanguageId() !== "ssl") return;
+			let timer: ReturnType<typeof setTimeout> | undefined;
 			const update = () => {
 				if (doc.model.isDisposed()) return;
 				const text = doc.model.getValue();
@@ -53,11 +58,11 @@ function useSizeMeter() {
 				clearTimeout(timer);
 				timer = setTimeout(update, 500);
 			});
-			onCleanup(() => {
+			return () => {
 				clearTimeout(timer);
 				sub.dispose();
-			});
-		}),
+			};
+		},
 	);
 }
 
@@ -78,16 +83,20 @@ async function goToLine() {
 /** The open file's line ends, as the editor has them now: they change with the text, and by hand. */
 const [eol, setEol] = createSignal("");
 function useLineEnds() {
+	const active = createMemo(
+		() => ({ key: `${activePath() ?? ""}\0${state.kindVersion}`, doc: activeDoc() }),
+		{ equals: (a, b) => a.key === b.key },
+	);
 	createEffect(
-		on([activePath, () => state.kindVersion], () => {
-			const doc = activeDoc();
+		() => active(),
+		({ doc }) => {
 			setEol(doc && !doc.binary && !doc.model.isDisposed() ? doc.model.getEOL() : "");
 			if (!doc || doc.binary || doc.model.isDisposed()) return;
 			const sub = doc.model.onDidChangeContent(() => {
 				if (!doc.model.isDisposed()) setEol(doc.model.getEOL());
 			});
-			onCleanup(() => sub.dispose());
-		}),
+			return () => sub.dispose();
+		},
 	);
 }
 
@@ -128,7 +137,7 @@ export function StatusBar() {
 	useDocAudit();
 
 	// Loaded dynamically to avoid a static import cycle (commands -> EditorGroup -> StatusBar -> commands).
-	const [cmds] = createResource(() => import("./commands").catch(() => null));
+	const [cmds] = createAsyncQuery(() => import("./commands").catch(() => null));
 	const problemsKeys = () => cmds()?.keysFor("problems") ?? "";
 
 	const lsp = createMemo(() => lspIndicator(state.lsp, state.info?.lsp, Boolean(state.workspace)));
@@ -163,9 +172,13 @@ export function StatusBar() {
 	const [planSteps, setPlanSteps] = createSignal<string | null>(null);
 	const [tableStats, setTableStats] = createSignal<string | null>(null);
 
+	const activeMeta = createMemo(
+		() => ({ key: `${activePath() ?? ""}\0${state.kindVersion}`, path: activePath(), doc: activeDoc() }),
+		{ equals: (a, b) => a.key === b.key },
+	);
 	createEffect(
-		on([activePath, () => state.kindVersion], ([p]) => {
-			const doc = activeDoc();
+		() => activeMeta(),
+		({ path: p, doc }) => {
 			if (!p || !doc || doc.binary || doc.model.isDisposed()) {
 				setMdStats(null);
 				setPlanSteps(null);
@@ -193,11 +206,11 @@ export function StatusBar() {
 				clearTimeout(timer);
 				timer = setTimeout(refresh, 250);
 			});
-			onCleanup(() => {
+			return () => {
 				clearTimeout(timer);
 				sub.dispose();
-			});
-		}),
+			};
+		},
 	);
 
 	const sizeWarning = createMemo(() => {
@@ -249,8 +262,10 @@ export function StatusBar() {
 				aria-label={state.workspace ? `${counts().errors} errors, ${counts().warnings} warnings. Show Problems.` : "Problems: open a folder first."}
 				onClick={() => {
 					if (!state.workspace) return;
-					setState("bottomView", "problems");
-					setState("settings", "layout", "bottom", true);
+					setState((s) => {
+						s.bottomView = "problems";
+						s.settings.layout.bottom = true;
+					});
 				}}
 			>
 				<span class="problem-counts" aria-hidden="true">
@@ -258,8 +273,7 @@ export function StatusBar() {
 				</span>
 			</button>
 			<button
-				class="item status-service"
-				classList={{ warn: lsp().tone === "warn", err: lsp().tone === "error" }}
+				class={["item", "status-service", { warn: lsp().tone === "warn", err: lsp().tone === "error" }]}
 				disabled={!lsp().actionable}
 				title={lsp().detail}
 				aria-label={lsp().ariaLabel}
@@ -273,12 +287,15 @@ export function StatusBar() {
 				<span>{lsp().label}</span>
 			</button>
 			<button
-				class="item status-service"
-				classList={{
-					"tier-3": agentInfo().tone === "idle" || agentInfo().tone === "ok",
-					warn: agentInfo().tone === "warn",
-					err: agentInfo().tone === "error",
-				}}
+				class={[
+					"item",
+					"status-service",
+					{
+						"tier-3": agentInfo().tone === "idle" || agentInfo().tone === "ok",
+						warn: agentInfo().tone === "warn",
+						err: agentInfo().tone === "error",
+					},
+				]}
 				disabled={!state.workspace && (!state.info || state.info.opencode.ok)}
 				title={state.workspace || (state.info && !state.info.opencode.ok) ? agentInfo().detail : "Agent: open a folder first"}
 				aria-label={state.workspace || (state.info && !state.info.opencode.ok) ? agentInfo().ariaLabel : "Agent: open a folder first."}
@@ -299,8 +316,7 @@ export function StatusBar() {
 					const isOver = () => w().alerts.some((a) => a.severity === "over");
 					return (
 						<button
-							class="item status-size-alert"
-							classList={{ over: isOver(), near: !isOver() }}
+							class={["item", "status-size-alert", { over: isOver(), near: !isOver() }]}
 							title={w().tooltip}
 							aria-label={`Script size ${isOver() ? "over" : "near"} limit. Open Health.`}
 							onClick={() => showPanel("health")}

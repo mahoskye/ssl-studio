@@ -1,7 +1,7 @@
 // Diagnostics from the language server for every open file, by file, then
 // by rule.
 import { Icon, type IconName } from "../Icon";
-import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { docAuditData } from "../docAudit";
 import { diagnostics, type Diagnostic } from "../lsp/session";
@@ -106,16 +106,21 @@ export function Problems() {
 	const hasDocIssues = createMemo(() =>
 		mergedFiles().some(({ uri, list }) => list.some((d) => isDocDiag(uri, d))),
 	);
-	createEffect(() => {
-		const root = state.workspace?.root;
-		if (root !== lastProblemsRoot) {
-			lastProblemsRoot = root;
-			setProblemsScope("all");
-		}
-	});
-	createEffect(() => {
-		if (!hasDocIssues() && problemsScope() !== "all") setProblemsScope("all");
-	});
+	createEffect(
+		() => state.workspace?.root,
+		(root) => {
+			if (root !== lastProblemsRoot) {
+				lastProblemsRoot = root;
+				setProblemsScope("all");
+			}
+		},
+	);
+	createEffect(
+		() => !hasDocIssues() && problemsScope() !== "all",
+		(shouldReset) => {
+			if (shouldReset) setProblemsScope("all");
+		},
+	);
 	const scopeCounts = createMemo(() => {
 		let code = 0;
 		let docsN = 0;
@@ -153,8 +158,8 @@ export function Problems() {
 					<button
 						type="button"
 						role="tab"
-						aria-selected={problemsScope() === "all"}
-						classList={{ active: problemsScope() === "all" }}
+						aria-selected={problemsScope() === "all" ? "true" : "false"}
+						class={{ active: problemsScope() === "all" }}
 						onClick={() => setProblemsScope("all")}
 					>
 						All <span class="meta">{scopeCounts().all}</span>
@@ -162,8 +167,8 @@ export function Problems() {
 					<button
 						type="button"
 						role="tab"
-						aria-selected={problemsScope() === "code"}
-						classList={{ active: problemsScope() === "code" }}
+						aria-selected={problemsScope() === "code" ? "true" : "false"}
+						class={{ active: problemsScope() === "code" }}
 						onClick={() => setProblemsScope("code")}
 					>
 						Code <span class="meta">{scopeCounts().code}</span>
@@ -171,8 +176,8 @@ export function Problems() {
 					<button
 						type="button"
 						role="tab"
-						aria-selected={problemsScope() === "docs"}
-						classList={{ active: problemsScope() === "docs" }}
+						aria-selected={problemsScope() === "docs" ? "true" : "false"}
+						class={{ active: problemsScope() === "docs" }}
 						onClick={() => setProblemsScope("docs")}
 					>
 						Docs <span class="meta">{scopeCounts().docs}</span>
@@ -194,69 +199,101 @@ export function Problems() {
 					</p>
 				}
 			>
-				<For each={files()}>
-					{([uri, list]) => (
-						<RowGroup
-							headClass="tree-row file-head"
-							title={isUntitled(uri) ? displayName(uri) : problemPath(uri)}
-							head={
-								<>
-									<FileMark name={rel(uri)} />
-									<span class="label">{rel(uri)}</span>
-									{/* How many of each: a file with one error among twenty notes says so at a glance. */}
-									<span class="meta tally">
-										<For each={[1, 2, 3, 4].filter((severity) => list.some((d) => d.severity === severity))}>
-											{(severity) => (
-												<span title={`${list.filter((d) => d.severity === severity).length} × ${SEVERITY[severity]!.toLowerCase()}`}>
-													<SeverityMark severity={severity} /> {list.filter((d) => d.severity === severity).length}
-												</span>
-											)}
-										</For>
-									</span>
-								</>
-							}
-						>
-							<For each={[...list].sort((a, b) => a.severity - b.severity || a.line - b.line)}>
-								{(d) => (
-									<Row
-										class="tree-row problem"
-										key={problemRowKey(uri, d)}
-										style={{ "padding-left": "22px" }}
-										title={`${SEVERITY[d.severity]}: ${d.message}${d.code ? ` [${d.code}]` : ""} (line ${d.line}, column ${d.column})`}
-										onActivate={() => void openFile(problemPath(uri), { reveal: { line: d.line, column: d.column, endLine: d.endLine, endColumn: d.endColumn } })}
-									>
-										<SeverityMark severity={d.severity} />
-										<span class="label">{d.message}</span>
-										<Show when={d.code}>
-											<span class="code">{d.code}</span>
-										</Show>
-										<span class="meta">
-											{d.line}:{d.column}
+				<For each={files()} keyed={([uri]) => uri}>
+					{(entry) => {
+						const uri = () => entry()[0];
+						const list = () => entry()[1];
+						const sorted = createMemo(() => [...list()].sort((a, b) => a.severity - b.severity || a.line - b.line));
+						return (
+							<RowGroup
+								headClass="tree-row file-head"
+								title={isUntitled(uri()) ? displayName(uri()) : problemPath(uri())}
+								head={
+									<>
+										<FileMark name={rel(uri())} />
+										<span class="label">{rel(uri())}</span>
+										{/* How many of each: a file with one error among twenty notes says so at a glance. */}
+										<span class="meta tally">
+											<For each={[1, 2, 3, 4].filter((severity) => list().some((d) => d.severity === severity))}>
+												{(severity) => (
+													<span title={`${list().filter((d) => d.severity === severity).length} × ${SEVERITY[severity]!.toLowerCase()}`}>
+														<SeverityMark severity={severity} /> {list().filter((d) => d.severity === severity).length}
+													</span>
+												)}
+											</For>
 										</span>
-									</Row>
-								)}
-							</For>
-						</RowGroup>
-					)}
+									</>
+								}
+							>
+								<For each={sorted()} keyed={(d) => problemRowKey(uri(), d)}>
+									{(d) => (
+										<Row
+											class="tree-row problem"
+											key={problemRowKey(uri(), d())}
+											style={{ "padding-left": "22px" }}
+											title={`${SEVERITY[d().severity]}: ${d().message}${d().code ? ` [${d().code}]` : ""} (line ${d().line}, column ${d().column})`}
+											onActivate={() => {
+												const diag = d();
+												void openFile(problemPath(uri()), {
+													reveal: { line: diag.line, column: diag.column, endLine: diag.endLine, endColumn: diag.endColumn },
+												});
+											}}
+										>
+											<SeverityMark severity={d().severity} />
+											<span class="label">{d().message}</span>
+											<Show when={d().code}>
+												<span class="code">{d().code}</span>
+											</Show>
+											<span class="meta">
+												{d().line}:{d().column}
+											</span>
+										</Row>
+									)}
+								</For>
+							</RowGroup>
+						);
+					}}
 				</For>
 			</Show>
 		</Rows>
 	);
 }
 
+/** How far from its end, in pixels, the Output still counts as showing it. */
+const NEAR_END = 40;
+
+/**
+ * Whether the Output keeps to its end as lines arrive. It does from when it is opened (what was last written is
+ * what it is opened for) until it is scrolled away from the end, and again once it is scrolled back.
+ *
+ * Where the view stands is taken when it is scrolled, which is before the next line arrives. It was measured after
+ * the line was in: a line of three rows or more had by then put the end further off than counts as near, so the
+ * view was taken to be scrolled up and never followed again.
+ */
+export function endFollower() {
+	let following = true;
+	return {
+		/** The view was scrolled, by hand or to its end from here: whether it shows its end now. */
+		scrolled(box: { scrollHeight: number; scrollTop: number; clientHeight: number }) {
+			following = box.scrollHeight - box.scrollTop - box.clientHeight < NEAR_END;
+		},
+		/** Whether a line that has just arrived is to be shown. */
+		following: () => following,
+	};
+}
+
 export function Output() {
 	let box: HTMLPreElement | undefined;
 	// A new line is followed while the view is at the end; someone reading further up is left where they are.
+	const end = endFollower();
 	createEffect(
-		on(
-			() => state.output.length,
-			() => {
-				if (box && box.scrollHeight - box.scrollTop - box.clientHeight < 40) queueMicrotask(() => box && (box.scrollTop = box.scrollHeight));
-			},
-		),
+		() => state.output.length,
+		() => {
+			if (box && end.following()) queueMicrotask(() => box && (box.scrollTop = box.scrollHeight));
+		},
 	);
 	return (
-		<pre class="output" ref={box}>
+		<pre class="output" ref={box} onScroll={(e) => end.scrolled(e.currentTarget)}>
 			<Show when={state.output.length} fallback={<span class="output-empty">Nothing here yet. Output keeps what the app did and what went wrong: folders opened, the language server's and the agent's failures.</span>}>
 				<For each={state.output}>
 					{(line) => {

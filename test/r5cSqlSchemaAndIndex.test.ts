@@ -12,6 +12,7 @@ import {
 	referencedSchemaTables,
 	schemaDocKeys,
 } from "../src/shared/schemaIndex";
+import { withoutTokens } from "../src/shared/lexicalTokens";
 import { schemaList, schemaRowTitle } from "../src/shared/schemaList";
 import {
 	diffSqlAgainstSchemaMarkdown,
@@ -387,7 +388,10 @@ CREATE TABLE STYLE (
 		const parser = new mod.diagram.parser.Parser();
 		parser.yy = mod.diagram.db;
 		expect(() => parser.parse(`${erBody}\n`)).not.toThrow();
-	});
+		// Thirty seconds, not the five a test has by default. Nearly all of this test's time is Mermaid's parser being
+		// read from disk, which takes a third of a second once the files have been read before and took over five
+		// in the Windows test VM straight after it had started (2026-11-25): the test timed out with nothing wrong.
+	}, 30_000);
 });
 
 describe("R5C P1-1 — parseColumnClause edge cases", () => {
@@ -599,7 +603,7 @@ COMMENT ON COLUMN AUDIT_EVENTS.LABEL IS '${"Detailed audit description ".repeat(
 });
 
 describe("R5C P0-6, P1-5 & P2-3 — schemaIndex & schemaList repairs", () => {
-	test("referencedSchemaTables runs in <50ms on 300 docs x 50KB, strips comments, avoids $/\# boundary collisions, and handles 2-char tables vs stop words", () => {
+	test("referencedSchemaTables runs in <50ms on 300 docs x 50KB, avoids $/\# boundary collisions, handles 2-char tables vs stop words, and searches the text as it is given", () => {
 		const docs: DocFile[] = [
 			{ path: "/ws/schema/database/ORDERS.md", name: "database/ORDERS.md", group: "schema", kind: "database", exists: true, title: "ORDERS" },
 			{ path: "/ws/schema/database/QC.md", name: "database/QC.md", group: "schema", kind: "database", exists: true, title: "QC" },
@@ -615,7 +619,7 @@ describe("R5C P0-6, P1-5 & P2-3 — schemaIndex & schemaList repairs", () => {
 				title: `TBL_${i}`,
 			})),
 		];
-		const padding = `/* COMMENTED_ONLY in SSL comment;\n-- COMMENTED_ONLY in SQL comment\n// COMMENTED_ONLY in line comment\nSELECT ORDERS$1, ORDERS#2, if, to, in, on, as, or, by, is, of, at, no, do, go, id FROM DUMMY_WORK;\n`.repeat(300);
+		const padding = `sNote := "a line of padding";\nnCount := nCount + 1;\nsMore := "and another line";\nSELECT ORDERS$1, ORDERS#2, if, to, in, on, as, or, by, is, of, at, no, do, go, id FROM DUMMY_WORK;\n`.repeat(300);
 		const bigCode = `${padding}\nSQLExecute("SELECT * FROM dbo.QC JOIN [dbo].[TBL_250] ON 1=1");\n`;
 		expect(bigCode.length).toBeGreaterThan(50_000);
 
@@ -625,10 +629,17 @@ describe("R5C P0-6, P1-5 & P2-3 — schemaIndex & schemaList repairs", () => {
 
 		expect(elapsed).toBeLessThan(50);
 		expect(hits.map((d) => d.title)).toEqual(["QC", "TBL_250"]);
-		// ORDERS$1 / ORDERS#2 must NOT match ORDERS; comments must NOT match COMMENTED_ONLY; stop words IF/ID excluded
+		// ORDERS$1 / ORDERS#2 must NOT match ORDERS; stop words IF/ID excluded
 		expect(hits.some((d) => d.title === "ORDERS")).toBe(false);
 		expect(hits.some((d) => d.title === "COMMENTED_ONLY")).toBe(false);
 		expect(hits.some((d) => d.title === "IF" || d.title === "ID")).toBe(false);
+
+		// It reads no comments of its own (ADR 0003): a name in one counts until the caller has taken the comments
+		// out, with the language server's word for where SSL's are (test/lexicalTokens.test.ts).
+		const noted = `/* COMMENTED_ONLY is read here;\nnCount := 1;\n`;
+		expect(referencedSchemaTables(noted, docs).map((d) => d.title)).toEqual(["COMMENTED_ONLY"]);
+		const comment = { kind: "comment", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 31 } } };
+		expect(referencedSchemaTables(withoutTokens(noted, [comment]), docs)).toEqual([]);
 	});
 
 	test("classifyUsageCategory keeps GetLatest.ssl, ApproveTest.ssl, AssignTests.ssl in Scripts while classifying true test files under Tests", () => {

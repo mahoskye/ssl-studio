@@ -3,7 +3,6 @@
 // - Flowcharts (.plan.json): title, goal, stage/step/decision/test summary, and plain-English flow outline
 // - Registries (.csv, .tsv): ticket-filtered rows (when hovered from a ticket's "The work for" section) or table preview
 // - Code / text files (.ssl, .sql, .json, .toml, ...): clean syntax-ready code snippet
-import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { parseCsv } from "../../shared/csv";
 import { frontMatter, one } from "../../shared/frontMatter";
@@ -16,6 +15,7 @@ import { backend } from "../backend";
 import { isPlanPath, parsePlan } from "../plan/model";
 import { docs } from "../project";
 import { canonical, documents, state } from "../state";
+import { sanitizeRendered } from "./cmLiveShared";
 import { languageFor } from "./languages";
 import { resolveCodeLanguage } from "./markdownCode";
 import {
@@ -317,7 +317,7 @@ async function renderMarkdownPreview(
 	}
 	const cleanHtml = headingMissing
 		? `<p class="md-hover-empty">Heading “${esc(options.heading ?? "")}” not found in this document.</p>`
-		: DOMPurify.sanitize(marked.parse(previewMd, { async: false, gfm: true }) as string);
+		: sanitizeRendered(marked.parse(previewMd, { async: false, gfm: true }) as string);
 	const { tickets, named } = buildFinishMarkdownOptions(path);
 	const rendered = headingMissing ? cleanHtml : finishMarkdown(cleanHtml, { tickets, named });
 	const moreFooter = !headingMissing && omitted > 0 ? `<p class="md-hover-more">… ${omitted} more line${omitted === 1 ? "" : "s"}</p>` : "";
@@ -342,7 +342,7 @@ export function buildFootnoteHoverPreview(rawDoc: string, docPath: string, footn
 	const def = extractFootnoteDefinition(rawDoc, footnoteId);
 	if (!def) return null;
 	const cleanHtml = def.text
-		? DOMPurify.sanitize(marked.parse(def.text, { async: false, gfm: true }) as string)
+		? sanitizeRendered(marked.parse(def.text, { async: false, gfm: true }) as string)
 		: `<p class="md-hover-empty">Empty footnote definition.</p>`;
 	const { tickets, named } = buildFinishMarkdownOptions(docPath);
 	const html = def.text ? finishMarkdown(cleanHtml, { tickets, named }) : cleanHtml;

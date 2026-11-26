@@ -137,16 +137,16 @@ describe("convertCsvDelimiter", () => {
 		const csv = 'name,note,status\n"Alpha, Beta","say ""hi""","x|y"\nPlain,a\tb,verified\n';
 		const t = parseCsv(csv);
 
-		// Comma -> Pipe: unquotes "Alpha, Beta", quotes "x|y"
+		// Comma -> Pipe: only the delimiters change. "Alpha, Beta" keeps the quotes it is written with, "x|y" has its own.
 		const piped = convertCsvDelimiter(csv, t, "|");
-		expect(piped).toBe('name|note|status\nAlpha, Beta|"say ""hi"""|"x|y"\nPlain|a\tb|verified\n');
+		expect(piped).toBe('name|note|status\n"Alpha, Beta"|"say ""hi"""|"x|y"\nPlain|a\tb|verified\n');
 		expect(parseCsv(piped, { delimiter: "|" }).rows.map((r) => r.map((c) => c.text))).toEqual(
 			t.rows.map((r) => r.map((c) => c.text)),
 		);
 
 		// Comma -> Tab: quotes cell holding literal tab
 		const tsv = convertCsvDelimiter(csv, t, "\t");
-		expect(tsv).toBe('name\tnote\tstatus\nAlpha, Beta\t"say ""hi"""\tx|y\nPlain\t"a\tb"\tverified\n');
+		expect(tsv).toBe('name\tnote\tstatus\n"Alpha, Beta"\t"say ""hi"""\t"x|y"\nPlain\t"a\tb"\tverified\n');
 		expect(parseCsv(tsv, { delimiter: "\t" }).rows.map((r) => r.map((c) => c.text))).toEqual(
 			t.rows.map((r) => r.map((c) => c.text)),
 		);

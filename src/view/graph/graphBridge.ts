@@ -43,6 +43,6 @@ export { activeGraphBridge };
 export function registerGraphBridge(bridge: ActiveGraphBridge): () => void {
 	setActiveGraphBridge(bridge);
 	return () => {
-		if (activeGraphBridge() === bridge) setActiveGraphBridge(null);
+		setActiveGraphBridge((cur) => (cur === bridge ? null : cur));
 	};
 }

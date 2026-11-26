@@ -4,6 +4,7 @@
 // - STARLIMS Release Readiness Gate evaluator
 // - Ticket Release Packet assembler (ticket + readiness + specs + plans + sub-tickets + decisions + questions + registries + folder manifest)
 import { csvRow } from "./csv";
+import { localDay } from "./dates";
 import { frontMatter, one } from "./frontMatter";
 import { isCatalog, registryTitle, toneOf } from "./projectDocs";
 import type { DocFile } from "./protocol";
@@ -847,7 +848,8 @@ function quoteYamlScalar(raw: string): string {
  * All generated tables strictly conform to ADR 0008 (<= 4 columns, short non-last cells).
  */
 export function assembleTestExecutionProtocol(input: TestExecutionProtocolInput): string {
-	const date = input.executedDate?.trim() || new Date().toISOString().slice(0, 10);
+	// The day it is where the person is: taken from UTC, a run in the evening west of Greenwich was dated tomorrow.
+	const date = input.executedDate?.trim() || localDay();
 	const sha = input.gitSha?.trim() ?? "";
 	const cleanTicketKey = input.ticketKey.replace(/[\r\n]+/g, " ").trim();
 	const cleanEnv = input.environment.replace(/[\r\n]+/g, " ").trim();

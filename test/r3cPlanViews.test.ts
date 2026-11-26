@@ -19,14 +19,18 @@ if (typeof (globalThis as any).localStorage === "undefined") {
 if (typeof (globalThis as any).window === "undefined") {
 	(globalThis as any).window = {
 		Error,
+		Map,
+		Set,
 		innerHeight: 900,
 		addEventListener() {},
 		removeEventListener() {},
 		location: { href: "http://localhost/", protocol: "http:", host: "127.0.0.1:5190" },
 		matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
 	};
-} else if (!(globalThis as any).window.Error) {
-	(globalThis as any).window.Error = Error;
+} else {
+	if (!(globalThis as any).window.Error) (globalThis as any).window.Error = Error;
+	if (!(globalThis as any).window.Map) (globalThis as any).window.Map = Map;
+	if (!(globalThis as any).window.Set) (globalThis as any).window.Set = Set;
 }
 if (typeof (globalThis as any).document === "undefined") {
 	(globalThis as any).document = {
@@ -312,7 +316,7 @@ describe("PlanView.tsx — pure helpers & layout invariants", () => {
 		expect(src).toMatch(/catch \(e: any\) \{\s*if \(run !== layoutRun\) return;/);
 
 		// Text -> Chart fit() effect watches isTextMode() and layout().
-		expect(src).toMatch(/createEffect\(\(\) => \{\s*if \(isTextMode\(\) \|\| !layout\(\) \|\| fitted\) return;\s*if \(fit\(\)\)/);
+		expect(src).toMatch(/createEffect\(\s*\(\) => \[isTextMode\(\), layout\(\)\] as const,\s*\(\[inText, l\]\) => \{\s*if \(inText \|\| !l \|\| fitted\) return;\s*if \(fit\(\)\)/);
 
 		// Float-bar non-editing buttons call refocus().
 		const floatBarIdx = src.indexOf('class="plan-float-bar"');
@@ -436,12 +440,13 @@ describe("PlanTests.tsx — validTestScript, draft cleanup, and Generate button 
 		const src = readSrc("../src/view/plan/PlanTests.tsx");
 
 		// Both NodeTests and PlanTests guard tests.script before calling baseName(...)
-		const scriptGuards = src.match(/typeof tests\?\.script === "string" && tests\.script\.length > 0/g) ?? [];
+		// `tests` is an accessor since <Show> lost `keyed`.
+		const scriptGuards = src.match(/typeof tests\(\)\?\.script === "string" && tests\(\)\.script\.length > 0/g) ?? [];
 		expect(scriptGuards.length).toBeGreaterThanOrEqual(2);
 
 		// TestCaseList supports onConsumeDraft and NodeTests clears draftReq on node change
 		expect(src).toContain("onConsumeDraft?: () => void;");
-		expect(src).toMatch(/props\.node\.id;\s*setJourneyFilter\(null\);\s*setDraftReq\(null\);/);
+		expect(src).toMatch(/\(\) => nodeId\(\),\s*\(\) => \{\s*setJourneyFilter\(null\);\s*setDraftReq\(null\);/);
 		expect(src).toContain("onConsumeDraft={() => setDraftReq(null)}");
 
 		// No stale "Soon" pill or "Scheduled —" tooltip, and NodeTests forwards props.node.id

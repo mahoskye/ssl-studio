@@ -3,7 +3,8 @@
 // What it lists is said by the first character in it (src/shared/quickPrefix.ts): the box opens with
 // that character, and typing another, or taking it out, lists something else without closing the box.
 import { FileMark } from "./FileMark";
-import { createEffect, createMemo, createResource, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
+import { createAsyncQuery } from "./asyncQuery";
 import { backend } from "./backend";
 import { commands, keysFor, recentCommands, runCommand } from "./commands";
 import { jumpToTableColumn } from "./editor/liveBridge";
@@ -103,6 +104,23 @@ export function matchesDocType(doc: DocFile | undefined, path: string, wantedRaw
 	}
 }
 
+/**
+ * The workspace symbols to list for what is typed now. The list the language server gave for this very question
+ * is listed whole. One it gave for an earlier question, still held while the new one is waited for, is listed
+ * only where a symbol's name has every word typed now: such a row answers the new question too. Without this the
+ * rows of the earlier question stayed in the list through the wait, and Enter opened one of them.
+ */
+export function symbolsFor<S extends { name: string }>(held: { query: string; list: readonly S[] } | undefined, query: string): readonly S[] {
+	if (!held) return [];
+	if (held.query === query) return held.list;
+	const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+	if (!words.length) return [];
+	return held.list.filter((symbol) => {
+		const name = symbol.name.toLowerCase();
+		return words.every((word) => name.includes(word));
+	});
+}
+
 function Picker(props: { mode: QuickMode }) {
 	const listId = createUniqueId();
 	/** What is in the box, the first character included. */
@@ -112,45 +130,55 @@ function Picker(props: { mode: QuickMode }) {
 	const query = () => read().query;
 	const [selected, setSelected] = createSignal(0);
 	const [failed, setFailed] = createSignal("");
-	const close = () => setState("quickPick", null);
+	const close = () => setState((s) => { s.quickPick = null; });
 	const rel = (path: string) => relativeTo(state.workspace?.root, path);
-	createEffect(() => {
-		void mode();
-		void state.workspace?.root;
-		setFailed("");
-	});
-	const [files] = createResource(
-		() => mode() === "files" && state.workspace?.root,
+	const failedKey = createMemo(() => `${mode()}\0${state.workspace?.root ?? ""}`);
+	createEffect(
+		() => failedKey(),
 		() => {
 			setFailed("");
-			return backend.files().catch((e: any) => (setFailed(String(e?.message ?? e)), [] as string[]));
+		},
+	);
+	const [files] = createAsyncQuery(
+		() => (mode() === "files" && state.workspace?.root ? state.workspace.root : (false as const)),
+		() => {
+			setFailed("");
+			return backend.files().catch((e: any) => {
+				setFailed(String(e?.message ?? e));
+				return [] as string[];
+			});
 		},
 	);
 	const [debouncedSymbolQuery, setDebouncedSymbolQuery] = createSignal<string | false>(false);
 	const [symbolsPending, setSymbolsPending] = createSignal(false);
-	createEffect(() => {
-		if (mode() !== "symbols") {
-			setSymbolsPending(false);
-			setDebouncedSymbolQuery(false);
-			return;
-		}
-		const q = query();
-		setSymbolsPending(true);
-		const timer = setTimeout(() => {
-			setSymbolsPending(false);
-			setDebouncedSymbolQuery(q);
-		}, 120);
-		onCleanup(() => clearTimeout(timer));
-	});
+	const symbolInput = createMemo(() => (mode() === "symbols" ? query() : (false as const)));
+	createEffect(
+		() => symbolInput(),
+		(q) => {
+			if (q === false) {
+				setSymbolsPending(false);
+				setDebouncedSymbolQuery(false);
+				return;
+			}
+			setSymbolsPending(true);
+			const timer = setTimeout(() => {
+				setSymbolsPending(false);
+				setDebouncedSymbolQuery(q);
+			}, 120);
+			return () => clearTimeout(timer);
+		},
+	);
 	let symbolSeq = 0;
 	onCleanup(() => symbolSeq++);
-	const [symbols] = createResource(debouncedSymbolQuery, async (q) => {
+	// The list is kept with the question it answers: while a newer question waits for its own, the old list is
+	// still the query's value, and `symbolsFor` lists of it only what the newer question would list too.
+	const [symbols] = createAsyncQuery(debouncedSymbolQuery, async (q) => {
 		const seq = ++symbolSeq;
 		try {
 			const list = await session.workspaceSymbols(q);
-			return seq === symbolSeq ? list : [];
+			return { query: q, list: seq === symbolSeq ? list : [] };
 		} catch {
-			return [];
+			return { query: q, list: [] };
 		}
 	});
 	const items = createMemo<Item[]>(() => {
@@ -344,7 +372,9 @@ function Picker(props: { mode: QuickMode }) {
 							detail: `stage · ${stage.nodes.length} ${stage.nodes.length === 1 ? "step" : "steps"} · line ${stage.line}`,
 							run: () => {
 								const targetLine = stage.nodes[0]?.line ?? stage.line;
-								setState("cursor", { line: targetLine, column: 1 });
+								setState((s) => {
+									s.cursor = { line: targetLine, column: 1 };
+								});
 								void openFile(path, { reveal: { line: targetLine, column: 1 } });
 							},
 						});
@@ -355,7 +385,9 @@ function Picker(props: { mode: QuickMode }) {
 							label: node.text,
 							detail: `${stage.name} · ${node.kind} · line ${node.line}`,
 							run: () => {
-								setState("cursor", { line: node.line, column: 1 });
+								setState((s) => {
+									s.cursor = { line: node.line, column: 1 };
+								});
 								void openFile(path, { reveal: { line: node.line, column: 1 } });
 							},
 						});
@@ -413,7 +445,7 @@ function Picker(props: { mode: QuickMode }) {
 			run: () => void openFile(d.path, { keep: true }),
 		}));
 
-		const codeSymbols: Item[] = (symbols() ?? []).slice(0, 150).map((s) => {
+		const codeSymbols: Item[] = symbolsFor(symbols(), query()).slice(0, 150).map((s) => {
 			const path = monaco.Uri.parse(s.location.uri).fsPath;
 			const r = s.location.range;
 			return {
@@ -502,19 +534,25 @@ function Picker(props: { mode: QuickMode }) {
 		}
 	};
 	// Clamp selection reactively whenever the result list shrinks or changes.
-	createEffect(() => {
-		const max = Math.max(0, items().length - 1);
-		setSelected((i) => Math.max(0, Math.min(i, max)));
-	});
+	const maxIndex = createMemo(() => Math.max(0, items().length - 1));
+	createEffect(
+		() => maxIndex(),
+		(max) => {
+			setSelected((i) => Math.max(0, Math.min(i, max)));
+		},
+	);
 	// Enter pressed while the list is still empty and loading picks once it arrives.
 	const [pendingEnter, setPendingEnter] = createSignal(false);
 	const loading = () => (mode() === "files" && files.loading) || (mode() === "symbols" && (symbolsPending() || symbols.loading));
-	createEffect(() => {
-		if (pendingEnter() && !loading()) {
-			setPendingEnter(false);
-			pick(items()[selected()]);
-		}
-	});
+	createEffect(
+		() => (pendingEnter() && !loading() ? { pick: true as const, item: items()[selected()] } : { pick: false as const }),
+		(next) => {
+			if (next.pick) {
+				setPendingEnter(false);
+				pick(next.item);
+			}
+		},
+	);
 	/** What the list says when it has no rows: why, and what to do. */
 	const status = () => {
 		if (items().length) return "";
@@ -540,11 +578,12 @@ function Picker(props: { mode: QuickMode }) {
 	const move = (by: number) => setSelected((i) => Math.max(0, Math.min(i + by, Math.max(0, items().length - 1))));
 	// The selected row stays in view when the arrows take it past the edge.
 	let list: HTMLDivElement | undefined;
-	createEffect(() => {
-		const index = selected();
-		items();
-		list?.children[index]?.scrollIntoView({ block: "nearest" });
-	});
+	createEffect(
+		() => [selected(), items()] as const,
+		([index]) => {
+			list?.children[index]?.scrollIntoView({ block: "nearest" });
+		},
+	);
 	// The pointer selects a row only when it moves: a list scrolling under a
 	// still pointer must not take the selection from the arrow keys.
 	let pointer = "";
@@ -565,7 +604,7 @@ function Picker(props: { mode: QuickMode }) {
 				aria-autocomplete="list"
 				aria-activedescendant={items().length ? `${listId}-${selected()}` : undefined}
 				autocomplete="off"
-				spellcheck={false}
+				spellcheck="false"
 				placeholder="A file's name (or #heading, tag:, status:, type:), or ? for help"
 				value={text()}
 				// What is typed after Enter was pressed is a new question: the Enter that was waiting for the list is let go.
@@ -589,17 +628,16 @@ function Picker(props: { mode: QuickMode }) {
 				<For each={items()}>
 					{(item, i) => (
 						<div
-							class="item"
-							classList={{ selected: i() === selected(), "quick-noted": Boolean(item.note), "quick-divide": item.divide }}
+							class={["item", { selected: i() === selected(), "quick-noted": Boolean(item.note), "quick-divide": item.divide }]}
 							role="option"
 							id={`${listId}-${i()}`}
-							aria-selected={i() === selected()}
+							aria-selected={i() === selected() ? "true" : "false"}
 							onMouseMove={(e) => pointed(e, i())}
 							onMouseDown={(e) => e.button === 0 && (e.preventDefault(), pick(item))}
 						>
 							<Show when={item.file}>{(name) => <FileMark name={name()} />}</Show>
 							<span class="label">{item.label}</span>
-							<span class="detail" classList={{ "quick-keys": mode() === "commands" }}>
+							<span class={["detail", { "quick-keys": mode() === "commands" }]}>
 								{item.detail}
 							</span>
 							<Show when={item.note}>

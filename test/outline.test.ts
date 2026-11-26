@@ -69,7 +69,7 @@ describe("a TOML document that cannot be read", () => {
 	});
 
 	test("the first thing wrong is said in plain words, with its line", () => {
-		expect(tomlProblem("a = 1\nb = \n")).toEqual({ message: "The file ends in the middle of a value: something is not finished or not closed.", line: 2, column: 5 });
+		expect(tomlProblem("a = 1\nb = \n")).toEqual({ message: "The value is missing: it comes after the =, on the same line.", line: 2, column: 5 });
 		expect(tomlProblem('a = "unclosed\n')).toMatchObject({ message: "This string is not closed.", line: 1 });
 		expect(tomlProblem("a = 1\na = 2\n")).toMatchObject({ message: "a is set twice.", line: 2 });
 		expect(tomlProblem("a = 1 2\n")).toMatchObject({ message: "A key is followed by = and a value, one to a line.", line: 1 });

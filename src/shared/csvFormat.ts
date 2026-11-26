@@ -2,7 +2,7 @@
 // Nothing about how a CSV column is badged is hard-coded "magic": defaults
 // (including common STARLIMS and migration-registry statuses) are plain data
 // that can be inspected, edited, disabled, or extended per project or user.
-import type { Cell, Table } from "./csv";
+import { compareCellText, type Cell, type Table } from "./csv";
 
 /** Semantic visual badge tones mapped to theme variables (WCAG AA across all themes). */
 export type BadgeTone = "done" | "active" | "waiting" | "warn" | "error" | "off";
@@ -392,8 +392,31 @@ export function columnValueOptions(
 			if ((a.count > 0) !== (b.count > 0)) return a.count > 0 ? -1 : 1;
 			if (b.count !== a.count) return b.count - a.count;
 			if ((a.key === "") !== (b.key === "")) return a.key === "" ? 1 : -1;
-			return a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: "base" });
+			return compareCellText(a.label, b.label);
 		});
+}
+
+/**
+ * `columnValueOptions` for one state of a table and its filters: a column's options are worked out the first time
+ * they are asked for and handed back as they are after that, however many ask (each filter chip, the header's
+ * tooltip and the open filter menu ask for the same column).
+ */
+export function columnValueOptionsOnce(
+	allRows: readonly (readonly Cell[])[],
+	baseRows: readonly { cells: readonly Cell[] }[],
+	filters: ColumnFilters,
+): (column: number) => ColumnValueOption[] {
+	let baseCells: (readonly Cell[])[] | undefined;
+	const byColumn = new Map<number, ColumnValueOption[]>();
+	return (column) => {
+		let options = byColumn.get(column);
+		if (!options) {
+			baseCells ??= baseRows.map((r) => r.cells);
+			options = columnValueOptions(allRows, baseCells, column, filters);
+			byColumn.set(column, options);
+		}
+		return options;
+	};
 }
 
 /** Toggles one normalized value key in a column's filter, collapsing back to `values: null` when every key is checked. */

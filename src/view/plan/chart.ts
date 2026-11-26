@@ -951,6 +951,22 @@ export function fitRegionBounds(
 	return { x: left, y: top, width, height: bottom - top };
 }
 
+// --- what a drag lands on -------------------------------------------------------------------
+
+/**
+ * The node drawn under a point, a little outside its box included, and whether it is one the assistant only
+ * suggests. A suggested node is drawn and is not in the plan: a wire dropped on one was written as an edge to
+ * a node that does not exist. It cannot be clicked, dragged or opened on the chart either, and is taken into the
+ * plan in the Assistant, so a drag is told that it has landed on one and refuses.
+ */
+export function nodeUnder(boxes: readonly (Rect & { id: string; node?: PlanNode })[], pt: Point, excludeId?: string): { id: string; suggested: boolean } | null {
+	for (const b of boxes) {
+		if (!b.node || b.id === excludeId) continue;
+		if (pt.x >= b.x - 6 && pt.x <= b.x + b.width + 6 && pt.y >= b.y - 6 && pt.y <= b.y + b.height + 6) return { id: b.id, suggested: Boolean(b.node.pending) };
+	}
+	return null;
+}
+
 // --- choosing an edge from the keyboard -----------------------------------------------------
 
 export type EdgeRef = { from: string; to: string };
