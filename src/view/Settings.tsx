@@ -20,11 +20,14 @@ import {
 } from "../shared/oklchTheme";
 import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, Show, untrack } from "solid-js";
 import type { JSX } from "@solidjs/web";
+import { EDITOR_COMMANDS, editorCommandLabel, editorKeyCode, isEditorCommand, pressesOf } from "../shared/editorKeymap";
+import { startsEditorChord } from "../shared/menuBar";
 import { isInside, resolvePath } from "../shared/paths";
 import type { Settings, SettingsPatch } from "../shared/protocol";
 import { backend, inApp } from "./backend";
 import { commands, DEFAULT_KEYS, keymap, keysFor, onOpenSettings } from "./commands";
 import { choose } from "./dialogs";
+import { baseEditorKeys, displayEditorKey, editorKeyChanges, editorKeysNow, editorKeysOf, editorTakesKey } from "./editor/editorKeys";
 import { bindable, conflict, displayKey, isModifierKey, keyNamesForPlatform, rebind, unbind } from "./keys";
 import { Modal } from "./modal";
 import { matchWords } from "./quickRank";
@@ -32,7 +35,7 @@ import { loadSettings, notify, restartLsp, saveSetting, state, syncLivePreviewMo
 import { clampScale, stepScale, UI_SCALE } from "./uiScale";
 
 type Layers = { user: Partial<Settings>; workspace: Partial<Settings> };
-type Group = "Appearance" | "Editor" | "Language server" | "Keyboard";
+type Group = "Appearance" | "Editor" | "Language server" | "Keyboard" | "Editor keys";
 
 const FONT = { min: 8, max: 32, normal: 13 };
 const onMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform ?? "");
@@ -166,6 +169,11 @@ export function SettingsDialog() {
 	const [capturing, setCapturing] = createSignal<string | null>(null);
 	/** Why the last key pressed was not taken. */
 	const [refused, setRefused] = createSignal("");
+	/** The first press of a key of two presses, while the second is waited for, and the command it is recorded for. */
+	const [chord, setChord] = createSignal<{ id: string; first: string } | null>(null);
+	const chordFirst = () => (chord() && chord()!.id === capturing() ? chord()!.first : "");
+	/** Which list the key that was not taken was pressed for: the note stands with that list. */
+	const [refusedEditor, setRefusedEditor] = createSignal(false);
 	const titleId = createUniqueId();
 
 	const loadLayers = () =>
@@ -210,10 +218,51 @@ export function SettingsDialog() {
 	// --- keyboard --------------------------------------------------------------
 
 	const label = (id: string) => commands.find((c) => c.id === id)?.label ?? id;
+	/** The shell's keys, as the code editor's keys are weighed against them. */
+	const shellKeys = () => ({ map: keymap(), chosen: state.settings.keys ?? {} });
+	/** The code editor's command on a key, where the editor and not the shell has that key while code is edited. */
+	const editorsOn = (key: string) => (editorTakesKey([key], shellKeys()) ? editorKeysNow()?.[key] : undefined);
 	const bind = async (id: string, key: string) => {
 		const taken = conflict(key, id, keymap());
-		if (taken && (await choose(`${displayKey(key)} is the shortcut for “${label(taken)}”. Use it for “${label(id)}” instead?`, ["Replace"])) !== "Replace") return;
+		const editors = editorsOn(key);
+		// A key the user gave an editor command stays the editor's while code is edited, whatever the shell has on it.
+		const stays = Boolean(editors && editorKeyChanges()[key]);
+		const name = displayKey(key);
+		let question = "";
+		let yes = "Replace";
+		if (editors && stays) {
+			question = `${name} is the code editor's key for “${editorCommandLabel(editors)}”, as you set it, and stays that while you edit code. ${taken ? `Everywhere else it is the shortcut for “${label(taken)}”. Use it for “${label(id)}” there instead?` : `Use it for “${label(id)}” everywhere else?`}`;
+			if (!taken) yes = "Use elsewhere";
+		} else if (editors) {
+			question = `${name} is ${taken ? `the shortcut for “${label(taken)}”, and ` : ""}the code editor's key for “${editorCommandLabel(editors)}”. Use it for “${label(id)}” instead, in the editor too?`;
+		} else if (taken) {
+			question = `${name} is the shortcut for “${label(taken)}”. Use it for “${label(id)}” instead?`;
+		}
+		if (question && (await choose(question, [yes])) !== yes) return;
 		await saveSetting({ keys: rebind(DEFAULT_KEYS, state.settings.keys ?? {}, id, key) });
+	};
+	/** Gives a key (of one press or two) to one of the code editor's commands. */
+	const bindEditor = async (id: string, key: string) => {
+		const base = baseEditorKeys();
+		if (!base) return;
+		const changes = editorKeyChanges();
+		const taken = conflict(key, id, editorKeysNow() ?? {});
+		// The shell's command on the key, where the shell and not the editor has the key while code is edited.
+		const shells = pressesOf(key).length === 1 && !editorTakesKey([key], shellKeys()) ? keymap()[key] : undefined;
+		const name = displayEditorKey(key);
+		const mine = editorCommandLabel(id);
+		let question = "";
+		let yes = "Replace";
+		if (taken && shells) {
+			question = `${name} is the code editor's key for “${editorCommandLabel(taken)}”, and the shortcut for “${label(shells)}”. Use it for “${mine}” while you edit code? “${label(shells)}” keeps it everywhere else.`;
+		} else if (taken) {
+			question = `${name} is the code editor's key for “${editorCommandLabel(taken)}”. Use it for “${mine}” instead?`;
+		} else if (shells) {
+			question = `${name} is the shortcut for “${label(shells)}”. Use it for “${mine}” while you edit code? “${label(shells)}” keeps it everywhere else.`;
+			yes = "Use in the editor";
+		}
+		if (question && (await choose(question, [yes])) !== yes) return;
+		await saveSetting({ editorKeys: rebind(base, changes, id, key) });
 	};
 	// While a shortcut is being recorded every key is the modal's: it is the
 	// answer, not a command to run or a way out (Escape only stops recording).
@@ -221,6 +270,7 @@ export function SettingsDialog() {
 		const id = capturing();
 		if (!id) return false;
 		if (e.isComposing || e.keyCode === 229) return true;
+		setRefusedEditor(isEditorCommand(id));
 		e.preventDefault();
 		e.stopImmediatePropagation();
 		if (isModifierKey(e.key)) return true;
@@ -234,6 +284,28 @@ export function SettingsDialog() {
 			return true;
 		}
 		const key = names[0]!;
+		if (isEditorCommand(id)) {
+			// The code editor's keys of two presses start with Ctrl+K (Cmd+K on a Mac): pressed first, it is half a key.
+			const first = chordFirst();
+			if (!first && startsEditorChord(names, onMac)) {
+				setRefused("");
+				setChord({ id, first: key });
+				return true;
+			}
+			const check = first ? { ok: true as const } : bindable(key);
+			if (!check.ok) {
+				setRefused(check.why);
+				return true;
+			}
+			if (!editorKeyCode(key)) {
+				setRefused(`${displayKey(key)} cannot be one of the editor's keys: the editor has no name for that key.`);
+				return true;
+			}
+			setRefused("");
+			setCapturing(null);
+			void bindEditor(id, first ? `${first} ${key}` : key);
+			return true;
+		}
 		const check = bindable(key);
 		if (!check.ok) {
 			setRefused(check.why);
@@ -246,6 +318,7 @@ export function SettingsDialog() {
 	};
 	const record = (id: string) => {
 		setRefused("");
+		setChord(null);
 		setCapturing(id);
 	};
 	const resetKeys = async () => {
@@ -256,6 +329,19 @@ export function SettingsDialog() {
 		[...commands]
 			.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }))
 			.filter((c) => shown("Keyboard", "shortcut", c.label, c.detail, keysFor(c.id)));
+	/** The keys one of the code editor's commands has while code is edited, as they are shown. */
+	const editorKeysFor = (id: string) => editorKeysOf(id, shellKeys()).map(displayEditorKey).join(", ");
+	const resetEditorKeys = async () => {
+		const answer = await choose("Reset the code editor's keys to the ones it came with? The ones you set are lost, and this cannot be undone.", ["Reset keys"], { danger: "Reset keys" });
+		if (answer) await saveSetting({ editorKeys: {} });
+	};
+	/** The code editor's commands, where its keys could be read: without them a row could not say what it has. */
+	const editorKeyRows = () =>
+		baseEditorKeys()
+			? [...EDITOR_COMMANDS]
+					.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }))
+					.filter((c) => shown("Editor keys", "shortcut", "keyboard", c.label, editorKeysFor(c.id)))
+			: [];
 
 	// --- the rest ----------------------------------------------------------------
 
@@ -351,6 +437,7 @@ export function SettingsDialog() {
 		editor: () => anyShown("Editor", "formatOnSave", "sqlDialect", "minimap", "wordWrap", "livePreview", "markdownReadingHighlight", "inlayHints", "indentOnType", "ctrlClickAddsCursor", "rulers", "rulerMargin", "csvTable", "attachmentsFolder", "templatesFolder"),
 		server: () => anyShown("Language server", "lspPath"),
 		keyboard: () => keyRows().length > 0,
+		editorKeys: () => editorKeyRows().length > 0,
 	};
 
 	const parsedOklch = () => parseOklchThemeId(state.settings.theme);
@@ -431,6 +518,7 @@ export function SettingsDialog() {
 		["Editor", "editor"],
 		["Language server", "server"],
 		["Keyboard", "keyboard"],
+		["Editor keys", "editorKeys"],
 	];
 
 	return (
@@ -841,7 +929,7 @@ export function SettingsDialog() {
 						<p class="settings-hint">
 							A shortcut needs Ctrl or Alt, or a function key. <span class="settings-scope">Saved for you</span>
 						</p>
-						<Show when={refused()}>
+						<Show when={refused() && !refusedEditor()}>
 							<p class="settings-note" role="alert">
 								{refused()}
 							</p>
@@ -863,12 +951,50 @@ export function SettingsDialog() {
 							</For>
 						</div>
 						<div class="settings-actions">
-							<button disabled={!Object.keys(state.settings.keys ?? {}).length} onClick={() => void resetKeys()}>
+							<button aria-label="Reset to defaults: the shortcuts" disabled={!Object.keys(state.settings.keys ?? {}).length} onClick={() => void resetKeys()}>
 								Reset to defaults
 							</button>
 						</div>
 					</Section>
-					<Show when={!groups.appearance() && !groups.editor() && !groups.server() && !groups.keyboard()}>
+					<Section title="Editor keys" when={groups.editorKeys()}>
+						<p class="settings-hint">
+							The code editor's own keys, which work while you edit code. A key of two presses starts with {displayKey(onMac ? "cmd+k" : "ctrl+k")}. Markdown's Live editor keeps its own keys. <span class="settings-scope">Saved for you</span>
+						</p>
+						<Show when={refused() && refusedEditor()}>
+							<p class="settings-note" role="alert">
+								{refused()}
+							</p>
+						</Show>
+						<div class="shortcuts">
+							<For each={editorKeyRows()}>
+								{(c) => (
+									<div class="shortcut-row">
+										<span>{c.label}</span>
+										<span class="hint">{capturing() === c.id ? (chordFirst() ? `${displayKey(chordFirst())}, then the second key (Esc stops)` : "Press the keys (Esc stops)") : editorKeysFor(c.id) || "—"}</span>
+										<button aria-label={`Set the editor's key for ${c.label}`} onClick={() => record(c.id)}>
+											Set
+										</button>
+										<button
+											aria-label={`Clear the editor's key for ${c.label}`}
+											disabled={!editorKeysFor(c.id)}
+											onClick={() => {
+												const base = baseEditorKeys();
+												if (base) void saveSetting({ editorKeys: unbind(base, editorKeyChanges(), c.id) });
+											}}
+										>
+											Clear
+										</button>
+									</div>
+								)}
+							</For>
+						</div>
+						<div class="settings-actions">
+							<button aria-label="Reset to defaults: the editor's keys" disabled={!Object.keys(state.settings.editorKeys ?? {}).length} onClick={() => void resetEditorKeys()}>
+								Reset to defaults
+							</button>
+						</div>
+					</Section>
+					<Show when={!groups.appearance() && !groups.editor() && !groups.server() && !groups.keyboard() && !groups.editorKeys()}>
 						<p class="settings-empty">No settings match.</p>
 					</Show>
 				</div>

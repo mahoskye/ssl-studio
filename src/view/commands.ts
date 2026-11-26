@@ -6,6 +6,7 @@ import { ask, browseWorkspaceFile, choose, quickPick, type QuickPickOption } fro
 import { activeEditor, lastActiveMarkdownPath } from "./editor/EditorGroup";
 import { formatFenceInModel, formatNonSslModel, hadRecentFormatError, languageName } from "./editor/languages";
 import { pickLanguageMode } from "./editor/languagePicker";
+import { editorTakesKey } from "./editor/editorKeys";
 import { activeLiveEditor, isInMarkdownTextEditor, saveMarkdownSyncAnchor } from "./editor/liveBridge";
 import { linkWritten } from "../shared/docLinks";
 import { folderParts } from "../shared/docSections";
@@ -1902,9 +1903,14 @@ export function installKeys() {
 			const overrides = state.settings.keys ?? {};
 			const map = keymap();
 			const { id } = resolveCommandKey(e, map, onMac, overrides);
+			// A key of the code editor's own, as it came or as it was changed in Settings (ADR 0039): the editor runs
+			// what is on it. Asked before the menus' Alt letters too, so Alt and a letter can be an editing key.
+			const editors = inCodeEditor ? editorTakesKey(pressed, { map, chosen: overrides }) : undefined;
+			if (editors) return;
 			const inTable = Boolean(targetEl?.closest(".cm-md-table-wrap, .table-view"));
 			const inLiveMarkdown = Boolean(targetEl?.closest(".cm-editor") && !targetEl.closest(".cm-md-read"));
-			if (shouldLetEditorHandleKey({ id, pressed, inTable, inLiveMarkdown, inCodeEditor, mac: onMac })) return;
+			// Where the editor's keys could not be read, its editing keys are known by the list of them alone.
+			if (shouldLetEditorHandleKey({ id, pressed, inTable, inLiveMarkdown, inCodeEditor: inCodeEditor && editors === undefined, mac: onMac })) return;
 			// The first key of a two-key shortcut, where it is the editor's to take (no command of the shell's is on
 			// it, and it is not a document's "insert link", which was run above): the next key is the editor's too.
 			if (!id && inCodeEditor && startsEditorChord(pressed, onMac)) editorChordAt = Date.now();

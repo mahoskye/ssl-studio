@@ -919,7 +919,7 @@ describe("The code editor's keys are Sublime Text's for editing (ADR 0034)", () 
 	const chord = (first: number, second: number) => (first | ((second & 0xffff) << 16)) >>> 0;
 
 	/** The rules `setEditorKeys` gives the editor, on a system named as the browser names it. */
-	async function rulesOn(platform: string): Promise<Rule[]> {
+	async function rulesOn(platform: string, taken?: (keybinding: number, command: string) => boolean, more: Rule[] = []): Promise<Rule[]> {
 		const { monaco, setEditorKeys } = await import("../src/view/editor/monaco");
 		Object.assign(monaco.KeyMod as any, { CtrlCmd: CTRL, Shift: SHIFT, Alt: ALT, WinCtrl: WIN, chord });
 		Object.assign(monaco.KeyCode as any, CODES);
@@ -929,7 +929,7 @@ describe("The code editor's keys are Sublime Text's for editing (ADR 0034)", () 
 		editorApi.addKeybindingRules = (rules: Rule[]) => ((given = rules), { dispose() {} });
 		Object.defineProperty(globalThis, "navigator", { value: { platform }, configurable: true });
 		try {
-			setEditorKeys();
+			setEditorKeys(taken, more);
 		} finally {
 			if (real) Object.defineProperty(globalThis, "navigator", real);
 			delete editorApi.addKeybindingRules;
@@ -982,6 +982,46 @@ describe("The code editor's keys are Sublime Text's for editing (ADR 0034)", () 
 				expect(rules.findIndex((r) => r.keybinding === rule.keybinding && !r.command.startsWith("-"))).toBeGreaterThan(at);
 			}
 		}
+	});
+
+	test("a key the user changed is left out, what it had before stays let go, and the user's rules come last (ADR 0039)", async () => {
+		const upper = chord(CTRL | CODES.KeyK, CTRL | CODES.KeyU);
+		const mine: Rule[] = [{ keybinding: CTRL | ALT | CODES.KeyJ, command: "editor.action.joinLines", when: "editorTextFocus && !editorReadonly" }];
+		// "Join lines" moved off Ctrl+J, and "Upper case" cleared: the editor passes over a rule that takes a command
+		// off a key it did not come with, so these are not put in at all.
+		const taken = (keybinding: number, command: string) => (keybinding === (CTRL | CODES.KeyJ) && command === "editor.action.joinLines") || keybinding === upper;
+		const rules = await rulesOn("Linux x86_64", taken, mine);
+		expect(bound(rules, CTRL | CODES.KeyJ)).toEqual([]);
+		expect(bound(rules, upper)).toEqual([]);
+		// The key does nothing now, and not what the editor had on it before Sublime Text's command.
+		expect(freed(rules, upper)).toEqual(["editor.action.removeCommentLine"]);
+		// The others are as they were, and the user's own rule is the last of all.
+		expect(bound(rules, CTRL | SHIFT | CODES.KeyD)).toEqual(["editor.action.duplicateSelection"]);
+		expect(bound(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.KeyL))).toEqual(["editor.action.transformToLowercase"]);
+		expect(rules.at(-1)).toEqual(mine[0]!);
+		const all = await rulesOn("Linux x86_64");
+		expect(rules.length).toBe(all.length - 2 + 1);
+	});
+
+	test("the keys are put in afresh each time: the set before is taken out first", async () => {
+		const { monaco, setEditorKeys } = await import("../src/view/editor/monaco");
+		const editorApi = monaco.editor as any;
+		const steps: string[] = [];
+		let sets = 0;
+		editorApi.addKeybindingRules = () => {
+			const mine = ++sets;
+			steps.push(`in ${mine}`);
+			return { dispose: () => steps.push(`out ${mine}`) };
+		};
+		try {
+			setEditorKeys();
+			setEditorKeys();
+			setEditorKeys();
+		} finally {
+			delete editorApi.addKeybindingRules;
+		}
+		// Each set is taken out before the next goes in: left in, a key the user changed would still run its old command.
+		expect(steps).toEqual(["in 1", "out 1", "in 2", "out 2", "in 3"]);
 	});
 
 	test("on a Mac the keys are Sublime Text's for a Mac", async () => {

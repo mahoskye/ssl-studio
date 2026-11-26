@@ -3,12 +3,14 @@
 // reports. Used to check the desktop app, whose window cannot be scripted.
 import { backend } from "./backend";
 import { activeEditor } from "./editor/EditorGroup";
+import { baseEditorKeys } from "./editor/editorKeys";
 import { monaco } from "./editor/monaco";
+import { keysOf, rebind, unbind } from "./keys";
 import { errors } from "./main";
 import { session, diagnostics } from "./lsp/session";
 import { procedureSpans } from "./plan/build";
 import { isPlanPath } from "./plan/model";
-import { activeDoc, openFile, setState, state } from "./state";
+import { activeDoc, openFile, saveSetting, setState, state } from "./state";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(get: () => T | undefined | null | false, ms = 8000): Promise<T | null> {
@@ -29,6 +31,35 @@ async function pictureParses(svg: SVGSVGElement): Promise<number> {
 	const parsed = new DOMParser().parseFromString(text, "image/svg+xml");
 	return text && !parsed.querySelector("parsererror") && parsed.documentElement.nodeName === "svg" ? text.length : 0;
 }
+
+/**
+ * The code editor's keys in this window (ADR 0039): that the keys the editor has on this system are read, and
+ * that a command moved as Settings moves one is on its new key in the editor's own list, has none when it is
+ * cleared, and is back on its own when the change is taken away. Saved as Settings saves it, to the self-test's
+ * own settings, so the way from the setting to the editor is the app's own.
+ */
+async function editorKeysCheck(editor: monaco.editor.IStandaloneCodeEditor): Promise<Record<string, unknown>> {
+	const base = baseEditorKeys();
+	if (!base) return { read: false };
+	const join = "editor.action.joinLines";
+	const service = (editor as unknown as { _standaloneKeybindingService?: { lookupKeybinding(id: string): { getLabel(): string | null } | undefined } })._standaloneKeybindingService;
+	const key = () => service?.lookupKeybinding(join)?.getLabel() ?? "";
+	/** The editor's key for the command once the setting has reached it, or as it is after a wait for that. */
+	const after = async (keys: Record<string, string>, reached: () => boolean) => {
+		await saveSetting({ editorKeys: keys });
+		await until(reached, 3000);
+		return key();
+	};
+	const before = key();
+	const saved = { ...(state.settings.editorKeys ?? {}) };
+	const moved = await after(rebind(base, {}, join, "ctrl+alt+j"), () => key() !== before);
+	const cleared = await after(unbind(base, {}, join), () => key() === "");
+	const back = await after(saved, () => key() === before);
+	return { read: true, keys: Object.keys(base).length, joinLines: keysOf(join, base), blockComment: keysOf("editor.action.blockComment", base), before, moved, cleared, back };
+}
+
+const editorKeysOk = (keys: Record<string, unknown>) =>
+	keys.read === true && Number(keys.keys) > 20 && (keys.joinLines as string[]).length > 0 && Boolean(keys.before) && Boolean(keys.moved) && keys.moved !== keys.before && keys.cleared === "" && keys.back === keys.before;
 
 export async function selftest() {
 	const report: Record<string, unknown> = { host: state.info?.host, userAgent: navigator.userAgent, lspPath: state.info?.lsp.path, lspVersion: state.info?.lsp.version };
@@ -68,6 +99,7 @@ export async function selftest() {
 			if (doc!.model.getValue() !== before) editor!.trigger("selftest", "undo", null);
 			report.revertedClean = doc!.model.getValue() === before;
 			report.monacoTheme = Boolean(document.querySelector(".monaco-editor"));
+			report.editorKeys = await editorKeysCheck(editor!);
 			report.markers = monaco.editor.getModelMarkers({ resource: doc!.model.uri }).length;
 			// The server's own views of the code (blocks and graph modes), when it offers them.
 			if (session.supports("ssl/syntaxTree")) {
@@ -173,6 +205,8 @@ export async function selftest() {
 		Number(report.tokenClasses) > 1 &&
 		Number(report.symbols) >= 0 &&
 		report.revertedClean === true &&
+		// The editor's keys were read, a command moved to a new key was on it, one cleared had none, and all were put back.
+		(report.editorKeys === undefined || editorKeysOk(report.editorKeys as Record<string, unknown>)) &&
 		// A server that offers its views must answer with them.
 		(report.syntaxTreeNodes === undefined || Number(report.syntaxTreeNodes) > 0) &&
 		(report.semanticTokens === undefined || Number(report.semanticTokens) > 0) &&

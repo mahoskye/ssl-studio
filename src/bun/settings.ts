@@ -21,10 +21,10 @@ import { assertPathInsideRoot, resolveRealPath } from "./workspace";
  * Settings that control executable paths, remote servers, billing trust, or personal keybindings: never honored from
  * workspace files. One thing is let through, and not by this list: the local model a project names (`load`).
  */
-export const USER_ONLY_SETTINGS = new Set(["lspPath", "agentServerUrl", "agentServerConfig", "agentOwnModels", "agentModel", "keys"]);
+export const USER_ONLY_SETTINGS = new Set(["lspPath", "agentServerUrl", "agentServerConfig", "agentOwnModels", "agentModel", "keys", "editorKeys"]);
 
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
-const OBJECT_KEYS = new Set(["layout", "limits", "regionColors", "keys", "ssl"]);
+const OBJECT_KEYS = new Set(["layout", "limits", "regionColors", "keys", "editorKeys", "ssl"]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -98,6 +98,7 @@ const SETTING_RULES: Partial<Record<keyof Settings, Rule>> = {
 	agentServerConfig: "string",
 	agentServerUrl: "string",
 	keys: { each: "string" },
+	editorKeys: { each: "string" },
 	csvTable: "object",
 	sqlDialect: { oneOf: SQL_DIALECTS.map((dialect) => dialect.id) },
 	activeTicket: "string",

@@ -14,6 +14,9 @@ monaco.languages.register({
 	aliases: ["SSL", "STARLIMS Scripting Language"],
 });
 
+/** The rules `setEditorKeys` last gave the editor, to be taken out when it gives them again. */
+let ownKeys: monaco.IDisposable | null = null;
+
 /**
  * The editor's keys where they are not left as the editor has them: Sublime Text's keys for editing (ADR 0032,
  * ADR 0034). The editor comes with VS Code's. Where the two differ on a key for editing, the key does what it does
@@ -29,8 +32,15 @@ monaco.languages.register({
  * Left as the editor has them, though Sublime Text differs: Ctrl+Shift+Space (parameter hints, not "expand
  * selection to scope") and Ctrl+Space, since what the language server says is asked for as in VS Code; F2
  * (rename) and Ctrl+F2 (change all occurrences), where Sublime Text keeps bookmarks, which this editor has none of.
+ *
+ * The user may change these keys in Settings (ADR 0039, editorKeys.ts). The editor takes a command off a key by
+ * a rule only where the key is one it came with itself: a key put in here is not taken off that way. So the keys
+ * are put in afresh at each change, without those the user took (`taken`, by the editor's number for the key and
+ * the command on it), and with the user's own rules after them (`more`): of two rules for a key, the later is
+ * the one the editor goes by. A command the key had before stays let go: a key cleared in Settings does
+ * nothing, and not something else.
  */
-export function setEditorKeys() {
+export function setEditorKeys(taken: (keybinding: number, command: string) => boolean = () => false, more: monaco.editor.IKeybindingRule[] = []) {
 	const mac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform ?? "");
 	const { KeyMod: M, KeyCode: K } = monaco;
 	/** The Ctrl key itself, on a Mac too: Sublime Text's bracket keys are on it there. */
@@ -69,9 +79,11 @@ export function setEditorKeys() {
 		// Folds: the editor's Ctrl+K Ctrl+0 folds everything, Sublime Text's unfolds everything.
 		{ key: chord(K.KeyK, K.Digit0), command: "editor.unfoldAll", when: text, frees: ["editor.foldAll"] },
 	];
-	monaco.editor.addKeybindingRules(
-		rules.flatMap(({ key, command, when, frees = [] }) => [...frees.map((freed) => ({ keybinding: key, command: `-${freed}` })), { keybinding: key, command, when }]),
-	);
+	ownKeys?.dispose();
+	ownKeys = monaco.editor.addKeybindingRules([
+		...rules.flatMap(({ key, command, when, frees = [] }) => [...frees.map((freed) => ({ keybinding: key, command: `-${freed}` })), ...(taken(key, command) ? [] : [{ keybinding: key, command, when }])]),
+		...more,
+	]);
 }
 
 let commentTokens: { open: string; close: string } | null = null;

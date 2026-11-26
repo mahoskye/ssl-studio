@@ -93,7 +93,8 @@ shell: VS Code).
 
 - A key gives way only while it runs the command it is the default key of.
   A key the user gives to another command is theirs, and runs that command
-  in an editor too.
+  in an editor too. And only while the editor still has a command on it:
+  let go there, it is the shell's again (ADR 0039).
 
 ### Keys the shell gains
 
@@ -129,8 +130,9 @@ shell: VS Code).
 - A hand used to VS Code finds Ctrl+Shift+L, Ctrl+K Ctrl+0 and Ctrl+click
   doing something else in the editor. The tables above say where each
   went, and the menus show the keys.
-- The editor's keys cannot yet be changed in Settings, which lists the
-  shell's commands only. Until they can, the choices here are the only
-  ones, apart from the setting for the click.
+- The keys here are the ones the editor starts with. Each can be changed
+  in Settings since
+  [ADR 0039](0039-the-code-editors-keys-can-be-changed-in-settings.md),
+  which also says whose a key is once the user has given it away.
 - The keys for a Mac are written from Sublime Text's own list and have not
   been run on one.

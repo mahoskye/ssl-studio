@@ -17,10 +17,12 @@
 import { createMemo, createSignal, createUniqueId, For, onFlush, onSettled, Show } from "solid-js";
 import { clampMenuBarLeftOffset } from "../shared/contextMenu";
 import { FIELD_COMMANDS, letterItem, MENU_BAR, missing, stepMenu, type BarEntry, type Has } from "../shared/menuBar";
-import { keysFor, onOpenMenu, runCommand } from "./commands";
+import { isEditorCommand } from "../shared/editorKeymap";
+import { keymap, keysFor, onOpenMenu, runCommand } from "./commands";
 import { Icon } from "./Icon";
 import { crowdedOut, isPanelAvailable, isShown, movePanel, narrowHosted, narrowPanels, panelOn, PANELS, showPanel, sideOf } from "./panels/registry";
 import { activeEditor } from "./editor/EditorGroup";
+import { baseEditorKeys, displayEditorKey, editorKeysOf } from "./editor/editorKeys";
 import { activeLiveEditor, hasTableFind, openReadFind, openTableFind } from "./editor/liveBridge";
 import { review } from "./editor/Review";
 import { Menu, nextItem, type MenuItem } from "./Menu";
@@ -54,6 +56,11 @@ type KeyService = { lookupKeybinding(id: string): { getLabel(): string | null } 
 
 /** The keys the text editor has for one of its own commands, as it names them: they differ from system to system. */
 function editorKeys(id: string): string {
+	// One of the commands whose keys Settings lists: the key it has now, and none where the shell has taken it.
+	if (isEditorCommand(id) && baseEditorKeys()) {
+		const keys = editorKeysOf(id, { map: keymap(), chosen: state.settings.keys ?? {} });
+		return keys.length ? displayEditorKey(keys[keys.length - 1]!) : "";
+	}
 	// The editor has no public way to ask. Without this the menu shows no keys, and still runs the command.
 	const service = (activeEditor() as unknown as { _standaloneKeybindingService?: KeyService } | undefined)?._standaloneKeybindingService;
 	try {

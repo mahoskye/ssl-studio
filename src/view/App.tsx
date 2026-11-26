@@ -13,6 +13,7 @@ import { review, ReviewView } from "./editor/Review";
 import { RegionBoundary } from "./RegionBoundary";
 import { CenterTabStrip } from "./editor/CenterTabStrip";
 import { EditorGroup } from "./editor/EditorGroup";
+import { applyEditorKeys } from "./editor/editorKeys";
 import { commands, keysFor } from "./commands";
 import { clampScale } from "./uiScale";
 import { Explorer } from "./panels/Explorer";
@@ -154,6 +155,13 @@ function useTheme() {
 		() => ({ uiFont: state.settings.uiFont, codeFont: state.settings.codeFont, readFont: state.settings.readFont }),
 		(fonts) => {
 			applyFonts(fonts);
+		},
+	);
+	// The code editor's keys follow the setting: a key changed in Settings works at once, and one set back does too.
+	createEffect(
+		() => JSON.stringify(state.settings.editorKeys ?? {}),
+		() => {
+			applyEditorKeys();
 		},
 	);
 }

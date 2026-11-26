@@ -697,7 +697,7 @@ export async function loadSettings(fresh = false) {
  * one gesture) would each be worked out from the value before either, and the later would write the earlier away,
  * however orderly the saving. So the new value is on screen at once, where the next change is worked out from it.
  */
-const WORKED_OUT_HERE = ["keys", "regionColors", "agentOwnModels"] as const;
+const WORKED_OUT_HERE = ["keys", "editorKeys", "regionColors", "agentOwnModels"] as const;
 /** How many saves of settings have been asked for: tells the answer to the last from the answers before it. */
 let settingsAsked = 0;
 /** How many of them have not answered yet, and whether one of those that have, failed. */

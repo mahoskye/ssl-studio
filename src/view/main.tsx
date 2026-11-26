@@ -6,6 +6,7 @@ import { App } from "./App";
 import { connect, backend, onConnectionLost } from "./backend";
 import { installKeys } from "./commands";
 import { installContextMenu } from "./contextMenu";
+import { applyEditorKeys, readEditorKeys } from "./editor/editorKeys";
 import { loadLanguageConfiguration, setEditorKeys } from "./editor/monaco";
 import "./editor/opener";
 import { loadGrammar } from "./editor/textmate";
@@ -40,7 +41,10 @@ async function start() {
 	// page before it said (state.ts, `tellHolding`): told now, a close is not sent round by the view for nothing.
 	void backend.typingChanged(false).catch(() => undefined);
 	setEditorKeys();
+	// The editor's keys as they come, read before any change of the user's is put on them (ADR 0039).
+	readEditorKeys();
 	await Promise.all([loadGrammar(), loadLanguageConfiguration(), loadSettings(true)]);
+	applyEditorKeys();
 	applyFonts(state.settings);
 	applyTheme(resolveTheme(state.settings.theme, state.themes, undefined, state.settings.themeMaterial));
 	shapeEditorMenus();

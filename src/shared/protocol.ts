@@ -283,6 +283,12 @@ export type Settings = {
 	agentServerUrl?: string;
 	/** Shortcut overrides: key ("ctrl+shift+x") to command id; "" unbinds a default. */
 	keys: Record<string, string>;
+	/**
+	 * The same for the code editor's own keys (ADR 0039): key to the editor's id for one of its commands
+	 * (shared/editorKeymap.ts); "" takes a key the editor came with away from its command. A key of two presses is
+	 * the two names with a space between ("ctrl+k ctrl+u").
+	 */
+	editorKeys?: Record<string, string>;
 	/** Configurable CSV table column badge formatting (columns, value-to-tone mappings, fallback). */
 	csvTable?: CsvTableConfig;
 	/** SQL dialect used when formatting standalone .sql files (default "tsql" for SQL Server STARLIMS). */
