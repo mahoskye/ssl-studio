@@ -95,7 +95,7 @@ Other scripts:
 | `hutch run test` | Unit tests (`bun test`) |
 | `hutch run check` | Type check |
 | `hutch run selftest` | Opens the app on `fixtures/workspace`, checks the editor and language server, writes `selftest.json`, quits |
-| `hutch run selftest-close` | Leaves an edit unsaved and presses the window's close button: the app must ask first (Linux with X11, Windows) |
+| `hutch run selftest-close` | Closes the window over unsaved edits: nothing asked, and they are back next time (X11, Windows) |
 
 A second fixture, `fixtures/sample-module`, is a whole module in STARLIMS export layout (server scripts, data sources, forms with code-behind, client scripts, resources, sidecars, and deliberately broken scripts); `hutch run start fixtures/sample-module` opens it. Its README says what the IDE does and does not open yet.
 | `hutch run build` | A release build |

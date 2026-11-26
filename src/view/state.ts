@@ -2,7 +2,7 @@
 // Documents are Monaco models; the text in them is the source of truth
 // (ADR 0002).
 import { createSignal, createStore, flush, onFlush, reconcile, snapshot } from "solid-js";
-import { DEFAULT_SETTINGS, type Info, type LspState, type Project, type Settings, type SettingsPatch, type ThemeFile, type Workspace } from "../shared/protocol";
+import { DEFAULT_SETTINGS, type Info, type KeptText, type LspState, type Project, type Settings, type SettingsPatch, type ThemeFile, type Workspace } from "../shared/protocol";
 import { backend, on } from "./backend";
 import { removeRecentGroup, resetRecentTabs } from "./recentTabs";
 import { monaco } from "./editor/monaco";
@@ -298,11 +298,157 @@ export async function settleUnsaved(what: string): Promise<boolean> {
 	commitPendingEdits();
 	const unsaved = snapshotUnsavedPaths();
 	if (!unsaved.length) return true;
-	const names = unsaved.slice(0, 3).map(baseName).join(", ") + (unsaved.length > 3 ? ` and ${unsaved.length - 3} more` : "");
+	// By the name on its tab: a document with no file yet is "Untitled-1", not the path the app knows it by.
+	const names = namesOf(unsaved);
 	const answer = await choose(`${unsaved.length === 1 ? "1 file has" : `${unsaved.length} files have`} unsaved changes (${names}). ${what}`, ["Save all", "Discard changes"], { danger: "Discard changes" });
 	if (answer === "Save all") return saveAll();
 	return answer === "Discard changes";
 }
+
+// --- unsaved text, kept while the folder is not open (ADR 0034) ---------------------
+
+/** How long after a change a document's unsaved text is kept, in milliseconds: a second, as VS Code has it. */
+export const KEEP_AFTER = 1000;
+/**
+ * Which text of each document the backend was last given to keep, as the document's version then, with the file
+ * as those edits found it: for the open folder. What is asked to be kept is only what has changed since, and what
+ * was kept for a document that is no longer unsaved is asked to be forgotten. The version is one document's own:
+ * a file closed and opened again is another document, whose versions count from the start again.
+ */
+const keptVersions = new Map<string, { model: monaco.editor.ITextModel; version: number }>();
+/** Whether the backend has this document's text as it is now. */
+const isKept = (path: string) => {
+	const doc = docs.get(path);
+	const was = keptVersions.get(path);
+	return Boolean(doc && was && was.model === doc.model && was.version === doc.model.getAlternativeVersionId());
+};
+const keptBases = new Map<string, { text: string; mtime: number }>();
+/** Counts the folders opened: what a keep learned of one folder is not put on record for the next. */
+let keptEpoch = 0;
+/** The unsaved text kept for the open folder that no document has taken up yet, by path (restoreTabs). */
+const keptPending = new Map<string, KeptText>();
+/** The keep that is waiting to be asked for, and when it is due. */
+let keepTimer: ReturnType<typeof setTimeout> | undefined;
+let keepDue = 0;
+/** The keeps asked for, one after another: each reads the documents as they are when its turn comes. */
+let keeping: Promise<unknown> = Promise.resolve();
+
+/** No record of anything kept: the folder is another, and what was kept was that folder's. (Exported for the tests.) */
+export function forgetKeptRecord() {
+	keptEpoch++;
+	keptVersions.clear();
+	keptBases.clear();
+	keptPending.clear();
+	clearTimeout(keepTimer);
+	keepTimer = undefined;
+}
+
+/** What there is to keep and to forget just now, with what the record of it would then be. Null with nothing to do. */
+function unsavedToKeep(skip?: (path: string) => boolean) {
+	const cur = snapshot(state);
+	const root = cur.workspace?.root;
+	if (!root) return null;
+	const keep: KeptText[] = [];
+	const versions = new Map<string, { model: monaco.editor.ITextModel; version: number }>();
+	const bases = new Map<string, { text: string; mtime: number }>();
+	for (const path of snapshotUnsavedPaths()) {
+		const doc = docs.get(path);
+		if (!doc || doc.model.isDisposed() || doc.binary || skip?.(path)) continue;
+		const base = keptBases.get(path);
+		const sameBase = isUntitled(path) || (base !== undefined && base.mtime === doc.mtime && base.text === doc.savedText);
+		if (isKept(path) && sameBase) continue;
+		versions.set(path, { model: doc.model, version: doc.model.getAlternativeVersionId() });
+		const text = doc.model.getValue();
+		if (isUntitled(path)) keep.push({ path, text, language: doc.model.getLanguageId() });
+		else {
+			// The file as these edits found it goes along once: the backend keeps it with the text until it is told another.
+			bases.set(path, { text: doc.savedText, mtime: doc.mtime });
+			keep.push(sameBase ? { path, text } : { path, text, saved: { text: doc.savedText, mtime: doc.mtime } });
+		}
+	}
+	const drop = [...keptVersions.keys()].filter((path) => !cur.dirty[path] || !docs.has(path) || skip?.(path));
+	return keep.length || drop.length ? { root, keep, drop, versions, bases } : null;
+}
+
+/**
+ * Has the backend keep the text of every document that is unsaved, as it is now, and forget what it kept for those
+ * that no longer are. Answers null when all of it is kept, and else why it is not. `skip` names documents whose
+ * text is not to be kept and is forgotten: those the user has just chosen to discard.
+ */
+export function keepUnsaved(skip?: (path: string) => boolean): Promise<string | null> {
+	clearTimeout(keepTimer);
+	keepTimer = undefined;
+	const run = async (): Promise<string | null> => {
+		const todo = unsavedToKeep(skip);
+		if (!todo) return null;
+		const epoch = keptEpoch;
+		try {
+			await backend.unsavedKeep(todo.root, todo.keep, todo.drop);
+		} catch (e: any) {
+			return String(e?.message ?? e);
+		}
+		if (epoch === keptEpoch) {
+			for (const path of todo.drop) {
+				keptVersions.delete(path);
+				keptBases.delete(path);
+			}
+			for (const [path, version] of todo.versions) keptVersions.set(path, version);
+			for (const [path, base] of todo.bases) keptBases.set(path, base);
+		}
+		return null;
+	};
+	const done = keeping.then(run, run);
+	keeping = done.catch(() => undefined);
+	return done;
+}
+
+/**
+ * Asks for the unsaved text to be kept a moment from now. A change to a document asks for it within the second,
+ * and a further change does not put that off: however long the typing goes on, what a crash can take is the last
+ * second of it. `after` 0 is for when other files are unsaved than before (one saved, one discarded): at once.
+ */
+export function keepUnsavedSoon(after = KEEP_AFTER) {
+	const due = Date.now() + after;
+	if (keepTimer !== undefined) {
+		if (due >= keepDue) return;
+		clearTimeout(keepTimer);
+	}
+	keepDue = due;
+	keepTimer = setTimeout(() => {
+		keepTimer = undefined;
+		void keepUnsaved();
+	}, after);
+}
+
+/**
+ * As the page goes (a reload, a browser tab closed): what is unsaved is sent to be kept, now, without waiting for
+ * a keep that is under way, since nothing after this is sure to run. Nothing is asked: the text comes back with
+ * the folder (ADR 0034).
+ */
+export function keepUnsavedOnLeave() {
+	commitPendingEdits();
+	const todo = unsavedToKeep();
+	if (todo) void backend.unsavedKeep(todo.root, todo.keep, todo.drop).catch(() => undefined);
+}
+
+/**
+ * Before the folder is left with every open document in it (the window closing, another folder opened): what is
+ * unsaved is kept for when the folder is opened again, and nothing is asked (ADR 0034). Only where it could not
+ * be kept is the question of ADR 0009 asked, since going on would then lose it. Says whether to go on.
+ */
+export async function leaveUnsavedKept(what: string): Promise<boolean> {
+	commitPendingEdits();
+	if ((await keepUnsaved()) === null) return true;
+	if (!(await settleUnsaved(`They could not be kept for next time. ${what}`))) return false;
+	// Saved, or given up: what was kept of them before the keeping failed is not to come back as unsaved. Asked
+	// for as it can be: where the folder cannot be written, it cannot be cleared either.
+	const givenUp = new Set(snapshotUnsavedPaths());
+	await keepUnsaved((path) => givenUp.has(path));
+	return true;
+}
+
+/** The names of a few files, and how many more there are. */
+const namesOf = (paths: readonly string[]) => paths.slice(0, 3).map(displayName).join(", ") + (paths.length > 3 ? ` and ${paths.length - 3} more` : "");
 
 let openSeq = 0;
 
@@ -366,10 +512,15 @@ function writeKeptForFolder(): Promise<void> | undefined {
 }
 
 export async function openFolder(path?: string) {
-	if (!(await settleUnsaved("Opening another folder closes them."))) return;
-	// What is still unsaved here was asked about and is to be dropped, as it stands now (see below).
+	// Leaving a folder asks nothing: what is unsaved in it is kept, and comes back when it is opened again (ADR 0034).
+	if (!(await leaveUnsavedKept("Opening another folder closes them."))) return;
+	// What is unsaved here and not kept by now was asked about and is to be dropped, as it stands now (see below).
 	const versionOf = (path: string) => docs.get(path)?.model.getAlternativeVersionId();
-	const droppedByChoice = new Map(snapshotUnsavedPaths().map((path) => [path, versionOf(path)]));
+	const droppedByChoice = new Map(
+		snapshotUnsavedPaths()
+			.filter((path) => !isKept(path))
+			.map((path) => [path, versionOf(path)]),
+	);
 	const seq = ++openSeq;
 	// From here until the folder is open, or the opening is called off, nothing kept for a folder is sent on its
 	// own (keepForFolder): what waits is written now, while the backend is still in this folder.
@@ -406,22 +557,29 @@ async function switchFolder(path: string | undefined, seq: number, droppedByChoi
 		}
 		return;
 	}
-	// Typed in while the folder was being chosen or opened: the question above was answered before these edits
-	// were made, and from here every open document is dropped. The backend is already in the new folder, where the
-	// edited files cannot be saved, so it is sent back to the folder they belong to and the open is called off.
-	// (With no folder open before there is nowhere to go back to: an untitled buffer edited in that gap is not covered.)
-	// Not what the answer above already covered: a file the user chose to discard is dropped, unless it was typed in again.
+	// Typed in while the folder was being chosen or opened: what is unsaved was kept before these edits were made,
+	// and from here every open document is dropped. They are kept as the rest was, for the folder being left, which
+	// the backend still takes them for though it is in the new one by now.
+	// Not what was asked about above: a file the user chose to discard is dropped, unless it was typed in again.
 	commitPendingEdits();
-	const editedMeanwhile = snapshotUnsavedPaths().filter((path) => !droppedByChoice.has(path) || droppedByChoice.get(path) !== versionOf(path));
-	if (editedMeanwhile.length && prevRoot && canonical(workspace.root) !== canonical(prevRoot)) {
-		const back = await guarded(() => backend.openFolder(prevRoot));
+	const dropped = (path: string) => droppedByChoice.has(path) && droppedByChoice.get(path) === versionOf(path);
+	const notKept = () => snapshotUnsavedPaths().filter((path) => !dropped(path) && !isKept(path));
+	if (prevRoot && notKept().length) {
+		await keepUnsaved(dropped);
 		if (seq !== openSeq) return;
-		if (back) {
-			session.setRoot(prevRoot);
-			void restartLsp();
-			const names = editedMeanwhile.length === 1 ? displayName(editedMeanwhile[0]!) : `${editedMeanwhile.length} files`;
-			notify(`${baseName(workspace.root)} was not opened: ${names} changed while it was being opened. Save or discard the changes, then open the folder again.`, "error");
-			return;
+		// And where they could not be kept: the backend is in the new folder, where the edited files cannot be saved,
+		// so it is sent back to the folder they belong to and the open is called off.
+		const editedMeanwhile = notKept();
+		if (editedMeanwhile.length && canonical(workspace.root) !== canonical(prevRoot)) {
+			const back = await guarded(() => backend.openFolder(prevRoot));
+			if (seq !== openSeq) return;
+			if (back) {
+				session.setRoot(prevRoot);
+				void restartLsp();
+				const names = editedMeanwhile.length === 1 ? displayName(editedMeanwhile[0]!) : `${editedMeanwhile.length} files`;
+				notify(`${baseName(workspace.root)} was not opened: ${names} changed while it was being opened, and the changes could not be kept. Save or discard them, then open the folder again.`, "error");
+				return;
+			}
 		}
 	}
 	closeReview();
@@ -435,6 +593,8 @@ async function switchFolder(path: string | undefined, seq: number, droppedByChoi
 	resetRecentTabs();
 	const oldDocs = [...docs.values()];
 	docs.clear();
+	// What was kept of those documents is the folder's that was left: none of it is on record for this one.
+	forgetKeptRecord();
 	// The notices go below, and with them the one that a settings file does not read. It was kept on record as said,
 	// so the reading for this folder passed it over: opening a folder from the Welcome page, the ordinary start,
 	// took the notice away for good while the person's own settings stayed unused. The record goes with the
@@ -503,12 +663,9 @@ export function rememberTabs() {
 	const cur = snapshot(state);
 	const root = cur.workspace?.root;
 	if (!root || !tabsReadyNow) return;
-	// Floating untitled buffers are not persisted across workspace sessions.
-	const savedGroups = cur.groups.map((g) => {
-		const tabs = g.tabs.filter((p) => !isUntitled(p));
-		return { ...g, tabs, active: g.active && !isUntitled(g.active) ? g.active : (tabs[0] ?? null) };
-	});
-	remember(tabsKey(root), packTabs(savedGroups, cur.activeGroup));
+	// A document with no file yet has its place among the tabs too: it comes back there if it has text that was
+	// kept (ADR 0034), and one left empty has nothing to come back with and is passed over (restoreTabs).
+	remember(tabsKey(root), packTabs(cur.groups, cur.activeGroup));
 }
 
 /** The side panels there are, and the bottom ones: what a kept choice must be one of. */
@@ -539,8 +696,8 @@ export function reloadWithoutTabs() {
 		// No session storage: the reload still happens, with the tabs.
 	}
 	window.location.reload();
-	// Still here a moment later: the reload was called off (the question about unsaved changes was answered "stay").
-	// The request goes with it, so that a later, ordinary reload reopens the tabs as usual.
+	// Still here a moment later: the reload did not happen. The request goes with it, so that a later, ordinary
+	// reload reopens the tabs as usual.
 	setTimeout(() => {
 		try {
 			sessionStorage.removeItem(SKIP_TABS_ONCE);
@@ -563,13 +720,20 @@ function takeSkipTabsOnce(): boolean {
 export async function restoreTabs() {
 	const curStart = snapshot(state);
 	const root = curStart.workspace?.root;
-	// A self-test starts from nothing open, and leaves nothing behind for the next run.
-	if (curStart.info?.selftest || curStart.info?.selftestClose) return;
+	// A self-test starts from no tabs remembered, and leaves none behind for the next run. What was unsaved when
+	// the folder was left comes back in one too (ADR 0034): the check of the close reads it (selftestClose.ts).
+	if (curStart.info?.selftest || curStart.info?.selftestClose) {
+		if (root && (await recallUnsaved(root))) await openKeptPending(root);
+		return;
+	}
 	// Asked for once, by the error card: the panels come back, the files do not, and what is remembered below is
 	// then the empty set, so the tab that failed is not reopened next time either.
 	const skipTabs = takeSkipTabsOnce();
 	setTabsReadyFlag(false);
 	try {
+		// What was unsaved when the folder was left, before any of its files is read: a file that is opened below
+		// opens with the text it was left with.
+		if (root && !(await recallUnsaved(root))) return;
 		// The panels first: they are there at once, and the files take a moment to read.
 		const views = root ? unpackViews(recall(viewsKey(root)), LEFT_VIEWS, BOTTOM_VIEWS) : {};
 		if (views.left || views.bottom || views.right) {
@@ -580,14 +744,27 @@ export async function restoreTabs() {
 				if (views.right) s.rightView = views.right as PanelId;
 			});
 		}
+		if (root && skipTabs && keptPending.size) {
+			// The files do not come back this once, and so neither do those with unsaved text: one of them may be
+			// the tab that failed. Their text stays kept, and that it is there is said.
+			const pending = [...keptPending.keys()];
+			notify(`Unsaved text is kept for ${namesOf(pending)}. It comes back when ${pending.length === 1 ? "the file" : "a file"} is opened.`, "info", { label: "Open", run: () => void openKeptPending(root) });
+		}
 		const saved = root && !skipTabs ? unpackTabs(recall(tabsKey(root))) : null;
+		if (root && !saved && !skipTabs) await openKeptPending(root);
 		if (!root || !saved) return;
 		for (const [index, group] of saved.groups.entries()) {
 			const tabs: string[] = [];
 			for (const path of group.tabs) {
+				// A document with no file yet comes back where it was, if it was left with text.
+				if (isUntitled(path)) {
+					const kept = keptPending.get(path);
+					if (kept && attachUntitledKept(kept)) tabs.push(path);
+					continue;
+				}
 				if (!isInside(root, path)) continue;
 				try {
-					const loaded = (await loadDoc(path)).path;
+					const loaded = (await loadDoc(path, true)).path;
 					if (snapshot(state).workspace?.root !== root) {
 						letGoIfOnlyRead(loaded);
 						return;
@@ -631,13 +808,84 @@ export async function restoreTabs() {
 				s.activeGroup = Math.min(saved.activeGroup, s.groups.length - 1);
 			}
 		});
+		// Unsaved text of a file that had no tab among those (the tabs are remembered by the window, the text by the
+		// app: one may be there without the other) gets a tab of its own.
+		await openKeptPending(root);
 	} finally {
 		if (snapshot(state).workspace?.root === root) {
+			sayKeptRestored();
 			setTabsReadyFlag(true);
 			rememberTabs();
 			rememberViews();
 		}
 	}
+}
+
+/**
+ * Asks the backend for the unsaved text it kept for this folder, and puts it where a file that is opened finds it
+ * (loadDoc). Says whether the folder is still the open one. Text that cannot be asked for is not lost by that: it
+ * stays kept, and the files open as they are on disk.
+ */
+async function recallUnsaved(root: string): Promise<boolean> {
+	const epoch = keptEpoch;
+	let kept: KeptText[] = [];
+	try {
+		kept = (await backend.unsavedKept()) ?? [];
+	} catch (e) {
+		log(`the unsaved text kept for ${baseName(root)} could not be read: ${e instanceof Error ? e.message : String(e)}`);
+	}
+	if (epoch !== keptEpoch || snapshot(state).workspace?.root !== root) return false;
+	for (const each of Array.isArray(kept) ? kept : []) {
+		if (!each || typeof each.path !== "string" || typeof each.text !== "string") continue;
+		const path = canonical(each.path);
+		if (isUntitled(path) || isInside(root, path)) keptPending.set(path, { ...each, path });
+	}
+	return true;
+}
+
+/** What came back unsaved from last time with something to say of it: the file changed on disk since, or is gone. */
+let keptRestored: { path: string; file: "changed" | "gone" }[] = [];
+
+/** Says it, once for all the files a folder came back with. */
+function sayKeptRestored() {
+	const of = (file: "changed" | "gone") => keptRestored.filter((each) => each.file === file).map((each) => each.path);
+	const changed = of("changed");
+	const gone = of("gone");
+	keptRestored = [];
+	if (changed.length) notify(`${namesOf(changed)} changed on disk while ${changed.length === 1 ? "its" : "their"} unsaved text was kept. The unsaved text is open: saving will ask which to keep.`, "error");
+	if (gone.length) notify(`${namesOf(gone)} ${gone.length === 1 ? "is" : "are"} no longer on disk. ${gone.length === 1 ? "Its" : "Their"} unsaved text is open: save to put the ${gone.length === 1 ? "file" : "files"} back.`, "error");
+}
+
+/** Opens a tab for each unsaved text that no document has taken up yet, in the group at hand. */
+async function openKeptPending(root: string) {
+	for (const kept of [...keptPending.values()]) {
+		if (snapshot(state).workspace?.root !== root) return;
+		if (keptPending.get(kept.path) !== kept) continue;
+		let path: string;
+		if (isUntitled(kept.path)) {
+			if (!attachUntitledKept(kept)) continue;
+			path = kept.path;
+		} else {
+			try {
+				path = (await loadDoc(kept.path, true)).path;
+			} catch {
+				continue;
+			}
+			if (snapshot(state).workspace?.root !== root) return void letGoIfOnlyRead(path);
+			// The file has that text by now: nothing of it is unsaved, and it needs no tab for it.
+			if (!snapshot(state).dirty[path]) {
+				letGoIfOnlyRead(path);
+				continue;
+			}
+		}
+		setState((s) => {
+			const g = s.groups[s.activeGroup] ?? s.groups[0];
+			if (!g || s.groups.some((each) => each.tabs.includes(path))) return;
+			g.tabs.push(path);
+			g.active ??= path;
+		});
+	}
+	if (snapshot(state).workspace?.root === root) sayKeptRestored();
 }
 
 export async function loadProject() {
@@ -878,19 +1126,10 @@ export function newUntitled(group = snapshot(state).activeGroup, language = "pla
 	const targetGroup = Math.max(0, Math.min(group, Math.max(0, cur.groups.length - 1)));
 	if (!cur.groups[targetGroup]) return "";
 	let n = 1;
-	while (docs.has(`untitled:Untitled-${n}`)) n++;
+	// Not a name that unsaved text is still kept under, either: the two would be one document the next time.
+	while (docs.has(`untitled:Untitled-${n}`) || keptPending.has(`untitled:Untitled-${n}`)) n++;
 	const path = `untitled:Untitled-${n}`;
-	const uri = monaco.Uri.parse(path);
-	const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel("", language, uri);
-	const doc: Doc = { path, model, savedVersion: model.getAlternativeVersionId(), savedText: "", mtime: 0 };
-	docs.set(path, doc);
-	model.onDidChangeContent(() => {
-		const dirty = model.getAlternativeVersionId() !== doc.savedVersion && model.getValue() !== doc.savedText;
-		setState((s) => {
-			s.dirty[path] = dirty;
-		});
-	});
-	doc.validatorDispose = attachValidator(model, path, language);
+	attachUntitled(path, "", language);
 	closeComparison();
 	setState((s) => {
 		const g = s.groups[targetGroup];
@@ -907,6 +1146,39 @@ export function newUntitled(group = snapshot(state).activeGroup, language = "pla
 		focusEditor();
 	});
 	return path;
+}
+
+/** Makes a model the open document for a name that has no file yet, and follows its edits. With text, it is unsaved from the start. */
+function attachUntitled(path: string, text: string, language: string): Doc {
+	const uri = monaco.Uri.parse(path);
+	const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(text, language, uri);
+	const doc: Doc = { path, model, savedVersion: text === "" ? model.getAlternativeVersionId() : -1, savedText: "", mtime: 0 };
+	docs.set(path, doc);
+	model.onDidChangeContent(() => {
+		const dirty = model.getAlternativeVersionId() !== doc.savedVersion && model.getValue() !== doc.savedText;
+		setState((s) => {
+			s.dirty[path] = dirty;
+		});
+		keepUnsavedSoon();
+	});
+	doc.validatorDispose = attachValidator(model, path, language);
+	return doc;
+}
+
+/**
+ * A document with no file yet, as it was left: the text that was kept for it, unsaved (ADR 0034). Says whether
+ * it is there now. Its text is on record as kept, so that it is not written again until it changes.
+ */
+function attachUntitledKept(kept: KeptText): boolean {
+	if (keptPending.get(kept.path) === kept) keptPending.delete(kept.path);
+	if (docs.has(kept.path)) return true;
+	if (!kept.text) return false;
+	const doc = attachUntitled(kept.path, kept.text, kept.language || "plaintext");
+	keptVersions.set(kept.path, { model: doc.model, version: doc.model.getAlternativeVersionId() });
+	setState((s) => {
+		s.dirty[kept.path] = true;
+	});
+	return true;
 }
 
 function disposeDoc(doc: Doc) {
@@ -995,23 +1267,77 @@ function attach(path: string, text: string, saved: { text: string; mtime: number
 		// A file that is being written in is not one that was only looked at: its tab stays. Asked a moment later: a
 		// reload from disk is an edit too, and says the file is unchanged once it is done.
 		if (dirty) queueMicrotask(() => snapshot(state).dirty[path] && keepTab(path));
+		// And what is unsaved of it is kept, within the second (ADR 0034).
+		keepUnsavedSoon();
 	});
 	session.track(model);
 	doc.validatorDispose = attachValidator(model, path, model.getLanguageId());
 	return doc;
 }
 
-async function loadDoc(path: string): Promise<Doc> {
+/**
+ * The open document for a file, read from disk if it is not open yet. `forTab` is for a file that is being opened
+ * in a tab: it opens with the unsaved text that was kept for it, if there is any (ADR 0034). A file that is only
+ * read (a definition peeked at) is read as it is on disk, and the kept text waits for its tab.
+ */
+async function loadDoc(path: string, forTab = false): Promise<Doc> {
 	path = canonical(path);
 	const existing = docs.get(path);
 	if (existing) return existing;
-	const file = await backend.read(path);
+	const kept = forTab ? keptPending.get(path) : undefined;
+	let file: Awaited<ReturnType<typeof backend.read>> | null = null;
+	let unread = "";
+	try {
+		file = await backend.read(path);
+	} catch (e: any) {
+		// A file that is gone, or does not read, still has the text that was kept for it.
+		if (!kept) throw e;
+		unread = String(e?.message ?? e);
+	}
 	// Two callers may have asked for the same file while it was being read.
 	const known = docs.get(path);
 	if (known) return known;
+	if (kept && keptPending.get(path) === kept) {
+		keptPending.delete(path);
+		return attachKept(path, kept, file);
+	}
+	if (!file) throw new Error(unread);
 	const doc = attach(path, file.text, file);
 	doc.encoding = file.encoding;
 	doc.binary = file.binary;
+	return doc;
+}
+
+/**
+ * A file's document as it was left: the unsaved text that was kept for it, over the file as those edits found it
+ * (ADR 0034). It is as if the app had stayed open, so what happened to the file meanwhile is met as it is in an
+ * open document: a file that changed on disk is marked, and saving asks which to keep (ADR 0009); one that is gone
+ * is put back by saving. A file that has the kept text already has nothing unsaved, and opens as it is.
+ */
+function attachKept(path: string, kept: KeptText, file: { text: string; mtime: number; encoding?: string; binary?: { size: number; image?: string } } | null): Doc {
+	if (file && !file.binary && file.text === kept.text) {
+		const doc = attach(path, file.text, file);
+		doc.encoding = file.encoding;
+		// On record as kept, and not unsaved: the next keep forgets it.
+		keptVersions.set(path, { model: doc.model, version: doc.model.getAlternativeVersionId() });
+		keepUnsavedSoon(0);
+		return doc;
+	}
+	const same = Boolean(file && !file.binary && kept.saved && file.text === kept.saved.text);
+	// With the file as it was, its date now: a file that was only touched has not changed under these edits. With
+	// another file there, a date that is not its own, so that saving asks whatever the two dates are.
+	const mtime = same ? file!.mtime : kept.saved && kept.saved.mtime !== file?.mtime ? kept.saved.mtime : -1;
+	const base = { text: kept.saved?.text ?? "", mtime };
+	const doc = attach(path, kept.text, base);
+	if (file && !file.binary) doc.encoding = file.encoding;
+	// The backend has this text already, with this file under it.
+	keptVersions.set(path, { model: doc.model, version: doc.model.getAlternativeVersionId() });
+	if (kept.saved) keptBases.set(path, { text: kept.saved.text, mtime: kept.saved.mtime });
+	setState((s) => {
+		s.dirty[path] = true;
+		if (file && !same) s.conflicts[path] = true;
+	});
+	if (!same) keptRestored.push({ path, file: file ? "changed" : "gone" });
 	return doc;
 }
 
@@ -1093,7 +1419,7 @@ export async function openFile(path: string, options: { group?: number; reveal?:
 	// What was only read (a definition peeked at) had no tab to keep it true, and the file may have changed, gone, or
 	// been made anew since. It is let go, and the file is read as it is now: nothing of the old reading is left to undo.
 	letGoIfOnlyRead(path);
-	const doc = await guarded(() => loadDoc(path));
+	const doc = await guarded(() => loadDoc(path, true));
 	if (!doc) return;
 	const curAfterRead = snapshot(state);
 	// The folder changed while this file was being read: let the loaded model go instead of opening it in the new workspace.
@@ -2083,13 +2409,14 @@ on("notice", (said) => {
 });
 
 // The desktop window was asked to close with edits that are not on disk, or with a view open that may hold text
-// still being typed: `settleUnsaved` puts that text in its document first, and asks only if something is then unsaved.
+// still being typed: `leaveUnsavedKept` puts that text in its document, has what is unsaved kept, and the app is
+// closed without a question (ADR 0034). It asks only where the text could not be kept.
 let closePromptOpen = false;
 on("closeRequested", async () => {
 	if (closePromptOpen) return;
 	closePromptOpen = true;
 	try {
-		if (await settleUnsaved("Closing the window would lose them.")) await backend.closeWindow();
+		if (await leaveUnsavedKept("Closing the window would lose them.")) await backend.closeWindow();
 	} finally {
 		closePromptOpen = false;
 	}

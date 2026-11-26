@@ -20,11 +20,13 @@ evaluation (90 days, for testing and evaluation).
    pinned language server, and starts the self-test in the guest's desktop.
 6. `tools/windows-vm/vm.sh fetch` copies back `selftest.json` and the log.
 
-The close guard has its own check, `close-check.ps1`: it runs `hutch run
-selftest-close`, which leaves an edit unsaved and presses the window's close
-button, and writes `close-check.log` in the guest's home folder. Copy the
-script in and start it from a task in the desktop session, the way
-`provision.ps1` starts `selftest.ps1`. It passed on Windows 11 on 2026-11-18.
+Closing over unsaved text has its own check, `close-check.ps1`: it runs `hutch
+run selftest-close`, which leaves edits unsaved, presses the window's close
+button and starts the app again to find them (ADR 0034), and writes
+`close-check.log` in the guest's home folder. Copy the script in and start it
+from a task in the desktop session, the way `provision.ps1` starts
+`selftest.ps1`. The check of the question it replaced (ADR 0009) passed on
+Windows 11 on 2026-11-18.
 
 `install` and `run` start the VM in its own session and return, so closing
 the terminal does not stop it; shut it down from inside Windows. `vm.sh

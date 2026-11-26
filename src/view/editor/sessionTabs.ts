@@ -1,6 +1,6 @@
 // The tabs that were open in a folder, kept so that the folder opens next time
 // as it was left. Only which files and which one was in front: unsaved text is
-// not kept here (closing asks about it, ADR 0009).
+// not kept here but by the app itself, outside the window's storage (ADR 0034).
 
 export type TabGroup = { tabs: string[]; active: string | null; pinned?: string[] };
 export type TabSession = { groups: TabGroup[]; activeGroup: number };

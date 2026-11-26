@@ -82,7 +82,8 @@ const disposeOnce = () => {
 };
 
 // Electrobun asks before a window closes, and takes no for an answer: with
-// unsaved edits the window stays, and the view asks the user (ADR 0009).
+// unsaved edits the window stays for the moment it takes the view to have
+// their text kept, and the view then closes the app. Nothing is asked (ADR 0034).
 window.on("will-close", (event: unknown) => {
 	if (!backend.mayClose()) (event as { response?: { allow: boolean } }).response = { allow: false };
 });
@@ -91,7 +92,7 @@ window.on("close", () => {
 	disposeOnce();
 });
 
-// Cmd+Q / Dock Quit / Utils.quit() also check for unsaved work and clean up synchronously when allowed.
+// Cmd+Q / Dock Quit / Utils.quit() also have unsaved work kept first, and clean up synchronously when allowed.
 Electrobun.events.on("before-quit", (event: ElectrobunEvent<{}, { allow: boolean }>) => {
 	if (!backend.mayClose()) {
 		event.response = { allow: false };

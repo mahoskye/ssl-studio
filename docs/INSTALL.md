@@ -71,11 +71,13 @@ change the chart and rebuild, write the tests), on a copy of the workspace, with
 fake in place of a model. On that copy it also presses "Set up project" and reads the documents
 that makes, rendered and as text. It costs nothing.
 
-`hutch run selftest-close` checks that closing the window never loses work. It makes an edit on a
-copy of the workspace, leaves it unsaved, and presses the window's close button from outside. The
-window has to stay and ask; cancelled, the edit is still there; asked again and told to save, the
-app saves the file and closes. It runs on Linux with X11 and `xdotool`, and on Windows; it is not
-written for macOS.
+`hutch run selftest-close` checks that closing the window never loses work and never asks
+([ADR 0034](adr/0034-closing-keeps-unsaved-work-and-asks-nothing.md)). On a copy of the workspace it
+edits a file, writes in a document that has no file yet, leaves both unsaved, and presses the
+window's close button from outside. The app has to close by itself, with the file on disk as it
+was. Started again, it has to show both documents unsaved with every line they were left with;
+the file is then saved, and the window closed once more. It runs on Linux with X11 and `xdotool`,
+and on Windows; it is not written for macOS.
 
 ## A local model through Ollama
 

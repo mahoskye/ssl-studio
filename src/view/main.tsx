@@ -1,6 +1,6 @@
 import { registerMarkdownLinks } from "./editor/markdownLinks";
 import "./style.css";
-import { createSignal, Errored, Show, snapshot } from "solid-js";
+import { createSignal, Errored, Show } from "solid-js";
 import { render } from "@solidjs/web";
 import { App } from "./App";
 import { connect, backend, onConnectionLost } from "./backend";
@@ -11,7 +11,7 @@ import "./editor/opener";
 import { loadGrammar } from "./editor/textmate";
 import { registerProviders, session } from "./lsp/session";
 import { syncWorkspaceThreads } from "./agent/store";
-import { canonical, commitPendingEdits, loadProject, loadSettings, log, notify, notSavedText, reloadWithoutTabs, restoreTabs, saveAllUnasked, setState, snapshotUnsavedPaths, state, unsavedPaths } from "./state";
+import { canonical, keepUnsavedOnLeave, loadProject, loadSettings, log, notify, notSavedText, reloadWithoutTabs, restoreTabs, saveAllUnasked, setState, state, unsavedPaths } from "./state";
 import { applyFonts, applyTheme, resolveTheme, shapeEditorMenus } from "./themes/themes";
 
 export const errors: string[] = [];
@@ -60,15 +60,10 @@ async function start() {
 	};
 	window.addEventListener("dragover", preventFileDropNavigation);
 	window.addEventListener("drop", preventFileDropNavigation);
-	// Closing or reloading the window with edits that are not on disk asks first.
-	window.addEventListener("beforeunload", (e) => {
-		// A cell still being typed in counts: it is put in its document first, so the question is asked for it too.
-		commitPendingEdits();
-		if (snapshot(state).info?.selftest || !snapshotUnsavedPaths().length) return;
-		e.preventDefault();
-		e.returnValue = "";
-	});
-	onConnectionLost(() => notify("The connection to SSL Studio was lost, so nothing can be read or saved. Reload the page; unsaved edits in this tab will be lost, so copy them out first.", "error"));
+	// Closing or reloading the window with edits that are not on disk asks nothing: their text is sent to be kept
+	// as the page goes, a cell still being typed in with it, and comes back with the folder (ADR 0034).
+	window.addEventListener("beforeunload", () => keepUnsavedOnLeave());
+	onConnectionLost(() => notify("The connection to SSL Studio was lost, so nothing can be read or saved. Reload the page: unsaved text comes back as it was kept before the connection was lost. What was typed since is not kept, so copy it out first.", "error"));
 	// The app may have been started with a folder: pick it up.
 	const workspace = await backend.workspace();
 	if (workspace) {

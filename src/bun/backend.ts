@@ -13,6 +13,7 @@ import { LspProcess } from "./lsp";
 import { catalogFilesOf, docAudit, docsTruncated, EXPORT_TYPES, fileManifest, linksTo, listDocs, namesIn, readExport, readProject, setupProject, tomlProblem, undoSetup } from "./project";
 import { recent, SettingsStore } from "./settings";
 import { findLsp, findOpencode } from "./tools";
+import { Unsaved, unsavedNotKept } from "./unsaved";
 import { fileKey, WorkspaceFiles } from "./workspace";
 import { Git } from "./git";
 import { Agent } from "./agent";
@@ -21,8 +22,8 @@ import { formatDocument } from "./format";
 const IMPORT_MAX_BYTES = 20 * 1024 * 1024;
 const ALLOWED_IMPORT_EXTS = new Set([".docx", ".html", ".htm", ".md", ".markdown"]);
 /**
- * How long the view has to answer a close that only text being typed stands in the way of, in milliseconds. It
- * answers in a few (it counts the unsaved files, or closes the app): one that has not by now will not.
+ * How long the view has to answer a close that unsaved text stands in the way of, in milliseconds. It answers in
+ * a few (it has the text kept, and closes the app): one that has not by now will not.
  */
 export const VIEW_ANSWERS_WITHIN = 2000;
 
@@ -172,8 +173,17 @@ export function createBackend(host: Host, initial?: string) {
 	 * it: the window closed at once on that count, and the text went with it, unasked.
 	 */
 	let typing = false;
-	/** When the view was asked about a close that only such text stood in the way of, and has said nothing since; 0 otherwise. */
-	let askedOfTyping = 0;
+	/** When the view was sent a close that unsaved text stood in the way of, and has said nothing since; 0 otherwise. */
+	let askedToClose = 0;
+	/** The unsaved text kept for each folder while it is not open (ADR 0034). */
+	const kept = new Unsaved();
+	/** The folders that were open in this run: unsaved text is kept for these, and for no folder a caller merely names. */
+	const wasOpen = new Set<string>();
+	/**
+	 * What keeping unsaved text last failed with; null while it works. While it fails, the window is not let go
+	 * over a view that does not answer, and the person is told once for a cause, not at every key.
+	 */
+	let keepFailed: string | null = null;
 
 	async function loadInfo(): Promise<Info> {
 		const seq = ++infoSeq;
@@ -196,6 +206,7 @@ export function createBackend(host: Host, initial?: string) {
 		const prevAsked = asked;
 		files = nextFiles;
 		history = nextHistory;
+		wasOpen.add(fileKey(nextFiles.root));
 		lsp = null;
 		lspPath = "";
 		const restartSeq = ++lspRestartSeq;
@@ -437,12 +448,12 @@ export function createBackend(host: Host, initial?: string) {
 		setupUndo: async () => undoSetup(need().root),
 		unsavedChanged: async (count) => {
 			if (closing) return;
-			askedOfTyping = 0;
+			askedToClose = 0;
 			unsaved = Math.max(0, Number(count) || 0);
 		},
 		typingChanged: async (held) => {
 			if (closing) return;
-			askedOfTyping = 0;
+			askedToClose = 0;
 			typing = held === true;
 		},
 		closeWindow: async () => {
@@ -450,6 +461,24 @@ export function createBackend(host: Host, initial?: string) {
 			unsaved = 0;
 			setTimeout(() => host.quit(), 50);
 		},
+		unsavedKeep: async (root, keep, drop) => {
+			// The view is there, and at work on what was asked of it.
+			askedToClose = 0;
+			if (typeof root !== "string" || !root || !wasOpen.has(fileKey(root))) throw new Error(`unsaved text is kept only for a folder that was opened here: ${String(root)}`);
+			try {
+				await kept.keep(root, Array.isArray(keep) ? keep : [], Array.isArray(drop) ? drop : []);
+				keepFailed = null;
+			} catch (e: any) {
+				const why = String(e?.code ?? e?.message ?? e);
+				if (why !== keepFailed) {
+					console.error(`Unsaved text is not being kept: ${e?.message ?? e}`);
+					host.emit("notice", { kind: "error", text: unsavedNotKept(kept.base, String(e?.message ?? e)) });
+				}
+				keepFailed = why;
+				throw e;
+			}
+		},
+		unsavedKept: async () => kept.list(need().root),
 		docs: async (options) => {
 			const ws = need();
 			const effective = options?.templatesFolder !== undefined ? options.templatesFolder : (await settings.load()).effective.templatesFolder;
@@ -804,24 +833,23 @@ export function createBackend(host: Host, initial?: string) {
 		api,
 		ready,
 		/**
-		 * Asked when the window is about to close. With unsaved edits the answer is
-		 * no, and the view is told to ask the user; it closes the app itself once
-		 * they have saved or chosen to discard (ADR 0009).
+		 * Asked when the window is about to close. With nothing unsaved the answer is yes. With unsaved edits it is
+		 * no, this once: the view is sent for, has the text of what is unsaved kept in the app's own files, and closes
+		 * the app itself, which takes a moment and asks nothing (ADR 0034). The text comes back, still unsaved, when
+		 * the folder is opened again. Only where it could not be kept does the view ask what to do (ADR 0009).
 		 *
 		 * The answer is also no while a view may hold text still being typed: this cannot wait for the view, so the
-		 * count it answers from is the one from before that text is in its document. The view puts it there and counts
-		 * again: with nothing unsaved then, it closes the app at once and asks nothing. With no such view open the
-		 * window closes on the count as before, without that detour.
+		 * count it answers from is the one from before that text is in its document. The view puts it there first.
+		 *
+		 * A view that was sent for a while ago and has said nothing since is not there to answer (it crashed, or
+		 * hangs): the window is let go on a later request. What it kept as the text was typed is what there is then,
+		 * which is all but the last moment. Not while keeping fails: then nothing vouches for the text, and the window
+		 * stays until the view has answered, as it did before any text was kept.
 		 */
 		mayClose: () => {
 			if (closing || (!unsaved && !typing)) return true;
-			if (!unsaved) {
-				// Nothing is unsaved by the count, and the view was asked about this a while ago and has said nothing
-				// since: it is not there to answer (it crashed, or hangs). The window is let go on a second request,
-				// as it was on the first before typed text was asked about at all.
-				if (askedOfTyping && Date.now() - askedOfTyping > VIEW_ANSWERS_WITHIN) return true;
-				askedOfTyping ||= Date.now();
-			}
+			if (askedToClose && Date.now() - askedToClose > VIEW_ANSWERS_WITHIN && !(unsaved && keepFailed)) return true;
+			askedToClose ||= Date.now();
 			host.emit("closeRequested", {});
 			return false;
 		},
