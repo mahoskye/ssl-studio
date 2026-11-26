@@ -25,8 +25,7 @@ run selftest-close`, which leaves edits unsaved, presses the window's close
 button and starts the app again to find them (ADR 0034), and writes
 `close-check.log` in the guest's home folder. Copy the script in and start it
 from a task in the desktop session, the way `provision.ps1` starts
-`selftest.ps1`. The check of the question it replaced (ADR 0009) passed on
-Windows 11 on 2026-11-18.
+`selftest.ps1`. It passed on Windows 11 on 2026-11-26.
 
 `install` and `run` start the VM in its own session and return, so closing
 the terminal does not stop it; shut it down from inside Windows. `vm.sh

@@ -100,10 +100,10 @@ VS Code as the precedent for the IDE shell.
   not reopen files with unsaved text either, since one of them may be the tab
   that fails. It says which files have unsaved text kept, and they come back
   when the file is opened.
-- `hutch run selftest-close` checks it in the real window, on Linux (X11).
-  It leaves a file and a document with no file unsaved, presses the close
-  button from outside, and starts the app again: the app has to close by
-  itself and ask nothing, the file on disk has to be untouched, and both
-  documents have to be back, unsaved, with every line. It has not been run on
-  Windows since this change, and there is still no way written to press the
-  button on macOS.
+- `hutch run selftest-close` checks it in the real window. It leaves a file
+  and a document with no file unsaved, presses the close button from outside,
+  and starts the app again: the app has to close by itself and ask nothing,
+  the file on disk has to be untouched, and both documents have to be back,
+  unsaved, with every line. It passes on Linux (X11) and on Windows 11 (in the
+  evaluation VM, 2026-11-26). There is still no way written to press the
+  button on macOS, where none of this has been run.
