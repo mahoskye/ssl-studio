@@ -61,6 +61,7 @@ shell: VS Code).
 | Ctrl+M | Jumps to the matching bracket |
 | Ctrl+Shift+M | Selects to the bracket |
 | Ctrl+K Ctrl+0 | Unfolds everything |
+| Ctrl+Shift+/ | Toggles a block comment |
 
 - On a Mac the keys are Sublime Text's for a Mac: Cmd where the table says
   Ctrl, except the two bracket keys, which are on Ctrl itself. Moving a
@@ -118,8 +119,10 @@ shell: VS Code).
   hints". What the language server knows is asked for as in VS Code.
 - **F2 and Ctrl+F2** stay "rename" and "change all occurrences". Sublime
   Text keeps bookmarks on them, and this editor has no bookmarks.
-- **The block comment key** is not changed until toggling a comment is
-  right for SSL, which needs the language server.
+- **The editor's own keys for a block comment** stay beside Sublime
+  Text's: Ctrl+Shift+A on Linux, Shift+Alt+A on Windows. Toggling a comment
+  is right for SSL since
+  [ADR 0035](0035-toggling-a-comment-is-the-editors-own.md).
 
 ## Consequences
 

@@ -911,7 +911,7 @@ describe("The code editor's everyday editing: completion ranges, format on save,
 
 describe("The code editor's keys are Sublime Text's for editing (ADR 0034)", () => {
 	type Rule = { keybinding: number; command: string; when?: string };
-	const CODES = { KeyD: 34, KeyG: 37, KeyJ: 40, KeyK: 41, KeyL: 42, KeyM: 43, KeyU: 51, UpArrow: 16, DownArrow: 18, Delete: 20, Backspace: 1, Digit0: 21, F3: 61, F5: 63, F9: 67 };
+	const CODES = { KeyD: 34, KeyG: 37, KeyJ: 40, KeyK: 41, KeyL: 42, KeyM: 43, KeyU: 51, UpArrow: 16, DownArrow: 18, Delete: 20, Backspace: 1, Digit0: 21, F3: 61, F5: 63, F9: 67, Slash: 90 };
 	const CTRL = 2048;
 	const SHIFT = 1024;
 	const ALT = 512;
@@ -959,6 +959,7 @@ describe("The code editor's keys are Sublime Text's for editing (ADR 0034)", () 
 		expect(bound(rules, ALT | CODES.F3)).toEqual(["editor.action.selectHighlights"]);
 		expect(bound(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.Digit0))).toEqual(["editor.unfoldAll"]);
 		expect(freed(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.Digit0))).toEqual(["editor.foldAll"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.Slash)).toEqual(["editor.action.blockComment"]);
 		// The bracket keys: Ctrl+M no longer turns Tab off.
 		expect(bound(rules, CTRL | CODES.KeyM)).toEqual(["editor.action.jumpToBracket"]);
 		expect(freed(rules, CTRL | CODES.KeyM)).toEqual(["editor.action.toggleTabFocusMode"]);
@@ -972,8 +973,8 @@ describe("The code editor's keys are Sublime Text's for editing (ADR 0034)", () 
 			expect(adds.length).toBeGreaterThan(12);
 			expect(new Set(adds.map((r) => r.keybinding)).size).toBe(adds.length);
 			for (const rule of adds) expect(rule.when?.startsWith("editorTextFocus")).toBe(true);
-			const changes = adds.filter((r) => /duplicate|joinLines|moveLines|sortLines|deleteAll|transformTo/.test(r.command));
-			expect(changes.length).toBeGreaterThan(7);
+			const changes = adds.filter((r) => /duplicate|joinLines|moveLines|sortLines|deleteAll|transformTo|blockComment/.test(r.command));
+			expect(changes.length).toBeGreaterThan(8);
 			for (const rule of changes) expect(rule.when).toBe("editorTextFocus && !editorReadonly");
 			// A command is let go from a key before the key is given: the order the editor reads them in.
 			for (const rule of rules.filter((r) => r.command.startsWith("-"))) {

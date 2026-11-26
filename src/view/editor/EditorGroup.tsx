@@ -38,6 +38,7 @@ import { docsGoverningFile, ticketForFile } from "../../shared/workContext";
 import { TableView } from "./TableView";
 import { FileView } from "./FileView";
 import { useGitMarks } from "./gitMarks";
+import { installCommentCommands } from "./sslComments";
 import { observeMarkerHoverSeverity } from "./hoverSeverity";
 import { Start } from "../Start";
 import { FileMark } from "../FileMark";
@@ -407,6 +408,8 @@ export function EditorGroup(props: { index: number }) {
 		// The code's own face, read before any custom font overrides.
 		codeFont = editor.getOption(monaco.editor.EditorOption.fontFamily);
 		const listKeys = continueLists(editor);
+		// "Toggle comment" as a script needs it, under the editor's own commands and keys.
+		const commentCommands = installCommentCommands(editor);
 		const stopHoverSeverity = observeMarkerHoverSeverity(editor);
 		setRoomy(editor.getLayoutInfo().width >= MINIMAP_FROM);
 		editor.onDidLayoutChange((layout) => setRoomy(layout.width >= MINIMAP_FROM));
@@ -475,6 +478,7 @@ export function EditorGroup(props: { index: number }) {
 			stop();
 			stopFocus();
 			listKeys.dispose();
+			commentCommands.dispose();
 			stopHoverSeverity();
 			disposeGitMarks?.();
 			setMountedEditor(undefined);

@@ -64,6 +64,8 @@ export function setEditorKeys() {
 		// Brackets.
 		{ key: ctrl | K.KeyM, command: "editor.action.jumpToBracket", when: text, frees: mac ? [] : ["editor.action.toggleTabFocusMode"] },
 		{ key: ctrl | M.Shift | K.KeyM, command: "editor.action.selectToBracket", when: text, frees: mac ? ["editor.action.toggleTabFocusMode"] : [] },
+		// Sublime Text's key for a block comment, beside the editor's own (which differs from system to system).
+		{ key: M.CtrlCmd | M.Shift | K.Slash, command: "editor.action.blockComment", when: writing },
 		// Folds: the editor's Ctrl+K Ctrl+0 folds everything, Sublime Text's unfolds everything.
 		{ key: chord(K.KeyK, K.Digit0), command: "editor.unfoldAll", when: text, frees: ["editor.foldAll"] },
 	];
@@ -72,10 +74,19 @@ export function setEditorKeys() {
 	);
 }
 
+let commentTokens: { open: string; close: string } | null = null;
+/**
+ * What an SSL comment opens and closes with, as the language configuration says it (`comments.blockComment`):
+ * what the editor's comment commands write and take away (sslComments.ts). Null until the configuration is read.
+ */
+export const sslCommentTokens = () => commentTokens;
+
 /** Comment markers and brackets from the formatter extension's language configuration. */
 export async function loadLanguageConfiguration() {
 	const config = await fetch("./grammar/language-configuration.json").then((r) => r.json());
 	const { comments, brackets, autoClosingPairs, surroundingPairs } = config;
+	const [open, close] = comments?.blockComment ?? [];
+	commentTokens = typeof open === "string" && typeof close === "string" && open && close ? { open, close } : null;
 	monaco.languages.setLanguageConfiguration("ssl", {
 		comments,
 		brackets,
