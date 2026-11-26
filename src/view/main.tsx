@@ -48,7 +48,7 @@ async function start() {
 	applyFonts(state.settings);
 	applyTheme(resolveTheme(state.settings.theme, state.themes, undefined, state.settings.themeMaterial));
 	shapeEditorMenus();
-	registerProviders();
+	registerProviders((text) => notify(text));
 	registerMarkdownLinks();
 	installKeys();
 	installContextMenu();

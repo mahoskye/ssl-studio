@@ -778,7 +778,27 @@ export function completionContext(context?: { triggerKind?: number; triggerChara
 	return context?.triggerCharacter ? { triggerKind, triggerCharacter: context.triggerCharacter } : { triggerKind };
 }
 
-export function registerProviders() {
+/**
+ * What is said of a rename the server answered with no edits. It answers so for a new name it will not take (a
+ * keyword, the name of a built-in function, something that is no name), and gives no reason. Which of its rules
+ * said no is not for the app to guess, which knows no SSL: this says what was asked, and that nothing changed.
+ */
+export const renameRefusal = (from: string, to: string) =>
+	from ? `The language server would not rename “${from}” to “${to}”. Nothing was changed.` : `The language server would not take “${to}” as the new name. Nothing was changed.`;
+
+/** What is said of a rename that failed: the server's own words where it gave any (a reason, should it come to give one). */
+export const renameFailure = (err: unknown) => {
+	const said = String((err as { message?: unknown } | null)?.message ?? "").trim();
+	return said ? `Nothing was renamed: ${said}` : "Nothing was renamed: the language server did not answer.";
+};
+
+/**
+ * Puts the language server behind the editor's own features for SSL: completion, hover, going to a definition,
+ * rename and the rest.
+ *
+ * `tell` is where a thing the user has to hear of is said, the app's notices. The session draws nothing itself.
+ */
+export function registerProviders(tell: (text: string) => void = () => {}) {
 	monaco.languages.registerCompletionItemProvider("ssl", {
 		triggerCharacters: [":"],
 		async provideCompletionItems(model, position, context) {
@@ -862,25 +882,31 @@ export function registerProviders() {
 			);
 		},
 	});
+	/** The name the server last said a rename is of, and in which document: what the editor's box opened with. */
+	let renaming = { uri: "", name: "" };
 	monaco.languages.registerRenameProvider("ssl", {
 		async provideRenameEdits(model, position, newName) {
-			if (!isServed(model)) return { edits: [], rejectReason: "Nothing to rename here." };
-			let edit: any;
-			try {
-				edit = await session.request("textDocument/rename", { ...doc(model), position: toPosition(position), newName });
-			} catch (err: any) {
-				return { edits: [], rejectReason: String(err?.message ?? "Rename failed.") };
-			}
+			// A reason given back to the editor here goes to its notifications, and this editor's are written to the
+			// console and nowhere else: the box closed, nothing changed and nothing was said. So it is told as well.
+			const refuse = (reason: string) => (tell(reason), { edits: [], rejectReason: reason });
+			if (!isServed(model)) return refuse("Nothing to rename here.");
 			const edits: monaco.languages.IWorkspaceTextEdit[] = [];
-			const changes: Record<string, any[]> = { ...(edit?.changes ?? {}) };
-			for (const change of edit?.documentChanges ?? []) {
-				if (!change?.textDocument?.uri || !Array.isArray(change.edits)) continue;
-				changes[change.textDocument.uri] = [...(changes[change.textDocument.uri] ?? []), ...change.edits];
+			try {
+				const edit: any = await session.request("textDocument/rename", { ...doc(model), position: toPosition(position), newName });
+				const changes: Record<string, any[]> = { ...(edit?.changes ?? {}) };
+				for (const change of edit?.documentChanges ?? []) {
+					if (!change?.textDocument?.uri || !Array.isArray(change.edits)) continue;
+					changes[change.textDocument.uri] = [...(changes[change.textDocument.uri] ?? []), ...change.edits];
+				}
+				for (const [uri, list] of Object.entries(changes)) {
+					if (!list?.length) continue;
+					await session.ensureModel(uri);
+					for (const e of list) edits.push({ resource: monaco.Uri.parse(uri), textEdit: { range: toRange(e.range), text: e.newText }, versionId: undefined });
+				}
+			} catch (err: any) {
+				return refuse(renameFailure(err));
 			}
-			for (const [uri, list] of Object.entries(changes)) {
-				await session.ensureModel(uri);
-				for (const e of list) edits.push({ resource: monaco.Uri.parse(uri), textEdit: { range: toRange(e.range), text: e.newText }, versionId: undefined });
-			}
+			if (!edits.length) return refuse(renameRefusal(renaming.uri === model.uri.toString() ? renaming.name : "", newName));
 			return { edits };
 		},
 		async resolveRenameLocation(model, position) {
@@ -895,7 +921,9 @@ export function registerProviders() {
 			}
 			if (!result) return { range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column), text: "", rejectReason: "Nothing to rename here." };
 			const range = toRange(result.range ?? result);
-			return { range, text: result.placeholder ?? model.getValueInRange(range) };
+			const text = result.placeholder ?? model.getValueInRange(range);
+			renaming = { uri: model.uri.toString(), name: text };
+			return { range, text };
 		},
 	});
 	monaco.languages.registerDocumentSymbolProvider("ssl", {

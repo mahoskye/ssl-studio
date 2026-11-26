@@ -75,6 +75,15 @@ export function formatter(path: string) {
 			send({ method: "textDocument/didClose", params: { textDocument: { uri } } });
 			return answer?.tokens ?? [];
 		},
+		/** What the server answers when the name at a place in a text is to be renamed: its `textDocument/rename`, as it came. */
+		async rename(text: string, position: { line: number; character: number }, newName: string): Promise<any> {
+			await started;
+			const uri = `file:///ws/.ssl-studio/rename-${++count}.ssl`;
+			send({ method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "ssl", version: 1, text } } });
+			const answer = await request("textDocument/rename", { textDocument: { uri }, position, newName });
+			send({ method: "textDocument/didClose", params: { textDocument: { uri } } });
+			return answer;
+		},
 		stop: () => void child.kill(),
 	};
 }

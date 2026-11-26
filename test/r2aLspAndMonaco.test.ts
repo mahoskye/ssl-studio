@@ -9,6 +9,8 @@ import { LspProcess } from "../src/bun/lsp";
 import { LEGEND, semanticRules, tokenStyle, translateTokens } from "../src/view/editor/semantic";
 import { LspClient } from "../src/view/lsp/client";
 import { applyTextEdits, changedRanges } from "../src/view/lsp/edits";
+import { LSP_PIN } from "../src/bun/tools";
+import { formatter, pinnedServer } from "./pinnedFormatter";
 
 // Minimal browser & Monaco shims so editor/LSP view modules load cleanly under Bun tests.
 if (typeof (globalThis as any).window === "undefined") {
@@ -886,6 +888,78 @@ describe("The code editor's everyday editing: completion ranges, format on save,
 		}
 	});
 
+	test("a rename the server makes nothing of is said, with what was asked; one it makes is not", async () => {
+		const { registerProviders, renameFailure, renameRefusal, session: shared } = await import("../src/view/lsp/session");
+		const { monaco } = await import("../src/view/editor/monaco");
+		let provider: any;
+		const languages = monaco.languages as any;
+		const registered = languages.registerRenameProvider;
+		languages.registerRenameProvider = (_language: string, given: any) => ((provider = given), { dispose() {} });
+		const told: string[] = [];
+		registerProviders((text) => void told.push(text));
+		languages.registerRenameProvider = registered;
+
+		const model = makeFakeModel("dResult := dStart + nCount;", "file:///ws/rename.ssl");
+		const uri = model.uri.toString();
+		const at = { lineNumber: 1, column: 3 };
+		const whole = { start: { line: 0, character: 0 }, end: { line: 0, character: 7 } };
+		const request = shared.request;
+		const ensureModel = shared.ensureModel;
+		let answer: (method: string) => any = () => null;
+		(shared as any).request = async (method: string) => answer(method);
+		shared.ensureModel = async () => model;
+		try {
+			// Before the editor asks for the name: with no name from the server, the new one alone is said.
+			expect(await provider.provideRenameEdits(model, at, "IF")).toEqual({ edits: [], rejectReason: renameRefusal("", "IF") });
+			expect(told).toEqual(["The language server would not take “IF” as the new name. Nothing was changed."]);
+
+			// The editor asks where the name is, then for the edits. No answer, and an answer with nothing in it.
+			answer = (method) => (method === "textDocument/prepareRename" ? { range: whole, placeholder: "dResult" } : null);
+			expect((await provider.resolveRenameLocation(model, at)).text).toBe("dResult");
+			told.length = 0;
+			expect(await provider.provideRenameEdits(model, at, "IF")).toEqual({ edits: [], rejectReason: renameRefusal("dResult", "IF") });
+			answer = () => ({ changes: { [uri]: [] }, documentChanges: [{ textDocument: { uri }, edits: [] }] });
+			expect((await provider.provideRenameEdits(model, at, "my-var")).rejectReason).toBe(renameRefusal("dResult", "my-var"));
+			expect(told).toEqual(["The language server would not rename “dResult” to “IF”. Nothing was changed.", "The language server would not rename “dResult” to “my-var”. Nothing was changed."]);
+
+			// The name asked about in one document is not said of a rename in another.
+			const other = makeFakeModel("x := 1;", "file:///ws/other.ssl");
+			answer = () => null;
+			expect((await provider.provideRenameEdits(other, at, "IF")).rejectReason).toBe(renameRefusal("", "IF"));
+			other.dispose();
+
+			// A failure is said in the server's words, where it gave any.
+			told.length = 0;
+			answer = () => {
+				throw new Error("“IF” is a keyword.");
+			};
+			expect(await provider.provideRenameEdits(model, at, "IF")).toEqual({ edits: [], rejectReason: "Nothing was renamed: “IF” is a keyword." });
+			expect(told).toEqual(["Nothing was renamed: “IF” is a keyword."]);
+			expect(renameFailure(null)).toBe("Nothing was renamed: the language server did not answer.");
+			expect(renameFailure(new Error("  "))).toBe("Nothing was renamed: the language server did not answer.");
+
+			// A rename the server makes: its edits, in whichever of the protocol's two ways it gives them, and not a word.
+			told.length = 0;
+			for (const given of [{ changes: { [uri]: [{ range: whole, newText: "dOut" }] } }, { documentChanges: [{ textDocument: { uri }, edits: [{ range: whole, newText: "dOut" }] }] }]) {
+				answer = () => given;
+				const made = await provider.provideRenameEdits(model, at, "dOut");
+				expect(made.rejectReason).toBeUndefined();
+				expect(made.edits.map((e: any) => [e.resource.toString(), e.textEdit.text, e.textEdit.range.startColumn, e.textEdit.range.endColumn])).toEqual([[uri, "dOut", 1, 8]]);
+			}
+			expect(told).toEqual([]);
+
+			// A model that is no document of the user's has nothing to rename, and that is said too.
+			const preview = makeFakeModel("x := 1;", "inmemory://model/7");
+			expect((await provider.provideRenameEdits(preview, at, "y")).rejectReason).toBe("Nothing to rename here.");
+			expect(told).toEqual(["Nothing to rename here."]);
+			preview.dispose();
+		} finally {
+			(shared as any).request = request;
+			shared.ensureModel = ensureModel;
+			model.dispose();
+		}
+	});
+
 	test("a script not yet saved is the server's to read; a model that is no document of the user's is not", async () => {
 		const sess = new LspSession();
 		const sent: { method: string; params: any }[] = [];
@@ -1144,5 +1218,25 @@ describe("A data source shown as SQL is still the server's to read (ADR 0038)", 
 		leave();
 		await sess.start("/ws");
 		expect(told).toBe(2);
+	});
+});
+
+// The server itself: what the notice above rests on.
+const pinned = pinnedServer();
+
+describe.skipIf(!pinned)(`starlims-lsp ${LSP_PIN}: a rename to a name it will not take is answered with nothing`, () => {
+	const lsp = pinned ? formatter(pinned) : null;
+	afterAll(() => lsp?.stop());
+	const SCRIPT = [":PROCEDURE AddDays;", ":PARAMETERS dStart, nCount;", ":DECLARE dResult;", "dResult := dStart + nCount;", ":RETURN dResult;", ":ENDPROC;", ""].join("\n");
+	const onResult = { line: 3, character: 2 };
+
+	test("no edits and no reason, for a keyword, a built-in name and what is no name; edits for a name it takes", async () => {
+		// Should the server come to give a reason (an error with its words), this fails with them, and the app
+		// already says a failure's words: the notice then needs nothing but this test rewritten.
+		for (const name of ["IF", "Len", "NIL", "my-var", "1 bad name"]) expect([name, await lsp!.rename(SCRIPT, onResult, name)]).toEqual([name, null]);
+		const made = await lsp!.rename(SCRIPT, onResult, "dOut");
+		const edits = Object.values(made?.changes ?? {}).flat() as { newText: string }[];
+		expect(edits.length).toBe(3);
+		expect(edits.every((edit) => edit.newText === "dOut")).toBe(true);
 	});
 });
