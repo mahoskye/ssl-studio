@@ -57,6 +57,30 @@ export function keyNamesForPlatform(e: KeyPress, mac: boolean): string[] {
 	return keyNames(e);
 }
 
+/**
+ * On a Mac, Option and a letter type another character (Option+C is "ç"), and the press is named by it: a key
+ * written by its letter ("alt+c") would never be the press. These are the names the press has by the letter on
+ * the key, for the lists whose keys are written that way; none where the press is named by its letter already.
+ */
+export function keyNamesByLetter(e: KeyPress, mac: boolean): string[] {
+	if (!mac || !e.altKey) return [];
+	const letter = /^Key([A-Z])$/.exec(e.code ?? "")?.[1]?.toLowerCase();
+	if (!letter || e.key.toLowerCase() === letter) return [];
+	return keyNamesForPlatform({ key: letter, code: e.code, ctrlKey: e.ctrlKey, metaKey: e.metaKey, altKey: e.altKey, shiftKey: e.shiftKey }, mac);
+}
+
+/**
+ * The name a press is saved by in a list whose keys are written once for every system, with "ctrl" where a Mac
+ * holds Cmd (Markdown's keys): the press's first name, and on a Mac its name by Ctrl and by the letter on the key,
+ * so that the key recorded is the key the list would have named.
+ */
+export function sharedKeyName(e: KeyPress, mac: boolean): string | undefined {
+	const names = keyNamesForPlatform(e, mac);
+	if (!mac) return names[0];
+	const all = [...keyNamesByLetter(e, mac), ...names];
+	return all.find((name) => name.startsWith("ctrl+")) ?? all[0];
+}
+
 type Parsed = { cmd: boolean; ctrl: boolean; alt: boolean; shift: boolean; key: string };
 function parse(name: string): Parsed {
 	const out: Parsed = { cmd: false, ctrl: false, alt: false, shift: false, key: name };

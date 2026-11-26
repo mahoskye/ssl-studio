@@ -1,7 +1,7 @@
 // What the keys do in a Markdown document's text in Monaco Source mode (matching
-// CodeMirror 6 Live Preview 1:1): smart list Enter/Tab/Backspace and Obsidian
-// inline formatting shortcuts (Ctrl+B, Ctrl+I, Ctrl+Shift+X, Ctrl+`, Ctrl+Alt+H,
-// Ctrl+K, Alt+C / Ctrl+Alt+Enter). Every rule lives in shared/markdownEdit.ts and
+// CodeMirror 6 Live Preview 1:1): smart list Enter/Tab/Backspace, and Obsidian's
+// inline formatting commands, whose keys are Markdown's own list in Settings
+// (ADR 0041). Every rule lives in shared/markdownEdit.ts and
 // shared/markdownText.ts and mutates only the touched ranges (ADR 0002).
 import { fenced } from "../../shared/catalog";
 import {
@@ -124,8 +124,8 @@ export function runMonacoMarkdownAction(editor: monaco.editor.IStandaloneCodeEdi
 
 /**
  * Binds Obsidian-style Markdown editing keys (Enter, Tab/Shift-Tab on lists, Backspace
- * on block markers, and Ctrl+B/I/K/L/Shift+X/`/Alt+H formatting) for this Monaco editor
- * in Source mode so Source and Live Preview share identical text-editing ergonomics.
+ * on block markers) for this Monaco editor, and gives it Markdown's formatting commands,
+ * so Source and Live Preview share identical text-editing ergonomics.
  */
 export function continueLists(editor: monaco.editor.IStandaloneCodeEditor): monaco.IDisposable {
 	const disposables: monaco.IDisposable[] = [];
@@ -249,28 +249,24 @@ export function continueLists(editor: monaco.editor.IStandaloneCodeEditor): mona
 		}),
 	);
 
-	// Obsidian inline formatting shortcuts in Source mode too!
-	const formatBindings: [id: string, label: string, keys: number[]][] = [
-		["md-bold", "Markdown: Bold", [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyB]],
-		["md-italic", "Markdown: Italic", [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyI]],
-		["md-strike", "Markdown: Strikethrough", [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyX]],
-		["md-code", "Markdown: Inline code", [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Backquote]],
-		["md-highlight", "Markdown: Highlight", [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.KeyH]],
-		["md-link", "Markdown: Insert link", [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK]],
-		[
-			"md-checkbox",
-			"Markdown: Toggle checkbox",
-			[monaco.KeyMod.Alt | monaco.KeyCode.KeyC, monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.Enter],
-		],
+	// Markdown's formatting commands, for the editor's own list of commands (F1). They have no keys here: Markdown's
+	// keys are read by the shell before the editor sees a press (commands.ts), from the list Settings holds
+	// (ADR 0041). A key written here as well went on working after it was changed there.
+	const formatActions: [id: string, label: string][] = [
+		["md-bold", "Markdown: Bold"],
+		["md-italic", "Markdown: Italic"],
+		["md-strike", "Markdown: Strikethrough"],
+		["md-code", "Markdown: Inline code"],
+		["md-highlight", "Markdown: Highlight"],
+		["md-link", "Markdown: Insert link"],
+		["md-checkbox", "Markdown: Toggle checkbox"],
 	];
-	for (const [id, label, keybindings] of formatBindings) {
+	for (const [id, label] of formatActions) {
 		disposables.push(
 			editor.addAction({
 				id: `app.${id}`,
 				label,
 				precondition: MD_EDITABLE,
-				keybindings,
-				keybindingContext: "editorTextFocus && !editorReadonly && editorLangId == 'markdown'",
 				run: () => void runMonacoMarkdownAction(editor, id),
 			}),
 		);

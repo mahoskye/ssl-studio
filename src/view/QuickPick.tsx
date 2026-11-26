@@ -6,7 +6,7 @@ import { FileMark } from "./FileMark";
 import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
 import { createAsyncQuery } from "./asyncQuery";
 import { backend } from "./backend";
-import { commands, keysFor, recentCommands, runCommand } from "./commands";
+import { commands, keysShownFor, recentCommands, runCommand } from "./commands";
 import { jumpToTableColumn } from "./editor/liveBridge";
 import { mdOutline } from "./editor/mdOutline";
 import { monaco } from "./editor/monaco";
@@ -411,7 +411,7 @@ function Picker(props: { mode: QuickMode }) {
 			const searching = Boolean(query().trim());
 			return filterCommands(query(), list).map((c, i) => ({
 				label: c.label,
-				detail: keysFor(c.id),
+				detail: keysShownFor(c.id),
 				note: c.detail,
 				divide: !searching && recent > 0 && i === recent,
 				run: () => runCommand(c.id, { remember: true }),

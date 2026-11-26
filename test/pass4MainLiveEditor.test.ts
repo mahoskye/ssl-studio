@@ -156,7 +156,7 @@ if (typeof (globalThis as any).location === "undefined") {
 }
 
 const { liveBlockField, liveCallbacksFacet, liveInteractionExtension } = await import("../src/view/editor/cmLivePlugin");
-const { cmDuplicateLineOrSelection, cmInsertCursor, cmInsertLineAbove, cmJoinLines, cmToggleComment, runTableAction } = await import("../src/view/editor/cmKeymap");
+const { cmDuplicateLineOrSelection, cmInsertCursor, cmInsertLineAbove, cmJoinLines, cmOwnKeys, cmToggleComment, LIVE_COMMANDS, liveKeyBindings, runTableAction } = await import("../src/view/editor/cmKeymap");
 const { extraCellsNote, mergeTsvIntoTable } = await import("../src/view/editor/cmLiveTable");
 const { frontMatter } = await import("../src/shared/frontMatter");
 const {
@@ -505,7 +505,8 @@ describe("P2: the hidden front matter: what is done in the editor stays out of i
 
 	test("where it is wired (read from the source: the key and the model listener need a window)", () => {
 		const keymap = source("src/view/editor/cmKeymap.ts");
-		expect(keymap).toContain('{ key: "Alt-ArrowUp", run: moveLineUp, preventDefault: true }');
+		// "Move line up" is CodeMirror's own command here, on whatever key Settings has it (ADR 0041).
+		expect(keymap).toContain('"editor.action.moveLinesUpAction": moveLineUp,');
 		const editor = source("src/view/editor/MarkdownLiveEditor.tsx");
 		// The filter is one of the live editor's extensions, and the model's text is dispatched with the mark the filter lets through.
 		expect(editor).toMatch(/liveBlockField,[\s\S]{0,200}liveInteractionExtension,/);
@@ -909,3 +910,75 @@ describe("ADR 0034 — the Markdown editor has the code editor's keys: split int
 		expect(heads(cursor)).toEqual([B + 4]);
 	});
 });
+
+// --- The Live editor's keys are the code editor's, for the commands it has (ADR 0041) -------------------------
+
+describe("the Live editor's keys come from the editor's list of keys", () => {
+	test("it has a command for each of the listed commands said to be its own, and for no other", async () => {
+		const { EDITOR_COMMANDS, LIVE_EDITOR_COMMANDS, LIVE_KEYS_AS_THEY_CAME } = await import("../src/shared/editorKeymap");
+		expect(Object.keys(LIVE_COMMANDS).sort()).toEqual([...LIVE_EDITOR_COMMANDS].sort());
+		const listed = new Set(EDITOR_COMMANDS.map((command) => command.id));
+		expect(LIVE_EDITOR_COMMANDS.filter((id) => !listed.has(id))).toEqual([]);
+		expect(new Set(LIVE_EDITOR_COMMANDS).size).toBe(LIVE_EDITOR_COMMANDS.length);
+		// The keys it falls back on are keys of its own commands, each with a name this editor can be given.
+		expect(Object.values(LIVE_KEYS_AS_THEY_CAME).filter((id) => !LIVE_COMMANDS[id])).toEqual([]);
+		expect(liveKeyBindings(LIVE_KEYS_AS_THEY_CAME).length).toBe(Object.keys(LIVE_KEYS_AS_THEY_CAME).length);
+	});
+
+	test("a key of the list is a key here, by this editor's name for it; two presses and unknown commands are not", () => {
+		const bindings = liveKeyBindings({
+			"ctrl+shift+d": "editor.action.duplicateSelection",
+			"ctrl+shift+{": "editor.fold",
+			"alt+shift+arrowup": "editor.action.insertCursorAbove",
+			f3: "editor.action.nextMatchFindAction",
+			"cmd+shift+d": "editor.action.joinLines",
+			"ctrl+k ctrl+0": "editor.unfoldAll",
+			"ctrl+alt+u": "editor.action.transformToUppercase",
+			"ctrl+é": "editor.action.joinLines",
+		});
+		expect(bindings.map((binding) => binding.key)).toEqual(["Ctrl-Shift-d", "Ctrl-Shift-[", "Alt-Shift-ArrowUp", "F3", "Cmd-Shift-d"]);
+		expect(bindings.every((binding) => binding.preventDefault === true && typeof binding.run === "function")).toBe(true);
+		expect(bindings[0]!.run).toBe(LIVE_COMMANDS["editor.action.duplicateSelection"]);
+		expect(liveKeyBindings({})).toEqual([]);
+	});
+
+	test("the keys run their commands in a document", () => {
+		const run = (id: string, doc: string, at: number) => {
+			const view = headless(liveState(doc, at));
+			LIVE_COMMANDS[id]!(view);
+			return view.state.doc.toString();
+		};
+		expect(run("editor.action.duplicateSelection", "one\ntwo", 0)).toBe("one\none\ntwo");
+		expect(run("editor.action.joinLines", "one\ntwo", 0)).toBe("one two");
+		expect(run("editor.action.moveLinesDownAction", "one\ntwo", 0)).toBe("two\none");
+		expect(run("editor.action.deleteLines", "one\ntwo", 0)).toBe("two");
+		expect(run("editor.action.indentLines", "one\ntwo", 0)).not.toBe("one\ntwo");
+		// The two that delete to an end of the line ask the drawn editor where a line is: they are tried in the app.
+	});
+
+	test("CodeMirror's own keys for those commands are gone, and so is the key that turns Tab off", () => {
+		const keys = cmOwnKeys.flatMap((binding) => [binding.key, binding.mac, binding.win, binding.linux].filter(Boolean)) as string[];
+		// Each of these ran a listed command by a key no list in Settings shows.
+		for (const key of ["Alt-ArrowUp", "Shift-Alt-ArrowDown", "Alt-l", "Mod-i", "Mod-[", "Mod-]", "Shift-Mod-k", "Shift-Mod-\\", "Mod-/", "Alt-A", "Mod-Enter", "Mod-u", "Alt-u", "Mod-d", "Mod-Shift-l", "Mod-Alt-g", "Ctrl-Shift-[", "Ctrl-Alt-[", "Ctrl-Alt-]", "Ctrl-m"]) {
+			expect([key, keys.includes(key)]).toEqual([key, false]);
+		}
+		expect(cmOwnKeys.some((binding) => [moveLineUp, moveLineDown, copyLineUp, copyLineDown, deleteLine, indentMore, indentLess, selectNextOccurrence, selectSelectionMatches].includes(binding.run as never))).toBe(false);
+		// Finding keeps CodeMirror's keys in its own box, and nowhere else.
+		const finding = cmOwnKeys.filter((binding) => binding.key === "Mod-f" || binding.key === "F3" || binding.key === "Mod-g");
+		expect(finding.length).toBe(3);
+		expect(finding.every((binding) => binding.scope === "search-panel")).toBe(true);
+		// What is no listed command stays: the cursor's keys, selecting all, closing the find box.
+		for (const key of ["ArrowLeft", "Mod-a", "Escape", "Mod-Alt-\\"]) expect([key, keys.includes(key)]).toEqual([key, true]);
+	});
+
+	test("the editor's own list holds no key that Settings has (read from the source)", () => {
+		const keymap = source("src/view/editor/cmKeymap.ts");
+		const own = keymap.slice(keymap.indexOf("const markdownBindings: KeyBinding[] = ["), keymap.indexOf("export const LIVE_COMMANDS"));
+		const written = [...own.matchAll(/\{ (?:key|mac): "([^"]+)"/g)].map((match) => match[1]);
+		expect(written).toEqual(["Ctrl-Cmd-ArrowUp", "Ctrl-Cmd-ArrowDown", "Ctrl-Cmd-g", "ArrowDown", "ArrowUp", "Shift-Enter", "Enter", "Tab", "Shift-Tab", "Backspace", "Mod-z", "Mod-y", "Mod-Shift-z"]);
+		// Markdown's commands have no key of their own in the code editor either.
+		const source_mode = source("src/view/editor/markdownKeys.ts");
+		expect(source_mode).not.toMatch(/KeyCode\.Key[BIKXHC]\b/);
+	});
+});
+

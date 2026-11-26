@@ -6,7 +6,22 @@
 // press does, so a key of two presses, a command that needs a writable file and the keys shown in the command
 // list (F1) all follow without being worked out here. Sublime Text's keys are not the editor's own, and a rule
 // does not take them off: they are put in again without the ones that changed (`applyEditorKeys`).
-import { editorHasKey, editorKeyCode, editorKeyName, editorKeyRules, editorOverrides, isEditorCommand, pressesOf, pressShown, type EditorChord, type EditorKeys } from "../../shared/editorKeymap";
+import {
+	editorHasKey,
+	editorKeyCode,
+	editorKeyName,
+	editorKeyRules,
+	editorOverrides,
+	isEditorCommand,
+	LIVE_KEYS_AS_THEY_CAME,
+	liveEditorKeys,
+	MARKDOWN_KEYS,
+	markdownOverrides,
+	pressesOf,
+	pressShown,
+	type EditorChord,
+	type EditorKeys,
+} from "../../shared/editorKeymap";
 import { bindable, displayKey, effectiveKeys, keysOf } from "../keys";
 import { state } from "../state";
 import { monaco, setEditorKeys } from "./monaco";
@@ -145,3 +160,33 @@ export function editorKeysOf(id: string, shell: ShellKeys): string[] {
 
 /** One of the editor's keys as it is shown: "Ctrl+J", and "Ctrl+K Ctrl+U" for a key of two presses. */
 export const displayEditorKey = (name: string) => pressesOf(name).map((press) => displayKey(pressShown(press))).join(" ");
+
+// --- The Markdown Live editor, and Markdown's own keys (ADR 0041) ------------------------------------------------
+
+/**
+ * The Live editor's keys for the commands it shares with the code editor: the code editor's keys of one press, as
+ * they are now. Where those could not be read it has the keys it had before, by Cmd on a Mac as they were (the
+ * two for a bracket apart, which are on the Ctrl key there too).
+ */
+export function liveKeysNow(): Record<string, string> {
+	const now = editorKeysNow();
+	if (now) return liveEditorKeys(now);
+	const came = Object.entries(LIVE_KEYS_AS_THEY_CAME);
+	return Object.fromEntries(onMac ? came.map(([key, command]) => [/^ctrl\+(shift\+)?m$/.test(key) ? key : key.replace(/^ctrl\+/, "cmd+"), command]) : came);
+}
+
+/**
+ * Whether a press in the Live editor's text is that editor's to take, rather than the shell's: by the rule for
+ * the code editor (`editorHasKey`), over the keys the Live editor has.
+ */
+export function liveTakesKey(pressed: readonly string[], shell: ShellKeys): boolean {
+	const now = liveKeysNow();
+	const chosen = editorKeysNow() ? editorKeyChanges() : {};
+	return (onMac ? pressed.slice(0, 1) : pressed).some((name) => editorHasKey(name, { now, chosen, ...shellOn(name, shell), mac: onMac }));
+}
+
+/** The user's changes to Markdown's keys, as far as they mean something. */
+export const markdownKeyChanges = () => markdownOverrides(state.settings.markdownKeys, (key) => bindable(key).ok);
+
+/** Markdown's keys with the user's changes: the key's name to the command on it. */
+export const markdownKeysNow = (): Record<string, string> => effectiveKeys(MARKDOWN_KEYS, markdownKeyChanges());

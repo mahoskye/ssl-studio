@@ -336,7 +336,8 @@ const {
 const { removeRecentGroup, resetRecentTabs, stepRecent, tabShown } = await import("../src/view/recentTabs");
 const { goAlong, noteCursor } = await import("../src/view/navigation");
 const { newDocIn, setUpProject, undoSetUp } = await import("../src/view/project");
-const { copyPath, defaultKeysForPlatform, MARKDOWN_TEXT_KEYS, resolveCommandKey, runCommand } = await import("../src/view/commands");
+const { copyPath, defaultKeysForPlatform, resolveCommandKey, runCommand } = await import("../src/view/commands");
+const { MARKDOWN_KEYS } = await import("../src/shared/editorKeymap");
 
 // --- In-process MockSocket RPC driver for real src/view/backend.ts ---
 type RpcHandler = (method: string, args: unknown[]) => unknown | Promise<unknown>;
@@ -969,10 +970,11 @@ describe("R8C P1 — workspace switch, cancel openFolder, watcher race, recentTa
 // 4. P1 — Keybindings, Commands, and Markdown Input Protection
 // =============================================================================
 describe("R8C P1 — keys.ts, commands.ts, and isInMarkdownTextEditor", () => {
-	test("MARKDOWN_TEXT_KEYS excludes ctrl+l (Select Line) and reconciles ctrl+alt+enter to md-checkbox", () => {
-		expect(MARKDOWN_TEXT_KEYS["ctrl+l"]).toBeUndefined();
-		expect(MARKDOWN_TEXT_KEYS["ctrl+alt+enter"]).toBe("md-checkbox");
-		expect(MARKDOWN_TEXT_KEYS["ctrl+b"]).toBe("md-bold");
+	test("Markdown's keys exclude ctrl+l (Select Line) and have both of the checkbox's keys", () => {
+		expect(MARKDOWN_KEYS["ctrl+l"]).toBeUndefined();
+		expect(MARKDOWN_KEYS["ctrl+alt+enter"]).toBe("md-checkbox");
+		expect(MARKDOWN_KEYS["alt+c"]).toBe("md-checkbox");
+		expect(MARKDOWN_KEYS["ctrl+b"]).toBe("md-bold");
 	});
 
 	test("defaultKeysForPlatform includes ctrl+shift++ zoom-in and keeps macOS Cmd+- zoom-out independent of go-back", () => {

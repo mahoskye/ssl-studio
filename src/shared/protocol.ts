@@ -289,6 +289,11 @@ export type Settings = {
 	 * the two names with a space between ("ctrl+k ctrl+u").
 	 */
 	editorKeys?: Record<string, string>;
+	/**
+	 * The same for Markdown's own keys (ADR 0041): key to one of Markdown's commands ("md-bold"); "" takes a key
+	 * it came with away from its command. They work while a Markdown document's text is edited.
+	 */
+	markdownKeys?: Record<string, string>;
 	/** Configurable CSV table column badge formatting (columns, value-to-tone mappings, fallback). */
 	csvTable?: CsvTableConfig;
 	/** SQL dialect used when formatting standalone .sql files (default "tsql" for SQL Server STARLIMS). */

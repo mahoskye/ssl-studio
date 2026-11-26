@@ -6,7 +6,7 @@ import { ask, browseWorkspaceFile, choose, quickPick, type QuickPickOption } fro
 import { activeEditor, lastActiveMarkdownPath } from "./editor/EditorGroup";
 import { formatFenceInModel, formatNonSslModel, hadRecentFormatError, languageName } from "./editor/languages";
 import { pickLanguageMode } from "./editor/languagePicker";
-import { editorTakesKey } from "./editor/editorKeys";
+import { editorTakesKey, liveTakesKey, markdownKeysNow } from "./editor/editorKeys";
 import { activeLiveEditor, isInMarkdownTextEditor, saveMarkdownSyncAnchor } from "./editor/liveBridge";
 import { linkWritten } from "../shared/docLinks";
 import { folderParts } from "../shared/docSections";
@@ -72,7 +72,7 @@ import {
 	updateManifest,
 } from "./projectDocs";
 import { insertCalloutInteractive, insertImageInteractive, insertMarkdownTemplate, manageTemplates, newNoteFromTemplate } from "./templater";
-import { displayKey, effectiveKeys, isModifierKey, keyNamesForPlatform, keysOf, type KeyPress } from "./keys";
+import { displayKey, effectiveKeys, isModifierKey, keyNamesByLetter, keyNamesForPlatform, keysOf, type KeyPress } from "./keys";
 import { modalOpen, setFocusFallback } from "./modal";
 import { noteUsed } from "./quickRank";
 import { stepScale, UI_SCALE } from "./uiScale";
@@ -340,13 +340,13 @@ export const commands: Command[] = [
 	{ id: "toggle-markdown-mode", label: "Toggle Markdown Live / Read view", detail: "Switch a Markdown note between Live Preview editing and Reading view", run: toggleMarkdownMode },
 	{ id: "split-markdown-read", label: "Markdown: Split Read preview to side", detail: "Keep editing in this group while previewing Read view side-by-side", run: () => void splitMarkdownRead() },
 	{ id: "md-insert-footnote", label: "Markdown: Insert footnote", detail: "Insert the next numbered [^N] footnote reference and definition", run: () => runMarkdownEdit("md-insert-footnote") },
-	{ id: "md-bold", label: "Markdown: Toggle bold", detail: "Wrap or unwrap selection with ** (Ctrl+B in Markdown)", run: () => runMarkdownEdit("md-bold") },
-	{ id: "md-italic", label: "Markdown: Toggle italic", detail: "Wrap or unwrap selection with * (Ctrl+I in Markdown)", run: () => runMarkdownEdit("md-italic") },
-	{ id: "md-strike", label: "Markdown: Toggle strikethrough", detail: "Wrap or unwrap selection with ~~ (Ctrl+Shift+X in Markdown)", run: () => runMarkdownEdit("md-strike") },
-	{ id: "md-code", label: "Markdown: Toggle inline code", detail: "Wrap or unwrap selection with ` (Ctrl+` in Markdown)", run: () => runMarkdownEdit("md-code") },
-	{ id: "md-highlight", label: "Markdown: Toggle highlight", detail: "Wrap or unwrap selection with == (Ctrl+Alt+H in Markdown)", run: () => runMarkdownEdit("md-highlight") },
-	{ id: "md-link", label: "Markdown: Insert link", detail: "Insert [label](url) at selection (Ctrl+K in Markdown)", run: () => runMarkdownEdit("md-link") },
-	{ id: "md-checkbox", label: "Markdown: Toggle checkbox", detail: "Cycle task checkbox on the current line(s) (Alt+C / Ctrl+Alt+Enter in Markdown)", run: () => runMarkdownEdit("md-checkbox") },
+	{ id: "md-bold", label: "Markdown: Toggle bold", detail: "Wrap or unwrap selection with **", run: () => runMarkdownEdit("md-bold") },
+	{ id: "md-italic", label: "Markdown: Toggle italic", detail: "Wrap or unwrap selection with *", run: () => runMarkdownEdit("md-italic") },
+	{ id: "md-strike", label: "Markdown: Toggle strikethrough", detail: "Wrap or unwrap selection with ~~", run: () => runMarkdownEdit("md-strike") },
+	{ id: "md-code", label: "Markdown: Toggle inline code", detail: "Wrap or unwrap selection with `", run: () => runMarkdownEdit("md-code") },
+	{ id: "md-highlight", label: "Markdown: Toggle highlight", detail: "Wrap or unwrap selection with ==", run: () => runMarkdownEdit("md-highlight") },
+	{ id: "md-link", label: "Markdown: Insert link", detail: "Insert [label](url) at selection", run: () => runMarkdownEdit("md-link") },
+	{ id: "md-checkbox", label: "Markdown: Toggle checkbox", detail: "Cycle task checkbox on the current line(s)", run: () => runMarkdownEdit("md-checkbox") },
 	{ id: "md-insert-template", label: "Markdown: Insert template…", detail: "Expand a workspace or built-in Templater template at the cursor", run: () => void insertMarkdownTemplate() },
 	{ id: "md-new-from-template", label: "Markdown: New note from template…", detail: "Create a new note from a customizable Templater template", run: () => void newNoteFromTemplate() },
 	{ id: "md-manage-templates", label: "Markdown: Customize or create template…", detail: "Copy a built-in template or create a custom one in docs/templates/", run: () => void manageTemplates() },
@@ -1830,19 +1830,10 @@ export function keymap(): Record<string, string> {
 export const keysFor = (id: string) => keysOf(id, keymap()).map(displayKey).join(", ");
 
 /**
- * Text-editing shortcuts that take precedence over non-editing window shortcuts
- * (e.g. Ctrl+B = Bold instead of Toggle side bar) whenever focus is inside a
- * Markdown text editor (CodeMirror 6 Live Preview or Monaco Source mode).
+ * The keys to show beside a command in a list of commands to run: its shortcuts, and for one of Markdown's
+ * commands the keys it has while a document is edited (ADR 0041), which are the ones a writer presses.
  */
-export const MARKDOWN_TEXT_KEYS: Record<string, string> = {
-	"ctrl+b": "md-bold",
-	"ctrl+i": "md-italic",
-	"ctrl+shift+x": "md-strike",
-	"ctrl+`": "md-code",
-	"ctrl+alt+h": "md-highlight",
-	"ctrl+k": "md-link",
-	"ctrl+alt+enter": "md-checkbox",
-};
+export const keysShownFor = (id: string) => [...new Set([...keysOf(id, keymap()), ...keysOf(id, markdownKeysNow())])].map(displayKey).join(", ");
 
 /** Resolves a keydown press against `map`, preserving macOS Cmd+- as Zoom Out independently of Go Back overrides. */
 export function resolveCommandKey(
@@ -1890,9 +1881,12 @@ export function installKeys() {
 			const secondOfChord = inCodeEditor && Date.now() - editorChordAt < EDITOR_CHORD_WAIT;
 			editorChordAt = 0;
 			if (secondOfChord) return;
-			// Text-editing controls supersede conflicting chrome shortcuts inside Markdown editors.
-			if (isInMarkdownTextEditor(e.target, activeDoc()?.model.getLanguageId())) {
-				const mdCmd = pressed.map((name) => MARKDOWN_TEXT_KEYS[name]).find(Boolean);
+			// Markdown's own keys, as Settings has them, come before every other key while a document's text is
+			// edited, in either editor: Ctrl+B is bold there, and the side bar's key everywhere else (ADR 0041).
+			const inMarkdownText = isInMarkdownTextEditor(e.target, activeDoc()?.model.getLanguageId());
+			if (inMarkdownText) {
+				const markdown = markdownKeysNow();
+				const mdCmd = [...pressed, ...keyNamesByLetter(e, onMac)].map((name) => markdown[name]).find(Boolean);
 				if (mdCmd) {
 					e.preventDefault();
 					e.stopPropagation();
@@ -1907,8 +1901,13 @@ export function installKeys() {
 			// what is on it. Asked before the menus' Alt letters too, so Alt and a letter can be an editing key.
 			const editors = inCodeEditor ? editorTakesKey(pressed, { map, chosen: overrides }) : undefined;
 			if (editors) return;
+			// The same in the text of a Markdown document's Live editor, which has the code editor's keys for the
+			// commands it has too (ADR 0041). A key that is not its key is the shell's, as in the code editor.
+			const inLiveText = inMarkdownText && Boolean(targetEl?.closest(".cm-editor"));
+			if (inLiveText && liveTakesKey(pressed, { map, chosen: overrides })) return;
 			const inTable = Boolean(targetEl?.closest(".cm-md-table-wrap, .table-view"));
-			const inLiveMarkdown = Boolean(targetEl?.closest(".cm-editor") && !targetEl.closest(".cm-md-read"));
+			// Within the Live editor but not in its text (a table's cell, a callout's box): the editing keys stand aside.
+			const inLiveMarkdown = Boolean(targetEl?.closest(".cm-editor") && !targetEl.closest(".cm-md-read")) && !inLiveText;
 			// Where the editor's keys could not be read, its editing keys are known by the list of them alone.
 			if (shouldLetEditorHandleKey({ id, pressed, inTable, inLiveMarkdown, inCodeEditor: inCodeEditor && editors === undefined, mac: onMac })) return;
 			// The first key of a two-key shortcut, where it is the editor's to take (no command of the shell's is on

@@ -243,3 +243,192 @@ export function editorHasKey(name: string, keys: { now: EditorKeys; chosen: Read
 	if (keys.shellChosen) return false;
 	return EDITING_KEYS_OVER_SHELL.some((own) => own.command === keys.shell && name === (keys.mac ? own.macKey : own.key));
 }
+
+// --- The Markdown Live editor, and Markdown's own keys (ADR 0041) ------------------------------------------------
+//
+// A Markdown document is edited in the code editor (Source) or in the Live editor, which is another editor with
+// commands of its own making. It has the same keys as the code editor where it has the command (ADR 0034), and so
+// it has them as they are changed: the Live editor's keys are the code editor's, read where the code editor's are
+// read, for the commands below. Its own list of keys holds none of them (view/editor/cmKeymap.ts).
+
+/** The listed commands the Live editor has too: each by the code editor's id for it (`LIVE_COMMANDS` runs them). */
+export const LIVE_EDITOR_COMMANDS: readonly string[] = [
+	"editor.action.duplicateSelection",
+	"editor.action.joinLines",
+	"editor.action.moveLinesUpAction",
+	"editor.action.moveLinesDownAction",
+	"editor.action.copyLinesUpAction",
+	"editor.action.copyLinesDownAction",
+	"editor.action.deleteLines",
+	"editor.action.insertLineAfter",
+	"editor.action.insertLineBefore",
+	"editor.action.indentLines",
+	"editor.action.outdentLines",
+	"deleteAllRight",
+	"deleteAllLeft",
+	"editor.action.commentLine",
+	"editor.action.blockComment",
+	"expandLineSelection",
+	"editor.action.smartSelect.expand",
+	"editor.action.smartSelect.shrink",
+	"editor.action.addSelectionToNextFindMatch",
+	"editor.action.selectHighlights",
+	"editor.action.insertCursorAbove",
+	"editor.action.insertCursorBelow",
+	"editor.action.insertCursorAtEndOfEachLineSelected",
+	"editor.action.jumpToBracket",
+	"editor.action.selectToBracket",
+	"cursorUndo",
+	"cursorRedo",
+	"actions.find",
+	"editor.action.startFindReplaceAction",
+	"editor.action.nextMatchFindAction",
+	"editor.action.previousMatchFindAction",
+	"editor.action.gotoLine",
+	"editor.fold",
+	"editor.unfold",
+	"editor.foldAll",
+	"editor.unfoldAll",
+];
+
+const IN_LIVE = new Set(LIVE_EDITOR_COMMANDS);
+export const isLiveEditorCommand = (id: string | undefined): boolean => Boolean(id && IN_LIVE.has(id));
+
+/**
+ * The Live editor's keys, out of the editor's keys as they are now: those of one press, on a command the Live
+ * editor has. A key of two presses is the code editor's alone: it is the code editor that waits for a second
+ * press, and in a Markdown document the first of them (Ctrl+K) inserts a link.
+ */
+export function liveEditorKeys(now: EditorKeys): Record<string, string> {
+	return Object.fromEntries(Object.entries(now).filter(([key, command]) => IN_LIVE.has(command) && pressesOf(key).length === 1));
+}
+
+/** What the Live editor calls the keys that the code editor's codes name otherwise than by a letter, a digit or an F-number. */
+const LIVE_KEY_NAMES: Readonly<Record<string, string>> = {
+	UpArrow: "ArrowUp",
+	DownArrow: "ArrowDown",
+	LeftArrow: "ArrowLeft",
+	RightArrow: "ArrowRight",
+	Enter: "Enter",
+	Tab: "Tab",
+	Space: "Space",
+	Backspace: "Backspace",
+	Delete: "Delete",
+	Home: "Home",
+	End: "End",
+	PageUp: "PageUp",
+	PageDown: "PageDown",
+	Escape: "Escape",
+	Insert: "Insert",
+	Slash: "/",
+	Backslash: "\\",
+	BracketLeft: "[",
+	BracketRight: "]",
+	Semicolon: ";",
+	Quote: "'",
+	Comma: ",",
+	Period: ".",
+	Minus: "-",
+	Equal: "=",
+	Backquote: "`",
+};
+
+/**
+ * A key of one press, named as the shell names it, as the Live editor writes a key: "ctrl+shift+d" is
+ * "Ctrl-Shift-d". A key named by what it types with Shift is written by the key itself ("ctrl+shift+{" is
+ * "Ctrl-Shift-["), which is how that editor knows a key whatever the keyboard makes of it. Null for a key of two
+ * presses, and for one the code editor has no code for.
+ */
+export function liveKeyName(name: string): string | null {
+	const presses = pressesOf(name);
+	const key = presses.length === 1 ? editorKeyCode(presses[0]!) : null;
+	if (!key) return null;
+	const { code } = key;
+	const base = /^Key[A-Z]$/.test(code) ? code.slice(3).toLowerCase() : /^Digit\d$/.test(code) ? code.slice(5) : /^F\d+$/.test(code) ? code : LIVE_KEY_NAMES[code];
+	if (!base) return null;
+	return `${key.cmd ? "Cmd-" : ""}${key.ctrl ? "Ctrl-" : ""}${key.alt ? "Alt-" : ""}${key.shift ? "Shift-" : ""}${base}`;
+}
+
+/**
+ * The keys the Live editor had for those commands before they followed the code editor's. They are its keys still
+ * where the code editor's could not be read (a later version of it may not say), so that it is never left with none.
+ */
+export const LIVE_KEYS_AS_THEY_CAME: EditorKeys = {
+	"ctrl+shift+d": "editor.action.duplicateSelection",
+	"ctrl+j": "editor.action.joinLines",
+	"ctrl+shift+arrowup": "editor.action.moveLinesUpAction",
+	"ctrl+shift+arrowdown": "editor.action.moveLinesDownAction",
+	"alt+arrowup": "editor.action.moveLinesUpAction",
+	"alt+arrowdown": "editor.action.moveLinesDownAction",
+	"alt+shift+arrowup": "editor.action.copyLinesUpAction",
+	"alt+shift+arrowdown": "editor.action.copyLinesDownAction",
+	"ctrl+shift+k": "editor.action.deleteLines",
+	"ctrl+enter": "editor.action.insertLineAfter",
+	"ctrl+shift+enter": "editor.action.insertLineBefore",
+	"ctrl+]": "editor.action.indentLines",
+	"ctrl+[": "editor.action.outdentLines",
+	"ctrl+/": "editor.action.commentLine",
+	"alt+shift+a": "editor.action.blockComment",
+	"ctrl+l": "expandLineSelection",
+	"alt+shift+arrowright": "editor.action.smartSelect.expand",
+	"alt+shift+arrowleft": "editor.action.smartSelect.shrink",
+	"ctrl+d": "editor.action.addSelectionToNextFindMatch",
+	"alt+f3": "editor.action.selectHighlights",
+	"ctrl+alt+arrowup": "editor.action.insertCursorAbove",
+	"ctrl+alt+arrowdown": "editor.action.insertCursorBelow",
+	"ctrl+shift+l": "editor.action.insertCursorAtEndOfEachLineSelected",
+	"ctrl+m": "editor.action.jumpToBracket",
+	"ctrl+shift+m": "editor.action.selectToBracket",
+	"ctrl+u": "cursorUndo",
+	"ctrl+f": "actions.find",
+	"ctrl+h": "editor.action.startFindReplaceAction",
+	f3: "editor.action.nextMatchFindAction",
+	"shift+f3": "editor.action.previousMatchFindAction",
+	"ctrl+g": "editor.action.gotoLine",
+};
+
+/** Markdown's own commands that have keys: the shell's id for each, and its name in Settings. */
+export const MARKDOWN_COMMANDS: readonly EditorCommand[] = [
+	{ id: "md-bold", label: "Toggle bold" },
+	{ id: "md-italic", label: "Toggle italic" },
+	{ id: "md-strike", label: "Toggle strikethrough" },
+	{ id: "md-code", label: "Toggle inline code" },
+	{ id: "md-highlight", label: "Toggle highlight" },
+	{ id: "md-link", label: "Insert link" },
+	{ id: "md-checkbox", label: "Toggle checkbox" },
+];
+
+const MARKDOWN = new Set(MARKDOWN_COMMANDS.map((command) => command.id));
+export const isMarkdownCommand = (id: string | undefined): boolean => Boolean(id && MARKDOWN.has(id));
+export const markdownCommandLabel = (id: string): string => MARKDOWN_COMMANDS.find((command) => command.id === id)?.label ?? id;
+
+/**
+ * The keys Markdown's commands come with (Obsidian's). They work while the keyboard is in a Markdown document's
+ * text, in either editor, and there they come before every other key: Ctrl+B is bold in a document and the side
+ * bar's key everywhere else. Named as the shell names a press; on a Mac the press with Cmd goes by these names too.
+ */
+export const MARKDOWN_KEYS: EditorKeys = {
+	"ctrl+b": "md-bold",
+	"ctrl+i": "md-italic",
+	"ctrl+shift+x": "md-strike",
+	"ctrl+`": "md-code",
+	"ctrl+alt+h": "md-highlight",
+	"ctrl+k": "md-link",
+	"alt+c": "md-checkbox",
+	"ctrl+alt+enter": "md-checkbox",
+};
+
+/**
+ * The user's changes to Markdown's keys, as far as they mean something: one of Markdown's commands on a key of
+ * one press that may be a shortcut (`usable`), or "" for a key taken from the command it came with.
+ */
+export function markdownOverrides(saved: Readonly<Record<string, unknown>> | undefined, usable: (key: string) => boolean): Record<string, string> {
+	const changes: Record<string, string> = {};
+	for (const [written, command] of Object.entries(saved ?? {})) {
+		if (command !== "" && !(typeof command === "string" && MARKDOWN.has(command))) continue;
+		const key = written.trim().toLowerCase();
+		if (!key || /\s/.test(key) || !usable(key)) continue;
+		changes[key] = command;
+	}
+	return changes;
+}

@@ -316,6 +316,8 @@ describe("4. a settings file edited by hand", () => {
 		// The code editor's keys are names and values like the shell's: a key let go is "", which is a value.
 		expect(taken({ editorKeys: { "ctrl+j": "", "ctrl+alt+j": "editor.action.joinLines", "ctrl+k ctrl+u": 7 } })).toEqual({ editorKeys: { "ctrl+j": "", "ctrl+alt+j": "editor.action.joinLines" } });
 		expect(taken({ editorKeys: "ctrl+j" })).toEqual({});
+		expect(taken({ markdownKeys: { "ctrl+k": "", "ctrl+alt+l": "md-link", "ctrl+b": 7 } })).toEqual({ markdownKeys: { "ctrl+k": "", "ctrl+alt+l": "md-link" } });
+		expect(taken({ markdownKeys: ["ctrl+b"] })).toEqual({});
 		expect(taken({ ssl: "tabs", csvTable: [1] })).toEqual({});
 		expect(taken({ ssl: { format: { indentStyle: "space" } } })).toEqual({ ssl: { format: { indentStyle: "space" } } });
 		// A setting this version does not know is taken as it is written; what is no settings at all gives none.

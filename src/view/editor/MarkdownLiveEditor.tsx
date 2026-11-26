@@ -64,9 +64,12 @@ import {
 	cmSearchTop,
 	cmSmartPasteExtension,
 	historyFallbackFacet,
+	liveKeymap,
 	runCmAction,
 	runTableAction,
+	setLiveKeys,
 } from "./cmKeymap";
+import { liveKeysNow } from "./editorKeys";
 import "./cmLive.css";
 import {
 	linkAtOffset,
@@ -1601,6 +1604,8 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				cmMarkdownCompletion(() => props.path),
 				cmAutoWrapExtension,
 				cmSmartPasteExtension(() => props.path),
+				// The code editor's keys for the commands this editor has too, as Settings has them now (ADR 0041).
+				liveKeymap(liveKeysNow()),
 				cmMarkdownKeymap,
 				EditorView.domEventHandlers({
 					focus: (_e, view) => {
@@ -1822,6 +1827,14 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			const handle = makeHandle(view);
 			registerLiveEditor(at, handle);
 			return () => unregisterLiveEditor(at, handle);
+		},
+	);
+
+	// A key of the editor's changed in Settings is changed here at once, as it is in the code editor.
+	createEffect(
+		() => ({ view: mountedView(), keys: JSON.stringify(state.settings.editorKeys ?? {}) }),
+		({ view }) => {
+			if (view) untrack(() => setLiveKeys(view, liveKeysNow()));
 		},
 	);
 

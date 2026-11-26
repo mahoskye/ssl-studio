@@ -78,6 +78,8 @@ code editor has the keyboard:
 - The Markdown Live editor keeps the keys it has. It is another editor,
   with a keymap of its own, and a key changed here is not changed there.
   A Markdown file in Source mode is in the code editor and follows.
+  Since [ADR 0041](0041-the-live-editors-keys-and-markdowns-follow-settings.md)
+  the Live editor follows too, for the commands it has.
 - Ctrl+K by itself cannot be given to one of the editor's commands: it is
   the first half of the two-press keys.
 - A key is named by what it types on a US keyboard, as the editor names
