@@ -15,7 +15,7 @@ import {
 	virtualFencePath,
 	type MarkdownCodeFence,
 } from "../../shared/fencedFormat";
-import { formatJson } from "../../shared/jsonFormat";
+import { formatJson, jsonOpenedOut } from "../../shared/jsonFormat";
 import { LANGUAGES, languageFor, languageName, type LanguageDef } from "../../shared/languages";
 import { isDataSourceName } from "../../shared/lexicalTokens";
 import { splitAtLine } from "../../shared/sqlDataSource";
@@ -415,10 +415,13 @@ async function computeNonSslFormat(
 	if (bodyLine === undefined) return { ok: true, text: whole, changed: false };
 	const { above, body: text } = splitAtLine(whole, bodyLine);
 	const extra = formattingHost.options();
+	// A JSON document on one line has no layout of its own to keep, and Prettier would leave it on its line where
+	// it fits: it is sent with each of its objects opened, and laid out from there (ADR 0040).
+	const sent = languageId === "json" ? (jsonOpenedOut(text) ?? text) : text;
 	try {
 		const result = await backend.formatDocument({
 			path,
-			text,
+			text: sent,
 			languageId,
 			tabSize: indent.tabSize,
 			insertSpaces: indent.insertSpaces,
