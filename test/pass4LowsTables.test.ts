@@ -4,7 +4,7 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { flush } from "solid-js";
 import { createBackend, dispatch } from "../src/bun/backend";
 import { READ_MAX_BYTES } from "../src/bun/workspace";
@@ -18,6 +18,11 @@ const base = realpathSync(mkdtempSync(join(tmpdir(), "ssl-studio-p4l-tables-")))
 afterAll(() => rmSync(base, { recursive: true, force: true }));
 
 const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8").replace(/\r\n/g, "\n");
+/**
+ * A file as the backend names it in a refusal: from the workspace's folder, with the slashes this system writes a
+ * path with. The first run of these tests on Windows failed on six lines that spelled the name with `/`.
+ */
+const named = (rel: string) => rel.split("/").join(sep);
 
 /** A text file a megabyte over what the backend opens: `head`, then comment lines to the size. */
 const BIG_BYTES = READ_MAX_BYTES + 1024 * 1024;
@@ -263,7 +268,7 @@ describe("B11-3: a schema SQL file that is there and could not be read", () => {
 		try {
 			const read = (rel: string) => power.textOrWhy(() => backend.api.read(join(root, rel)), rel, root);
 			expect(await read("schema/tables.sql")).toEqual({ text: TABLES_SQL });
-			expect(await read("schema/big.sql")).toEqual({ why: "schema/big.sql is 21.0 MB: too large to open here (the most is 20.0 MB)." });
+			expect(await read("schema/big.sql")).toEqual({ why: `${named("schema/big.sql")} is 21.0 MB: too large to open here (the most is 20.0 MB).` });
 			expect(await read("schema/blob.sql")).toEqual({ why: "schema/blob.sql is not text." });
 			// A file gone since it was listed: what the file system said of it (reworded where `plainFileError` knows it).
 			expect(await read("schema/none.sql")).toEqual({ why: expect.stringMatching(/none\.sql/) });
@@ -320,7 +325,7 @@ describe("B11-3: a schema SQL file that is there and could not be read", () => {
 			// As it is: only the row whose own file was read and no longer holds it.
 			expect(power.registryRowsGone(rows, names, unread.map((u) => u.file)).map((r) => r.name)).toEqual(["old_runs"]);
 			expect(`${power.unreadFilesSaid(unread)} Rows from that file were left as they were.`).toBe(
-				"schema/big.sql is 21.0 MB: too large to open here (the most is 20.0 MB). Rows from that file were left as they were.",
+				`${named("schema/big.sql")} is 21.0 MB: too large to open here (the most is 20.0 MB). Rows from that file were left as they were.`,
 			);
 		} finally {
 			backend.dispose();
@@ -609,7 +614,7 @@ describe("B11-3b: the ER diagram is not drawn without a file's tables without a 
 
 	const TABLES_SQL = "CREATE TABLE samples (\n\tid INT PRIMARY KEY,\n\tname VARCHAR(40)\n);\n";
 	const BIG_HEAD = "CREATE TABLE batches (\n\tid INT PRIMARY KEY,\n\tsample_id INT REFERENCES samples(id)\n);\n";
-	const TOO_LARGE = "schema/big.sql is 21.0 MB: too large to open here (the most is 20.0 MB).";
+	const TOO_LARGE = `${named("schema/big.sql")} is 21.0 MB: too large to open here (the most is 20.0 MB).`;
 
 	test("with one file too large to open, the diagram of the rest is offered and the notice names the file and why", async () => {
 		const root = workspace("er-some", { "schema/tables.sql": TABLES_SQL });
@@ -677,7 +682,7 @@ describe("B11-3b: the ER diagram is not drawn without a file's tables without a 
 			await until(() => notices().length > 0, "a notice");
 			// It was taken for no file, and the new diagram was written over the whole of it.
 			expect(statSync(dest).size).toBe(BIG_BYTES);
-			expect(notices()).toEqual(["error: schema/database/ER-Diagram.md is 21.0 MB: too large to open here (the most is 20.0 MB). The diagram was not saved: nothing was written."]);
+			expect(notices()).toEqual([`error: ${named("schema/database/ER-Diagram.md")} is 21.0 MB: too large to open here (the most is 20.0 MB). The diagram was not saved: nothing was written.`]);
 		} finally {
 			backend.dispose();
 		}
@@ -785,7 +790,7 @@ describe("B5-6: a file made for a text is not left empty when the text could not
 		const backend = await backendOn(root);
 		try {
 			trashed.length = 0;
-			await expect(templater.createWithText(backend.api, dest, "# Ticket\n")).rejects.toThrow("already exists: docs/templates/ticket.md");
+			await expect(templater.createWithText(backend.api, dest, "# Ticket\n")).rejects.toThrow(`already exists: ${named("docs/templates/ticket.md")}`);
 			expect(readFileSync(dest, "utf8")).toBe("# Mine\n");
 			expect(trashed).toEqual([]);
 		} finally {
