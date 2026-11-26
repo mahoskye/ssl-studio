@@ -894,3 +894,97 @@ describe("The code editor's everyday editing: completion ranges, format on save,
 		preview.dispose();
 	});
 });
+
+describe("The code editor's keys are Sublime Text's for editing (ADR 0034)", () => {
+	type Rule = { keybinding: number; command: string; when?: string };
+	const CODES = { KeyD: 34, KeyG: 37, KeyJ: 40, KeyK: 41, KeyL: 42, KeyM: 43, KeyU: 51, UpArrow: 16, DownArrow: 18, Delete: 20, Backspace: 1, Digit0: 21, F3: 61, F5: 63, F9: 67 };
+	const CTRL = 2048;
+	const SHIFT = 1024;
+	const ALT = 512;
+	const WIN = 256;
+	const chord = (first: number, second: number) => (first | ((second & 0xffff) << 16)) >>> 0;
+
+	/** The rules `setEditorKeys` gives the editor, on a system named as the browser names it. */
+	async function rulesOn(platform: string): Promise<Rule[]> {
+		const { monaco, setEditorKeys } = await import("../src/view/editor/monaco");
+		Object.assign(monaco.KeyMod as any, { CtrlCmd: CTRL, Shift: SHIFT, Alt: ALT, WinCtrl: WIN, chord });
+		Object.assign(monaco.KeyCode as any, CODES);
+		const editorApi = monaco.editor as any;
+		const real = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+		let given: Rule[] = [];
+		editorApi.addKeybindingRules = (rules: Rule[]) => ((given = rules), { dispose() {} });
+		Object.defineProperty(globalThis, "navigator", { value: { platform }, configurable: true });
+		try {
+			setEditorKeys();
+		} finally {
+			if (real) Object.defineProperty(globalThis, "navigator", real);
+			delete editorApi.addKeybindingRules;
+		}
+		return given;
+	}
+	const bound = (rules: Rule[], key: number) => rules.filter((r) => r.keybinding === key && !r.command.startsWith("-")).map((r) => r.command);
+	const freed = (rules: Rule[], key: number) => rules.filter((r) => r.keybinding === key && r.command.startsWith("-")).map((r) => r.command.slice(1));
+
+	test("on Windows and Linux: each of Sublime Text's keys runs its command, and the command the key had is let go", async () => {
+		const rules = await rulesOn("Linux x86_64");
+		expect(bound(rules, CTRL | SHIFT | CODES.KeyD)).toEqual(["editor.action.duplicateSelection"]);
+		expect(bound(rules, CTRL | CODES.KeyJ)).toEqual(["editor.action.joinLines"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.UpArrow)).toEqual(["editor.action.moveLinesUpAction"]);
+		expect(freed(rules, CTRL | SHIFT | CODES.UpArrow)).toEqual(["editor.action.insertCursorAbove"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.DownArrow)).toEqual(["editor.action.moveLinesDownAction"]);
+		expect(bound(rules, CODES.F9)).toEqual(["editor.action.sortLinesAscending"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.Backspace)).toEqual(["deleteAllLeft"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.Delete)).toEqual(["deleteAllRight"]);
+		expect(bound(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.KeyK))).toEqual(["deleteAllRight"]);
+		expect(bound(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.KeyU))).toEqual(["editor.action.transformToUppercase"]);
+		expect(freed(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.KeyU))).toEqual(["editor.action.removeCommentLine"]);
+		expect(bound(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.KeyL))).toEqual(["editor.action.transformToLowercase"]);
+		expect(freed(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.KeyL))).toEqual(["editor.toggleFold"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.KeyL)).toEqual(["editor.action.insertCursorAtEndOfEachLineSelected"]);
+		expect(freed(rules, CTRL | SHIFT | CODES.KeyL)).toEqual(["editor.action.selectHighlights"]);
+		expect(bound(rules, ALT | CODES.F3)).toEqual(["editor.action.selectHighlights"]);
+		expect(bound(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.Digit0))).toEqual(["editor.unfoldAll"]);
+		expect(freed(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.Digit0))).toEqual(["editor.foldAll"]);
+		// The bracket keys: Ctrl+M no longer turns Tab off.
+		expect(bound(rules, CTRL | CODES.KeyM)).toEqual(["editor.action.jumpToBracket"]);
+		expect(freed(rules, CTRL | CODES.KeyM)).toEqual(["editor.action.toggleTabFocusMode"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.KeyM)).toEqual(["editor.action.selectToBracket"]);
+	});
+
+	test("every key runs one command, in the editor's text only, and a command that changes text not where text may not be changed", async () => {
+		for (const platform of ["Win32", "MacIntel"]) {
+			const rules = await rulesOn(platform);
+			const adds = rules.filter((r) => !r.command.startsWith("-"));
+			expect(adds.length).toBeGreaterThan(12);
+			expect(new Set(adds.map((r) => r.keybinding)).size).toBe(adds.length);
+			for (const rule of adds) expect(rule.when?.startsWith("editorTextFocus")).toBe(true);
+			const changes = adds.filter((r) => /duplicate|joinLines|moveLines|sortLines|deleteAll|transformTo/.test(r.command));
+			expect(changes.length).toBeGreaterThan(7);
+			for (const rule of changes) expect(rule.when).toBe("editorTextFocus && !editorReadonly");
+			// A command is let go from a key before the key is given: the order the editor reads them in.
+			for (const rule of rules.filter((r) => r.command.startsWith("-"))) {
+				const at = rules.indexOf(rule);
+				expect(rules.findIndex((r) => r.keybinding === rule.keybinding && !r.command.startsWith("-"))).toBeGreaterThan(at);
+			}
+		}
+	});
+
+	test("on a Mac the keys are Sublime Text's for a Mac", async () => {
+		const rules = await rulesOn("MacIntel");
+		// Cmd (the editor's CtrlCmd) where the others have Ctrl.
+		expect(bound(rules, CTRL | SHIFT | CODES.KeyD)).toEqual(["editor.action.duplicateSelection"]);
+		// A line is moved with Ctrl+Cmd and an arrow: Cmd+Shift with one selects to the start or end of the file.
+		expect(bound(rules, WIN | CTRL | CODES.UpArrow)).toEqual(["editor.action.moveLinesUpAction"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.UpArrow)).toEqual([]);
+		expect(bound(rules, CODES.F5)).toEqual(["editor.action.sortLinesAscending"]);
+		expect(bound(rules, CODES.F9)).toEqual([]);
+		expect(bound(rules, WIN | CTRL | CODES.KeyG)).toEqual(["editor.action.selectHighlights"]);
+		// The editor has its own keys there for deleting to either end of the line.
+		expect(bound(rules, CTRL | SHIFT | CODES.Backspace)).toEqual([]);
+		// The bracket keys are on Ctrl itself, and "Tab moves focus" is let go of the one it was on there.
+		expect(bound(rules, WIN | CODES.KeyM)).toEqual(["editor.action.jumpToBracket"]);
+		expect(freed(rules, WIN | CODES.KeyM)).toEqual([]);
+		expect(bound(rules, WIN | SHIFT | CODES.KeyM)).toEqual(["editor.action.selectToBracket"]);
+		expect(freed(rules, WIN | SHIFT | CODES.KeyM)).toEqual(["editor.action.toggleTabFocusMode"]);
+	});
+});

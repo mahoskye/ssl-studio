@@ -334,6 +334,8 @@ export function EditorGroup(props: { index: number }) {
 			renderWhitespace: "selection",
 			"semanticHighlighting.enabled": true,
 			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
+			// Ctrl+click adds a cursor, as in Sublime Text (ADR 0034); the editor's own default is Alt+click.
+			multiCursorModifier: state.settings.ctrlClickAddsCursor === false ? "alt" : "ctrlCmd",
 			fixedOverflowWidgets: true,
 			// The last lines can be brought up to the top of the view, to be read there and not at the window's foot.
 			scrollBeyondLastLine: true,
@@ -528,9 +530,10 @@ export function EditorGroup(props: { index: number }) {
 			minimapEnabled: minimap(),
 			wordWrap: state.settings.wordWrap,
 			inlayHints: state.settings.inlayHints,
+			ctrlClickAddsCursor: state.settings.ctrlClickAddsCursor,
 			rulerList: rulers(),
 		}),
-		({ ed, index, path, monacoShown, fontSize, codeFontSetting, minimapEnabled, wordWrap, inlayHints, rulerList }) => {
+		({ ed, index, path, monacoShown, fontSize, codeFontSetting, minimapEnabled, wordWrap, inlayHints, ctrlClickAddsCursor, rulerList }) => {
 			if (!ed) return;
 			const activeCodeFont = codeFontSetting?.trim() ? resolveFontStack(codeFontSetting, DEFAULT_CODE_FONT) : codeFont || undefined;
 			const options: monaco.editor.IEditorOptions & monaco.editor.IGlobalEditorOptions = {
@@ -539,6 +542,7 @@ export function EditorGroup(props: { index: number }) {
 				minimap: { enabled: minimapEnabled },
 				wordWrap: wordWrap ? "on" : "off",
 				inlayHints: { enabled: inlayHints === false ? "off" : "on" },
+				multiCursorModifier: ctrlClickAddsCursor === false ? "alt" : "ctrlCmd",
 				rulers: rulerList,
 				lineNumbers: "on",
 				lineDecorationsWidth: 10,

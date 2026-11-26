@@ -235,6 +235,11 @@ export type Settings = {
 	menuBar?: boolean;
 	/** Parameter names shown beside the arguments of a call. On unless set to false. */
 	inlayHints?: boolean;
+	/**
+	 * Ctrl+click (Cmd+click on a Mac) in the code editor adds a cursor, as in Sublime Text, and Alt+click goes to a
+	 * definition. On unless set to false; then the two are the other way round, as in VS Code (ADR 0034).
+	 */
+	ctrlClickAddsCursor?: boolean;
 	/** A ruler at the style's line length. On unless set to false. */
 	rulers?: boolean;
 	/** How many columns to each side of that ruler the fainter rulers stand; 0 for none. 10 unless set. */

@@ -132,11 +132,15 @@ export const MENU_BAR: BarMenu[] = [
 			text("Copy line down", "editor.action.copyLinesDownAction"),
 			text("Move line up", "editor.action.moveLinesUpAction"),
 			text("Move line down", "editor.action.moveLinesDownAction"),
+			text("Duplicate selection", "editor.action.duplicateSelection"),
+			text("Join lines", "editor.action.joinLines"),
 			"separator",
 			text("Add cursor above", "editor.action.insertCursorAbove"),
 			text("Add cursor below", "editor.action.insertCursorBelow"),
+			text("Add cursors to line ends", "editor.action.insertCursorAtEndOfEachLineSelected"),
 			text("Add next occurrence", "editor.action.addSelectionToNextFindMatch"),
 			text("Select all occurrences", "editor.action.selectHighlights"),
+			text("Select to bracket", "editor.action.selectToBracket"),
 		],
 	},
 	{
@@ -451,15 +455,48 @@ export function initialReviewLayout(format: ReviewFormat, saved: string | null |
 }
 
 /**
+ * The shell's keys that are keys for editing in Sublime Text, each with the shell command it is the default key
+ * of (ADR 0034). While a text editor has the keyboard such a key is the editor's: Ctrl+Shift+D duplicates,
+ * Ctrl+J joins lines, Ctrl+Shift+M selects to the bracket. Anywhere else it is the shell's, as in VS Code.
+ *
+ * `macKey` is the press on a Mac, as `keyNamesForPlatform` names it first: Sublime Text's key there is on Cmd for
+ * the first two and on Ctrl itself for the third, and Cmd+Shift+M stays the shell's.
+ */
+export const EDITING_KEYS_OVER_SHELL: readonly { key: string; macKey: string; command: string }[] = [
+	{ key: "ctrl+shift+d", macKey: "cmd+shift+d", command: "docs" },
+	{ key: "ctrl+j", macKey: "cmd+j", command: "toggle-panel" },
+	{ key: "ctrl+shift+m", macKey: "ctrl+shift+m", command: "problems" },
+];
+
+/** How long the code editor waits for the second key of one of its two-key shortcuts, in milliseconds. */
+export const EDITOR_CHORD_WAIT = 5000;
+
+/**
+ * Whether a press is the first key of the code editor's two-key shortcuts: Ctrl+K (Cmd+K on a Mac), as in VS Code
+ * and in Sublime Text. The key after it is the editor's, whatever the shell has on that key: Ctrl+K Ctrl+0
+ * unfolds, and is not "focus the side panel".
+ */
+export function startsEditorChord(pressed: readonly string[], mac = false): boolean {
+	return pressed[0] === (mac ? "cmd+k" : "ctrl+k");
+}
+
+/**
  * Returns true when the global capture-phase keydown handler should stand aside and let
- * the focused editor/table widget handle the shortcut (table Alt+Arrow column reorder,
- * CM6 Sublime Duplicate Ctrl+Shift+D and Join Lines Ctrl+J).
+ * the focused editor/table widget handle the shortcut (table Alt+Arrow column reorder, and
+ * Sublime Text's editing keys in a text editor: `EDITING_KEYS_OVER_SHELL`).
+ *
+ * A key stands aside only while it runs the command it is the default key of. Given to another command by the
+ * user, it is theirs and runs that command everywhere; with its command moved to another key, nothing of the
+ * shell's is on it and the editor has it anyway.
  */
 export function shouldLetEditorHandleKey(info: {
 	id?: string;
 	pressed: readonly string[];
 	inTable: boolean;
 	inLiveMarkdown: boolean;
+	/** The keyboard is in the code editor's text (not in its find box, or another of its own boxes). */
+	inCodeEditor?: boolean;
+	mac?: boolean;
 }): boolean {
 	if (
 		info.inTable &&
@@ -468,12 +505,9 @@ export function shouldLetEditorHandleKey(info: {
 	) {
 		return true;
 	}
-	if (
-		info.inLiveMarkdown &&
-		((info.id === "docs" && info.pressed.includes("ctrl+shift+d")) ||
-			(info.id === "toggle-panel" && info.pressed.includes("ctrl+j")))
-	) {
-		return true;
+	if (info.inLiveMarkdown || info.inCodeEditor) {
+		const press = info.pressed[0];
+		return EDITING_KEYS_OVER_SHELL.some((own) => own.command === info.id && press === (info.mac ? own.macKey : own.key));
 	}
 	return false;
 }

@@ -30,7 +30,7 @@ import { askAbout, attachFileToAgent } from "./agent/Agent";
 import { startTidy } from "./agent/tidy";
 import { baseName, dirName, isInside, joinPath, relativePath, relativeTo } from "../shared/paths";
 import { defaultLayout, type DocFile, type Settings } from "../shared/protocol";
-import { menuForLetter, replaceErDiagramBlock, shouldLetEditorHandleKey } from "../shared/menuBar";
+import { EDITOR_CHORD_WAIT, menuForLetter, replaceErDiagramBlock, shouldLetEditorHandleKey, startsEditorChord } from "../shared/menuBar";
 import { resolveMarkdownMode, resolvePlanMode, resolveTableTextMode } from "../shared/viewModes";
 import { installRecentTabs, stepRecent } from "./recentTabs";
 import { goAlong } from "./navigation";
@@ -1739,6 +1739,10 @@ const KEYS: Record<string, string> = {
 	"ctrl+p": "quick-open",
 	"ctrl+shift+o": "quick-outline",
 	"ctrl+t": "symbols",
+	// Sublime Text's keys for the same two (ADR 0034), beside VS Code's. Ctrl+T stays the workspace's symbols and
+	// is not "transpose": it is used from the editor far more often than two letters are swapped.
+	"ctrl+r": "quick-outline",
+	"ctrl+shift+r": "symbols",
 	"ctrl+shift+p": "command-palette",
 	"ctrl+n": "new-untitled",
 	"ctrl+s": "save",
@@ -1749,6 +1753,10 @@ const KEYS: Record<string, string> = {
 	"ctrl+shift+tab": "recent-tab-back",
 	"alt+arrowleft": "go-back",
 	"alt+arrowright": "go-forward",
+	// Sublime Text's "jump back" and "jump forward". With Shift the key is named by what it types on some layouts.
+	"alt+-": "go-back",
+	"alt+shift+-": "go-forward",
+	"alt+shift+_": "go-forward",
 	"alt+z": "word-wrap",
 	"alt+shift+c": "copy-path",
 	"ctrl+pagedown": "next-tab",
@@ -1792,8 +1800,11 @@ const KEYS: Record<string, string> = {
 	f10: "menu-bar",
 };
 
-/** On a Mac, Alt with an arrow moves the cursor by a word, in the editor and in every box: those keys stay the text's. */
-const NOT_ON_A_MAC = new Set(["alt+arrowleft", "alt+arrowright"]);
+/**
+ * On a Mac, Alt with an arrow moves the cursor by a word, in the editor and in every box, and Alt with the hyphen
+ * types a dash: those keys stay the text's.
+ */
+const NOT_ON_A_MAC = new Set(["alt+arrowleft", "alt+arrowright", "alt+-", "alt+shift+-", "alt+shift+_"]);
 /** macOS VS Code defaults for Go Back / Go Forward while keeping Cmd+- reachable as Zoom Out (ADR 0032). */
 const MAC_DEFAULT_KEYS: Record<string, string> = {
 	"ctrl+-": "go-back",
@@ -1850,6 +1861,12 @@ export function resolveCommandKey(
 	return { id, pressed };
 }
 
+/** A text area within the code editor that is not the one its text is typed into. */
+const NOT_THE_EDITORS_TEXT = "textarea:not(.inputarea):not(.ime-text-area)";
+
+/** When the code editor was given the first key of one of its two-key shortcuts, while it waits for the second. */
+let editorChordAt = 0;
+
 export function installKeys() {
 	setFocusFallback(focusEditor);
 	installRecentTabs();
@@ -1861,6 +1878,17 @@ export function installKeys() {
 			// Never intercept IME composition or AltGr character typing.
 			if (e.isComposing || e.keyCode === 229 || modalOpen() || isModifierKey(e.key) || e.getModifierState?.("AltGraph")) return;
 			const pressed = keyNamesForPlatform(e, onMac);
+			const targetEl = e.target instanceof Element ? e.target : document.activeElement;
+			// The code editor's text, where its own keys work: not its find box or its rename box, which are within it.
+			// The text is typed into one of three elements of the editor's, by its version and by what is going on:
+			// while it waits for the second key of a two-key shortcut the keyboard is in its "ime-text-area".
+			const inCodeEditor = Boolean(targetEl?.closest(".monaco-editor") && !targetEl.closest(`.find-widget, .rename-box, .rename-input, input, ${NOT_THE_EDITORS_TEXT}`));
+			// The second key of one of the code editor's two-key shortcuts is the editor's. The shell reads one key at
+			// a time, and took the second for itself where it had a shortcut on it: Ctrl+K Ctrl+0 focused the side
+			// panel, and Ctrl+K Ctrl+1 the editor, where the editor folds and unfolds with them.
+			const secondOfChord = inCodeEditor && Date.now() - editorChordAt < EDITOR_CHORD_WAIT;
+			editorChordAt = 0;
+			if (secondOfChord) return;
 			// Text-editing controls supersede conflicting chrome shortcuts inside Markdown editors.
 			if (isInMarkdownTextEditor(e.target, activeDoc()?.model.getLanguageId())) {
 				const mdCmd = pressed.map((name) => MARKDOWN_TEXT_KEYS[name]).find(Boolean);
@@ -1874,10 +1902,12 @@ export function installKeys() {
 			const overrides = state.settings.keys ?? {};
 			const map = keymap();
 			const { id } = resolveCommandKey(e, map, onMac, overrides);
-			const targetEl = e.target instanceof Element ? e.target : document.activeElement;
 			const inTable = Boolean(targetEl?.closest(".cm-md-table-wrap, .table-view"));
 			const inLiveMarkdown = Boolean(targetEl?.closest(".cm-editor") && !targetEl.closest(".cm-md-read"));
-			if (shouldLetEditorHandleKey({ id, pressed, inTable, inLiveMarkdown })) return;
+			if (shouldLetEditorHandleKey({ id, pressed, inTable, inLiveMarkdown, inCodeEditor, mac: onMac })) return;
+			// The first key of a two-key shortcut, where it is the editor's to take (no command of the shell's is on
+			// it, and it is not a document's "insert link", which was run above): the next key is the editor's too.
+			if (!id && inCodeEditor && startsEditorChord(pressed, onMac)) editorChordAt = Date.now();
 			if (id === "toggle-markdown-mode" && !isMarkdown(activePath())) return;
 			// Alt and a menu's first letter opens that menu, where no shortcut has the key. Not with Ctrl or Shift, and not
 			// where Alt and a letter types a character: the key is then that character, not the letter.

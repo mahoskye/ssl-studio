@@ -148,7 +148,9 @@ export function isInMarkdownTextEditor(target: EventTarget | null, activeLanguag
 	const el = typeof Element !== "undefined" && target instanceof Element ? target : typeof document !== "undefined" ? document.activeElement : null;
 	if (!el) return false;
 	if (el.closest(".cm-panels, .cm-md-table-wrap, .find-widget, .rename-input")) return false;
-	if (el.closest("input, textarea:not(.inputarea)")) return false;
+	// Not one of the editor's boxes. The code editor's own text is typed into a text area too (by its version,
+	// and while a character is being composed): that one is the text.
+	if (el.closest("input, textarea:not(.inputarea):not(.ime-text-area)")) return false;
 	if (el.closest(".cm-editor") && !el.closest(".cm-md-read")) return true;
 	if (el.closest(".monaco-editor") && activeLanguage === "markdown") return true;
 	return false;

@@ -5,6 +5,7 @@ import { completionStatus } from "@codemirror/autocomplete";
 import {
 	copyLineDown,
 	copyLineUp,
+	cursorMatchingBracket,
 	defaultKeymap,
 	deleteLine,
 	historyKeymap,
@@ -657,6 +658,24 @@ export const cmInsertLineAbove: Command = (view) => {
 	return true;
 };
 
+/**
+ * Sublime Text `Mod-Shift-l`, "split into lines": a selection that runs over several lines becomes a cursor at the
+ * end of each of its lines (not of a last line it only reaches the start of), and a selection within one line a
+ * cursor at its end. The code editor's command for the key does the same.
+ */
+export const cmSplitIntoLines: Command = (view) => {
+	const { state } = view;
+	const ranges = state.selection.ranges.flatMap((range) => {
+		const first = state.doc.lineAt(range.from).number;
+		const end = state.doc.lineAt(range.to);
+		const last = end.number > first && range.to === end.from ? end.number - 1 : end.number;
+		if (last === first) return [EditorSelection.cursor(range.empty ? range.head : range.to)];
+		return Array.from({ length: last - first + 1 }, (_, i) => EditorSelection.cursor(state.doc.line(first + i).to));
+	});
+	view.dispatch({ selection: EditorSelection.create(ranges, ranges.length - 1), scrollIntoView: true, userEvent: "select" });
+	return true;
+};
+
 /** Sublime Text / Monaco `Mod-l`: select full current line, expanding to the next line on repeated presses. */
 export const cmSelectLine: Command = (view) => {
 	const doc = view.state.doc.toString();
@@ -1030,6 +1049,16 @@ const markdownBindings: KeyBinding[] = [
 	{ key: "Mod-Enter", run: cmInsertLineBelow, preventDefault: true },
 	{ key: "Mod-Shift-Enter", run: cmInsertLineAbove, preventDefault: true },
 	{ key: "Mod-l", run: cmSelectLine, preventDefault: true },
+	// The same keys as the code editor's (ADR 0034): move a line, split a selection into lines, every occurrence,
+	// and the two bracket keys. Ctrl is the Ctrl key itself for the brackets, on a Mac as well.
+	{ key: "Ctrl-Shift-ArrowUp", mac: "Ctrl-Cmd-ArrowUp", run: moveLineUp, preventDefault: true },
+	{ key: "Ctrl-Shift-ArrowDown", mac: "Ctrl-Cmd-ArrowDown", run: moveLineDown, preventDefault: true },
+	{ key: "Mod-Shift-l", run: cmSplitIntoLines, preventDefault: true },
+	{ key: "Alt-F3", mac: "Ctrl-Cmd-g", run: selectSelectionMatches, preventDefault: true },
+	// Handled whether or not there is a bracket to go to: left to fall through, the key is CodeMirror's own for
+	// "Tab moves focus", which turns Tab off without a word, as the code editor's did.
+	{ key: "Ctrl-m", run: (v) => (cursorMatchingBracket(v), true), preventDefault: true },
+	{ key: "Ctrl-Shift-m", run: selectMatchingBracket, preventDefault: true },
 	// Live Table & Callout keyboard entry on vertical boundary navigation.
 	{ key: "ArrowDown", run: cmStepIntoLiveWidget(1) },
 	{ key: "ArrowUp", run: cmStepIntoLiveWidget(-1) },
@@ -1047,7 +1076,6 @@ const markdownBindings: KeyBinding[] = [
 	{ key: "Mod-h", run: (v) => openFind(v, true), preventDefault: true },
 	{ key: "Mod-g", run: gotoLine, preventDefault: true },
 	{ key: "Mod-d", run: selectNextOccurrence, preventDefault: true },
-	{ key: "Mod-Shift-l", run: selectSelectionMatches, preventDefault: true },
 	{ key: "Mod-/", run: cmToggleComment, preventDefault: true },
 	{ key: "Shift-Alt-a", run: cmToggleComment, preventDefault: true },
 	{ key: "Alt-ArrowUp", run: moveLineUp, preventDefault: true },
@@ -1149,7 +1177,11 @@ export function runCmAction(view: EditorView, id: string): boolean {
 			showPanel("objects");
 			return true;
 		case "editor.action.jumpToBracket":
+			return cursorMatchingBracket(view);
+		case "editor.action.selectToBracket":
 			return selectMatchingBracket(view);
+		case "editor.action.insertCursorAtEndOfEachLineSelected":
+			return cmSplitIntoLines(view);
 		case "md-bold":
 			return cmToggleBold(view);
 		case "md-italic":

@@ -43,7 +43,8 @@
     (`choose()` / `ask()`) for compact binary/destructive confirmations and
     single-line prompts. Menus and popovers must clamp inside the viewport and
     flip upward/left near window edges.
-  - **Keybindings & editing ergonomics:** Sublime Text.
+  - **Keybindings & editing ergonomics:** Sublime Text. While a text editor
+    has the keyboard, its editing keys come before the shell's (ADR 0034).
   - **Markdown authoring, Live Preview, links & notes:** Obsidian. Keep the
     editor canvas content-first (prose starts at the top); place Properties,
     Ticket Work, Readiness, and Links inspectors in the shared right-hand

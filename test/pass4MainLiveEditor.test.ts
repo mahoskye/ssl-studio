@@ -882,3 +882,30 @@ describe("P3: a row with more cells than the table has columns says so", () => {
 		expect(source("src/view/editor/cmLivePlugin.ts")).toContain('".cm-tbl-extra": {');
 	});
 });
+
+describe("ADR 0034 — the Markdown editor has the code editor's keys: split into lines", () => {
+	test("a selection over several lines becomes a cursor at the end of each, and one within a line a cursor at its end", async () => {
+		const { cmSplitIntoLines } = await import("../src/view/editor/cmKeymap");
+		const heads = (view: EditorView) => view.state.selection.ranges.map((r) => (r.empty ? r.head : -1));
+		const endOf = (word: string) => DOC.indexOf(word) + DOC.slice(DOC.indexOf(word)).indexOf("\n");
+
+		// From inside the first line of the body to inside the third: three cursors, at the three line ends.
+		const three = headless(liveState(DOC, EditorSelection.single(B + 3, DOC.indexOf("Third") + 2)));
+		expect(cmSplitIntoLines(three)).toBe(true);
+		expect(heads(three)).toEqual([endOf("Remember"), endOf("Second"), endOf("Third")]);
+		expect(text(three)).toBe(DOC);
+
+		// A selection that only reaches the start of the next line does not take that line in.
+		const toLineStart = headless(liveState(DOC, EditorSelection.single(B, DOC.indexOf("Third"))));
+		cmSplitIntoLines(toLineStart);
+		expect(heads(toLineStart)).toEqual([endOf("Remember"), endOf("Second")]);
+
+		// Within one line: a cursor where the selection ended. A cursor alone stays where it is.
+		const within = headless(liveState(DOC, EditorSelection.single(B + 2, B + 8)));
+		cmSplitIntoLines(within);
+		expect(heads(within)).toEqual([B + 8]);
+		const cursor = headless(liveState(DOC, B + 4));
+		cmSplitIntoLines(cursor);
+		expect(heads(cursor)).toEqual([B + 4]);
+	});
+});

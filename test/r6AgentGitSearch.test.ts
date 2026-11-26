@@ -409,3 +409,57 @@ describe("Wave 4.4 — Git branch vs active ticket mismatch detector", () => {
 		expect(detectBranchTicketMismatch(null, "DEMO-101")).toBeNull();
 	});
 });
+
+describe("ADR 0034 — in a text editor, Sublime Text's editing keys come before the shell's", () => {
+	const { EDITING_KEYS_OVER_SHELL } = require("../src/shared/menuBar") as typeof import("../src/shared/menuBar");
+	const ask = (id: string | undefined, pressed: string[], where: { code?: boolean; live?: boolean; mac?: boolean } = { code: true }) =>
+		shouldLetEditorHandleKey({ id, pressed, inTable: false, inLiveMarkdown: Boolean(where.live), inCodeEditor: Boolean(where.code), mac: where.mac });
+
+	test("Ctrl+Shift+D, Ctrl+J and Ctrl+Shift+M are the editor's in the code editor and in a document, and the shell's elsewhere", () => {
+		for (const { key, command } of EDITING_KEYS_OVER_SHELL) {
+			expect(ask(command, [key], { code: true })).toBe(true);
+			expect(ask(command, [key], { live: true })).toBe(true);
+			expect(ask(command, [key], {})).toBe(false);
+		}
+		expect(EDITING_KEYS_OVER_SHELL.map((k) => k.key)).toEqual(["ctrl+shift+d", "ctrl+j", "ctrl+shift+m"]);
+	});
+
+	test("a key the user gave to another command is theirs in an editor too, and no other shell key gives way", () => {
+		// Ctrl+J given to "save all": the key runs it everywhere.
+		expect(ask("save-all", ["ctrl+j"])).toBe(false);
+		// The command moved to another key: that key is not an editing key, and runs the command in an editor.
+		expect(ask("toggle-panel", ["ctrl+alt+j"])).toBe(false);
+		expect(ask("symbols", ["ctrl+t"])).toBe(false);
+		expect(ask("save", ["ctrl+s"])).toBe(false);
+		expect(ask(undefined, ["ctrl+j"])).toBe(false);
+	});
+
+	test("on a Mac the key is Sublime Text's for a Mac: Cmd for the first two, Ctrl itself for the bracket", () => {
+		// Cmd+Shift+D is named "cmd+shift+d" first, then by its name on other systems.
+		expect(ask("docs", ["cmd+shift+d", "ctrl+shift+d"], { code: true, mac: true })).toBe(true);
+		expect(ask("toggle-panel", ["cmd+j", "ctrl+j"], { code: true, mac: true })).toBe(true);
+		expect(ask("problems", ["ctrl+shift+m"], { code: true, mac: true })).toBe(true);
+		// Cmd+Shift+M stays the shell's "Problems": Sublime Text's key there is on Ctrl.
+		expect(ask("problems", ["cmd+shift+m", "ctrl+shift+m"], { code: true, mac: true })).toBe(false);
+		// And the Ctrl key itself with D is not Sublime Text's key for duplicating on a Mac.
+		expect(ask("docs", ["ctrl+shift+d"], { code: true, mac: true })).toBe(false);
+	});
+});
+
+describe("ADR 0034 — the code editor's two-key shortcuts", () => {
+	const { EDITOR_CHORD_WAIT, startsEditorChord } = require("../src/shared/menuBar") as typeof import("../src/shared/menuBar");
+
+	test("Ctrl+K is the first key of one, and Cmd+K on a Mac; nothing else is", () => {
+		expect(startsEditorChord(["ctrl+k"])).toBe(true);
+		expect(startsEditorChord(["ctrl+shift+k"])).toBe(false);
+		expect(startsEditorChord(["ctrl+0"])).toBe(false);
+		expect(startsEditorChord([])).toBe(false);
+		// Cmd+K is named "cmd+k" first on a Mac; the Ctrl key itself with K is the text's there (delete to line end).
+		expect(startsEditorChord(["cmd+k", "ctrl+k"], true)).toBe(true);
+		expect(startsEditorChord(["ctrl+k"], true)).toBe(false);
+	});
+
+	test("the wait for the second key is the editor's own: five seconds", () => {
+		expect(EDITOR_CHORD_WAIT).toBe(5000);
+	});
+});
