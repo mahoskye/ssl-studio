@@ -186,7 +186,8 @@ export class LspSession {
 						textDocument: {
 							synchronization: { didSave: true },
 							documentSymbol: { hierarchicalDocumentSymbolSupport: true },
-							completion: { completionItem: { snippetSupport: true, documentationFormat: ["markdown", "plaintext"] } },
+							// `contextSupport`: each request says what set it off (`completionContext`), which the server answers by.
+							completion: { contextSupport: true, completionItem: { snippetSupport: true, documentationFormat: ["markdown", "plaintext"] } },
 							hover: { contentFormat: ["markdown", "plaintext"] },
 							signatureHelp: { signatureInformation: { documentationFormat: ["markdown", "plaintext"] } },
 							rename: { prepareSupport: true },
@@ -696,12 +697,25 @@ async function locations(result: any): Promise<monaco.languages.Location[]> {
 	return out;
 }
 
+/**
+ * What set a completion off, as the protocol says it: typing, a trigger character (and which), or a list that was
+ * not complete. The protocol's numbers are the editor's plus one.
+ *
+ * The server answers by it. Told that ":" was typed, it gives the members of the object before the colon, or the
+ * keywords alone, each with the range it replaces. Told nothing, it gave every name it knows at every place, and no
+ * range: the list after "oMail:" was the whole language, and the app had never said what was typed.
+ */
+export function completionContext(context?: { triggerKind?: number; triggerCharacter?: string }): { triggerKind: number; triggerCharacter?: string } {
+	const triggerKind = (context?.triggerKind ?? 0) + 1;
+	return context?.triggerCharacter ? { triggerKind, triggerCharacter: context.triggerCharacter } : { triggerKind };
+}
+
 export function registerProviders() {
 	monaco.languages.registerCompletionItemProvider("ssl", {
 		triggerCharacters: [":"],
-		async provideCompletionItems(model, position) {
+		async provideCompletionItems(model, position, context) {
 			if (!isServed(model)) return { suggestions: [] };
-			const result = await quiet(session.request("textDocument/completion", { ...doc(model), position: toPosition(position) }), null);
+			const result = await quiet(session.request("textDocument/completion", { ...doc(model), position: toPosition(position), context: completionContext(context) }), null);
 			const items = (result?.items ?? result ?? []) as any[];
 			const word = model.getWordUntilPosition(position);
 			const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
@@ -712,7 +726,8 @@ export function registerProviders() {
 					const snippet = item.insertTextFormat === 2;
 					const insertText: string = item.textEdit?.newText ?? item.insertText ?? item.label;
 					const named = item.textEdit?.range ?? item.textEdit?.replace;
-					// With no range from the server the word at the cursor is replaced, and with it the punctuation
+					// With no range from the server (it names one for a keyword only when a typed ":" set the list off, not
+					// when the list is asked for later) the word at the cursor is replaced, and with it the punctuation
 					// before the word that the text itself opens with: ":WHILE" for a typed ":wh" is not "::WHILE".
 					const lead = named ? 0 : typedLead(beforeWord, insertText, snippet);
 					const typed = insertText.slice(0, lead);

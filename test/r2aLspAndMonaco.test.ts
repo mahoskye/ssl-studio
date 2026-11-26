@@ -834,14 +834,15 @@ describe("The code editor's everyday editing: completion ranges, format on save,
 			{ label: ":WITH", kind: 14, textEdit: { newText: ":WITH", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } } } },
 		];
 		const request = shared.request;
-		(shared as any).request = async () => ({ items });
+		const asked: any[] = [];
+		(shared as any).request = async (_method: string, params: any) => (asked.push(params), { items });
 		try {
-			const ask = async (line: string) => {
+			const ask = async (line: string, context?: { triggerKind: number; triggerCharacter?: string }) => {
 				const model = makeFakeModel(line, "file:///ws/complete.ssl");
 				const start = line.length - (/[A-Za-z0-9_]*$/.exec(line)?.[0].length ?? 0);
 				model.getLineContent = () => line;
 				model.getWordUntilPosition = () => ({ word: line.slice(start), startColumn: start + 1, endColumn: line.length + 1 });
-				const result = await provider.provideCompletionItems(model, { lineNumber: 1, column: line.length + 1 });
+				const result = await provider.provideCompletionItems(model, { lineNumber: 1, column: line.length + 1 }, context);
 				model.dispose();
 				return Object.fromEntries(result.suggestions.map((s: any) => [s.label, s])) as Record<string, any>;
 			};
@@ -870,6 +871,16 @@ describe("The code editor's everyday editing: completion ranges, format on save,
 			const afterDot = await ask("b := .t");
 			expect(cols(afterDot[".T."])).toEqual([6, 8]);
 			expect(cols(afterDot[":WHILE"])).toEqual([7, 8]);
+
+			// The server is told what set the list off, in the protocol's numbers (the editor's plus one): it
+			// answers a typed ":" with members or keywords, and with nothing said it gave everything it knows.
+			asked.length = 0;
+			await ask("oMail:", { triggerKind: 1, triggerCharacter: ":" });
+			await ask("wh", { triggerKind: 0 });
+			await ask("wh", { triggerKind: 2 });
+			await ask("wh");
+			expect(asked.map((params) => params.context)).toEqual([{ triggerKind: 2, triggerCharacter: ":" }, { triggerKind: 1 }, { triggerKind: 3 }, { triggerKind: 1 }]);
+			expect(asked[0].position).toEqual({ line: 0, character: 6 });
 		} finally {
 			(shared as any).request = request;
 		}
@@ -878,8 +889,9 @@ describe("The code editor's everyday editing: completion ranges, format on save,
 	test("a script not yet saved is the server's to read; a model that is no document of the user's is not", async () => {
 		const sess = new LspSession();
 		const sent: { method: string; params: any }[] = [];
+		let hello: any;
 		(sess.client as any).notify = (method: string, params: any) => void sent.push({ method, params });
-		(sess.client as any).request = async (method: string) => (method === "initialize" ? { capabilities: {} } : null);
+		(sess.client as any).request = async (method: string, params: any) => (method === "initialize" ? ((hello = params), { capabilities: {} }) : null);
 		const untitled = makeFakeModel(":DECLARE x;", "untitled:Untitled-1");
 		const preview = makeFakeModel(":DECLARE y;", "inmemory://model/1");
 		sess.track(untitled);
@@ -888,6 +900,8 @@ describe("The code editor's everyday editing: completion ranges, format on save,
 		const opened = sent.filter((m) => m.method === "textDocument/didOpen").map((m) => m.params.textDocument.uri);
 		expect(opened).toEqual([untitled.uri.toString()]);
 		expect(untitled.uri.toString()).toBe("untitled:Untitled-1");
+		// The server is told at the start that each completion request says what set it off.
+		expect(hello.capabilities.textDocument.completion.contextSupport).toBe(true);
 		sess.untrack(untitled);
 		expect(sent.at(-1)).toEqual({ method: "textDocument/didClose", params: { textDocument: { uri: "untitled:Untitled-1" } } });
 		untitled.dispose();
