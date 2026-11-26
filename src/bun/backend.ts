@@ -789,6 +789,12 @@ export function createBackend(host: Host, initial?: string) {
 			const path = process.env.SSL_STUDIO_SELFTEST;
 			if (!path) return;
 			await Bun.write(path, JSON.stringify(report, null, 2) + "\n");
+			// The run is over and nobody is there to answer, so what it left unsaved is not asked about, as it is not after
+			// "Discard changes". The long run leaves two files unsaved (the plan it rebuilt, and the script built from
+			// it): its quit was refused, and the app stood with the question until the runner's time limit stopped it,
+			// whether its steps had passed or not.
+			closing = true;
+			unsaved = 0;
 			setTimeout(() => host.quit(), 300);
 		},
 	};

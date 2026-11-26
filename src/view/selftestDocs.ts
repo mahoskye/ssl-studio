@@ -13,7 +13,7 @@ import { requestMarkdownInspector, requestMarkdownPanelTab } from "./panels/mark
 import { showPanel } from "./panels/registry";
 import { docs } from "./project";
 import { followRename, setStatus, updateCatalogs } from "./projectDocs";
-import { activePath, canonical, openFile, setState, state } from "./state";
+import { activePath, canonical, openFile, setState, state, type PanelId } from "./state";
 
 type Steps = Record<string, boolean | string>;
 
@@ -91,6 +91,19 @@ const ensureRead = async () => {
 	btn.click();
 	return Boolean(await until(rendered));
 };
+
+/**
+ * Shows a panel and waits until the keyboard is in it. `showPanel` takes the keyboard into the panel a moment after
+ * it is asked, once the panel is drawn, and a menu shuts when the keyboard leaves it. A person cannot press a key in
+ * that moment; a step can, and the menu it opened was then shut by the panel's own taking of the keyboard, before
+ * the step looked for it. So a step that goes on to the keyboard or to a menu comes to the panel this way.
+ */
+async function toPanel(id: PanelId): Promise<boolean> {
+	// From nowhere, so that the keyboard arriving is the panel's doing, and not where an earlier step left it.
+	if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+	showPanel(id);
+	return Boolean(await until(() => document.activeElement?.closest(`[data-panel="${id}"]`)));
+}
 
 /** Runs each step in turn, and stops at the first that fails: the later ones build on it. */
 async function run(steps: Steps, work: (step: (name: string, check: () => Promise<unknown>) => Promise<void>) => Promise<void>) {
@@ -351,7 +364,7 @@ export function selftestWork(): Promise<Steps> {
 
 		// The same menu by key, from the heading the keyboard is on; Escape gives the keyboard back to the heading.
 		await step("headMenuByKey", async () => {
-			showPanel("docs");
+			if (!(await toPanel("docs"))) return false;
 			const head = await until(() => document.querySelector<HTMLElement>('[data-panel="docs"] [data-row="head:docs:knowledge"]'));
 			if (!head) return false;
 			head.focus();
@@ -368,7 +381,8 @@ export function selftestWork(): Promise<Steps> {
 		// What the data looks like is listed by its kinds, each with a heading of its own; a table is described from
 		// its kind's heading, in that kind's folder, and is marked as still its template.
 		await step("schemaKindsListed", async () => {
-			showPanel("docs");
+			// The next step opens a heading's menu: with the panel only asked for, that menu was shut the same way.
+			if (!(await toPanel("docs"))) return false;
 			return until(() => ["database", "interfaces", "files"].every((kind) => document.querySelector(`[data-panel="docs"] [data-row="head:docs:schema:${kind}"]`)));
 		});
 		await step("tableDescribedFromHead", async () => {

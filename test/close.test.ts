@@ -1,7 +1,10 @@
 // ADR 0009: the app's window does not close over unsaved work. The app's
 // side of that: it says no while the view reports unsaved files, tells the
 // view to ask, and quits when the view says the user has decided.
-import { describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createBackend, type Host } from "../src/bun/backend";
 
 function app() {
@@ -57,6 +60,45 @@ describe("closing the window", () => {
 		const { backend } = app();
 		await backend.api.unsavedChanged(Number.NaN);
 		expect(backend.mayClose()).toBe(true);
+		backend.dispose();
+	});
+});
+
+// A self-test (`hutch run selftest-cycle`) ends by telling the app it is done. Nobody is there to answer a question,
+// and a run that left edits unsaved stood with it until its time limit: a plan built and rebuilt leaves two.
+describe("a self-test that is done", () => {
+	const REPORT = "SSL_STUDIO_SELFTEST";
+	const before = process.env[REPORT];
+	const folder = mkdtempSync(join(tmpdir(), "ssl-studio-close-"));
+	afterEach(() => {
+		if (before === undefined) delete process.env[REPORT];
+		else process.env[REPORT] = before;
+	});
+	afterAll(() => rmSync(folder, { recursive: true, force: true }));
+
+	test("writes its report and closes the app without asking, whatever it left unsaved", async () => {
+		const report = join(folder, "selftest.json");
+		process.env[REPORT] = report;
+		const { backend, events, quits } = app();
+		await backend.api.unsavedChanged(2);
+		await backend.api.selftestDone({ ok: true });
+		expect(JSON.parse(readFileSync(report, "utf8"))).toEqual({ ok: true });
+		expect(backend.mayClose()).toBe(true);
+		expect(events).toEqual([]);
+		await new Promise((r) => setTimeout(r, 400));
+		expect(quits()).toBe(1);
+		backend.dispose();
+	});
+
+	test("is nothing outside a self-test: unsaved work is still asked about", async () => {
+		delete process.env[REPORT];
+		const { backend, events, quits } = app();
+		await backend.api.unsavedChanged(2);
+		await backend.api.selftestDone({ ok: true });
+		expect(backend.mayClose()).toBe(false);
+		expect(events).toEqual(["closeRequested"]);
+		await new Promise((r) => setTimeout(r, 400));
+		expect(quits()).toBe(0);
 		backend.dispose();
 	});
 });
