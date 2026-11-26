@@ -7,6 +7,8 @@ import { createEffect, createMemo, createSignal, createStore, For, onCleanup, on
 import { createAsyncQuery } from "../asyncQuery";
 import { activeEditor } from "../editor/EditorGroup";
 import { activeLiveEditor, liveSelectionVersion } from "../editor/liveBridge";
+import type { monaco } from "../editor/monaco";
+import { searchableText, searchableTextNow } from "../lsp/facts";
 import { review, openReview, type Check } from "../editor/Review";
 import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, save, scriptsCameTo, setState, state } from "../state";
 import { agent, ask, chatSessionEpoch, chooseModel, clearEntries, clearSavedThreads, currentModel, interrupt, isSessionBreak, resume, safely, setAgent, start, startNewThread, stop, switchThread, syncWorkspaceThreads, type Entry } from "./store";
@@ -212,6 +214,24 @@ export function selectionContext(): { label: string; code: string } | null {
 	const selection = editor.getSelection();
 	if (selection && !selection.isEmpty()) return { label: `lines ${selection.startLineNumber}-${selection.endLineNumber}`, code: model.getValueInRange(selection) };
 	return null;
+}
+
+/**
+ * Where the names of tables are looked for: the selection where there is one, as `selectionContext` finds it, and
+ * the whole of the document if not. A Markdown editor gives its text as it is; a code editor gives its model, so
+ * that the text can be read without its comments (`searchableText`: a table named only in a comment is not used).
+ */
+function tableSearchPlace(doc: { model: monaco.editor.ITextModel; binary?: unknown } | undefined): { text: string } | { model: monaco.editor.ITextModel; selection: monaco.Selection | null } | null {
+	const live = activeLiveEditor();
+	if (live) {
+		if (!live.getSelection().isEmpty()) return { text: live.getSelectedText() };
+	} else {
+		const editor = activeEditor();
+		const model = editor?.getModel();
+		const selection = editor?.getSelection();
+		if (model && selection && !selection.isEmpty()) return { model, selection };
+	}
+	return doc && !doc.binary ? { model: doc.model, selection: null } : null;
 }
 
 async function readForPrompt(path: string): Promise<string | null> {
@@ -455,8 +475,8 @@ async function prepareContextDelta(
 
 	// 3b. Targeted schema column tables referenced in the active SSL/SQL editor or selection (Wave 3.1).
 	if (flags.withRefTables) {
-		const sel = selectionContext();
-		const activeModelText = sel?.code || activeDocNow?.model.getValue() || "";
+		const place = tableSearchPlace(activeDocNow);
+		const activeModelText = !place ? "" : "text" in place ? place.text : await searchableText(place.model, place.selection);
 		const refTables = referencedSchemaTables(activeModelText, all, 6);
 		if (refTables.length) {
 			const blocks: string[] = [];
@@ -1258,7 +1278,8 @@ export function AgentPanel() {
 		liveSelectionVersion();
 		const doc = activeDoc();
 		if (!doc || doc.binary) return [] as DocFile[];
-		const txt = selectionContext()?.code || doc.model.getValue() || "";
+		const place = tableSearchPlace(doc);
+		const txt = !place ? "" : "text" in place ? place.text : searchableTextNow(place.model, place.selection);
 		return referencedSchemaTables(txt, docs(), 6);
 	});
 	const detectedGoverningDocs = createMemo(() => {

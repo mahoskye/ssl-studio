@@ -48,11 +48,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bun scripts/bundle-lsp.ts --download
 
-      - name: Type check and tests
-        run: |
-          bun scripts/assets.ts
-          hutch run check
-          bun test
+      - name: Assets
+        run: bun scripts/assets.ts
+
+      - name: Type check
+        id: check
+        run: hutch run check
+
+      # The tests run when the type check fails too: one failed check hid what the tests do on that system.
+      - name: Tests
+        if: ${{ !cancelled() && steps.check.conclusion != 'skipped' }}
+        run: bun test
 
       - name: Release build
         run: hutch run build

@@ -81,13 +81,13 @@ describe("the delimiter a table is read with survives a header edit", () => {
 		const csv = 'id,"Last, First",status\n1,"Doe, Jane",open\n';
 		const table = parseCsv(csv);
 		const tabbed = convertCsvDelimiter(csv, table, "\t");
-		expect(tabbed).toBe('id\t"Last, First"\tstatus\n1\tDoe, Jane\topen\n');
+		expect(tabbed).toBe('id\t"Last, First"\tstatus\n1\t"Doe, Jane"\topen\n');
 		expect(parseCsv(tabbed).delimiter).toBe("\t");
 		expect(parseCsv(tabbed).header.map((c) => c.text)).toEqual(["id", "Last, First", "status"]);
 		expect(texts(parseCsv(tabbed).rows)).toEqual([["1", "Doe, Jane", "open"]]);
 
 		const semi = convertCsvDelimiter(csv, table, ";");
-		expect(semi).toBe('id;"Last, First";status\n1;Doe, Jane;open\n');
+		expect(semi).toBe('id;"Last, First";status\n1;"Doe, Jane";open\n');
 		expect(parseCsv(semi).delimiter).toBe(";");
 		expect(texts(parseCsv(semi).rows)).toEqual([["1", "Doe, Jane", "open"]]);
 

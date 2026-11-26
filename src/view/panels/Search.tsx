@@ -18,9 +18,23 @@ import { baseName, isInside, relativeTo } from "../../shared/paths";
 import { parseCsv } from "../../shared/csv";
 import { createFileFilter, folderPattern } from "../../shared/fileGlob";
 import { frontMatter, HEADING, many, one, plainMarkdown } from "../../shared/frontMatter";
-import { overlapsProtectedSpan, planLineBreadcrumb, protectedMarkdownSpans, replaceSafeInText, type TextSpan } from "../../shared/menuBar";
+import { overlapsProtectedSpan, planLineBreadcrumb, protectedMarkdownSpans, type TextSpan } from "../../shared/menuBar";
 import { DOC_FOLDERS, isCatalog, toneOf } from "../../shared/projectDocs";
-import { excerptForMatch, matchesOn, REGEX_MAX_LINE_LENGTH, SEARCH_LIMIT, SEARCH_LINE_WINDOW, searchPattern, type SearchOptions } from "../../shared/searchPattern";
+import {
+	becomesFound,
+	changedSinceSearch,
+	folderScope,
+	openBatches,
+	replacePreviewTitle,
+	replaceQuestion,
+	replaceSearched,
+	searchBoxMoved,
+	SEARCH_LIMIT,
+	SEARCH_LINE_WINDOW,
+	type OpenText,
+	type ReplaceEdit,
+	type SearchOptions,
+} from "../../shared/searchPattern";
 import { outline } from "../../shared/outline";
 import { workspaceTags } from "../../shared/tags";
 import { codeMatchesRef, descendantTickets, scriptsForTicket, ticketForFile, ticketWork } from "../../shared/workContext";
@@ -59,10 +73,15 @@ const [safeDocs, setSafeDocs] = createSignal(true);
 const [include, setInclude] = createSignal("");
 const [exclude, setExclude] = createSignal("");
 
-/** Shows the Search panel scoped to a specific folder (relative to workspace root). */
+/**
+ * Shows the Search panel scoped to a specific folder (relative to workspace root). Both boxes are set, and shown:
+ * what a scope chosen before was leaving out (the Code scope leaves out the documents) would go on being left out.
+ */
 export function findInFolder(relFolder: string) {
+	const scope = folderScope(relFolder);
 	setTicketScopeKey(null);
-	setInclude(folderPattern(relFolder));
+	setInclude(scope.include);
+	setExclude(scope.exclude);
 	setChoosing(true);
 	showPanel("search");
 }
@@ -73,48 +92,50 @@ export function showReplace() {
 	showPanel("search");
 }
 
-/** Replaces every match in an open file's text (optionally restricted to `allowedLines` and skipping `protectedSpans`), as one undoable step. */
-export function replaceInModel(
-	model: monaco.editor.ITextModel,
-	pattern: RegExp,
-	with_: string,
-	regex: boolean,
-	allowedLines?: ReadonlySet<number>,
-	protectedSpans?: ReadonlyMap<number, TextSpan[]>,
-): number {
-	const edits: monaco.editor.IIdentifiedSingleEditOperation[] = [];
-	for (let line = 1; line <= model.getLineCount(); line++) {
-		if (allowedLines && !allowedLines.has(line)) continue;
-		const content = model.getLineContent(line);
-		if (regex && content.length > REGEX_MAX_LINE_LENGTH) continue;
-		const spans = protectedSpans?.get(line);
-		for (const match of matchesOn(content, pattern, with_, regex)) {
-			if (overlapsProtectedSpan(match.column, match.length, spans)) continue;
-			edits.push({ range: new monaco.Range(line, match.column, line, match.column + match.length), text: match.becomes });
-		}
-	}
+// The expression that is searched for is never run in the window. A regular expression can take minutes over one
+// line ("(a+)+$" on a line of thirty letters), nothing can stop it once it runs, and while it runs here the
+// window answers to nothing. It used to be run here for an open file with unsaved changes (to search it), for
+// each row of the list (to show what a match would become), and for a replace in an open file. The backend runs
+// it now, under its time budget, for the open files too (`backend.searchScan` with their texts); and what a
+// replace does here is worked out from what that search found: where each match and its groups lie.
+
+/** Makes the edits of a replace in an open file's text, as one undoable step. Says how many. */
+export function replaceInModel(model: monaco.editor.ITextModel, edits: readonly ReplaceEdit[]): number {
 	if (!edits.length) return 0;
 	model.pushStackElement();
-	model.pushEditOperations([], edits, () => null);
+	model.pushEditOperations(
+		[],
+		edits.map((edit) => ({ range: new monaco.Range(edit.line, edit.column, edit.line, edit.column + edit.length), text: edit.text })),
+		() => null,
+	);
 	model.pushStackElement();
 	return edits.length;
 }
 
-/** Scans a single in-memory text buffer using the exact same `searchPattern` + `matchesOn` + windowing walk as backend search. */
-export function scanTextBuffer(path: string, text: string, pattern: RegExp, isRegex: boolean, limit: number): SearchHit[] {
-	const out: SearchHit[] = [];
-	const lines = text.split(/\r?\n/);
-	for (let i = 0; i < lines.length && out.length < limit; i++) {
-		const line = lines[i]!;
-		if (isRegex && line.length > REGEX_MAX_LINE_LENGTH) continue;
-		const found = matchesOn(line, pattern, "", isRegex, limit - out.length);
-		for (const m of found) {
-			const { text: excerpt, textOffset } = excerptForMatch(line, m.column, m.length);
-			out.push({ path, line: i + 1, column: m.column, length: m.length, text: excerpt, ...(textOffset > 0 ? { textOffset } : {}) });
-			if (out.length >= limit) break;
-		}
+/**
+ * What a replace makes of one file's text, from the matches listed in it and under the Safe Docs guards: the
+ * protected parts of a Markdown document are left and counted, and a `.plan.json` that would no longer be JSON is
+ * left as it is. Null when the text is not the one that was searched (`replaceSearched`). Every replace worked
+ * out in the window comes through here: the preview, the check of a plan, and the replace in an open file.
+ */
+function replaceGuarded(path: string, text: string, mark: string | undefined, listed: readonly SearchHit[] | undefined, with_: string, regex: boolean, protect: boolean, maxSamples: number) {
+	const spans = protect && /\.(md|markdown)$/i.test(path) ? protectedMarkdownSpans(text) : null;
+	return replaceSearched(text, mark, listed, with_, regex, {
+		skip: spans ? (match) => overlapsProtectedSpan(match.column, match.length, spans.get(match.line)) : undefined,
+		json: protect && /\.plan\.json$/i.test(path),
+		maxSamples,
+	});
+}
+
+/** The hits of each file, by the path the search gave it. */
+function hitsByPath(hits: readonly SearchHit[]): Map<string, SearchHit[]> {
+	const map = new Map<string, SearchHit[]>();
+	for (const hit of hits) {
+		const list = map.get(hit.path);
+		if (list) list.push(hit);
+		else map.set(hit.path, [hit]);
 	}
-	return out;
+	return map;
 }
 
 const [request, setRequest] = createSignal<({ query: string } & SearchOptions) | null>(null);
@@ -128,6 +149,12 @@ export function searchFor(query: string, options: SearchOptions = {}) {
 // patterns, so that coming back to it is coming back to the same search.
 const [typed, setTyped] = createSignal("");
 const [hits, setHits] = createSignal<SearchHit[]>([]);
+/**
+ * For each file with a hit, the mark of its text as it was searched (`textMark`). A replace is made in a file
+ * only while its text still has that mark: the hits are places in the text that was searched, and so are the
+ * rows that were dismissed.
+ */
+const [marks, setMarks] = createSignal<Record<string, string>>({});
 const [regex, setRegex] = createSignal(false);
 const [caseSensitive, setCaseSensitive] = createSignal(false);
 const [wholeWord, setWholeWord] = createSignal(false);
@@ -164,6 +191,7 @@ function resetSearchState() {
 	replaceBusy = false;
 	setReplaceActive(false);
 	setHits([]);
+	setMarks({});
 	setStatus("idle");
 	setAsked("");
 	setEffectiveAsked("");
@@ -672,48 +700,43 @@ export function Search() {
 		setLineFiltered(hasHeadingFilter || hasTaskFilter);
 
 		try {
-			// Asked for with whether the scan was cut short: a scan that ran out of time gives only some of what is there.
-			const { hits: diskHits, timedOut: ranOutOfTime } = await backend.searchScan(effectiveQuery, backendOptions);
-			if (mine !== latest || state.workspace?.root !== startRoot) return;
-
-			// Overlay unsaved dirty open editor buffers so freshly edited unsaved text is always searchable.
-			const dirtyPaths = new Set<string>();
-			const dirtyHits: SearchHit[] = [];
+			// The open files with unsaved changes go with the search as they are in the editor, so that freshly edited
+			// text is searched and not what is on disk of it. The backend searches them, in place of the files of their
+			// names: the expression is not run here (see `replaceInModel`).
+			const open: OpenText[] = [];
 			const dirtyFilter = createFileFilter(effectiveInclude, effectiveExclude);
 			const pathAllowSet = effectivePaths !== undefined ? new Set(effectivePaths.map((p) => p.replace(/\\/g, "/"))) : null;
-			let compiledPattern: RegExp | null = null;
-			try {
-				compiledPattern = searchPattern(effectiveQuery, backendOptions);
-			} catch {
-				compiledPattern = null;
-			}
-			if (compiledPattern) {
-				for (const [docPath, doc] of documents) {
-					const at = canonical(docPath);
-					if (!state.dirty[at] || doc.binary) continue;
-					if (allowedDocSet && !allowedDocSet.has(at)) continue;
-					if (isUntitled(at)) {
-						if (effectiveInclude.trim() || pathAllowSet !== null) continue;
-					} else if (root && isInside(root, at)) {
-						const relPath = relativeTo(root, at).replace(/\\/g, "/");
-						if (pathAllowSet !== null && !pathAllowSet.has(relPath)) continue;
-						if (!dirtyFilter(relPath)) continue;
-					} else {
-						continue;
-					}
-					dirtyPaths.add(at);
-					const remaining = Math.max(0, SEARCH_LIMIT - dirtyHits.length);
-					if (remaining > 0) {
-						dirtyHits.push(...scanTextBuffer(docPath, doc.model.getValue(), compiledPattern, Boolean(effectiveRegex), remaining));
-					}
+			for (const [docPath, doc] of documents) {
+				const at = canonical(docPath);
+				if (!state.dirty[at] || doc.binary) continue;
+				if (allowedDocSet && !allowedDocSet.has(at)) continue;
+				if (isUntitled(at)) {
+					if (effectiveInclude.trim() || pathAllowSet !== null) continue;
+				} else if (root && isInside(root, at)) {
+					const relPath = relativeTo(root, at).replace(/\\/g, "/");
+					if (pathAllowSet !== null && !pathAllowSet.has(relPath)) continue;
+					if (!dirtyFilter(relPath)) continue;
+				} else {
+					continue;
 				}
+				open.push({ path: docPath, text: doc.model.getValue() });
 			}
 
-			let merged: SearchHit[] = [
-				...diskHits.filter((h) => !dirtyPaths.has(canonical(h.path))),
-				...dirtyHits,
-			];
-			const wasTruncated = diskHits.length >= SEARCH_LIMIT || dirtyHits.length >= SEARCH_LIMIT || merged.length >= SEARCH_LIMIT;
+			let merged: SearchHit[] = [];
+			let ranOutOfTime = false;
+			const found: Record<string, string> = {};
+			// One call, but for more unsaved text than a call carries: the rest follows in calls that read no file
+			// (`paths: []`), one after another and none once the time has run out.
+			for (const [index, batch] of openBatches(open).entries()) {
+				// Asked for with whether the scan was cut short: a scan that ran out of time gives only some of what is there.
+				const scan = await backend.searchScan(effectiveQuery, index ? { ...backendOptions, paths: [] } : backendOptions, batch);
+				if (mine !== latest || state.workspace?.root !== startRoot) return;
+				merged = merged.concat(scan.hits);
+				Object.assign(found, scan.marks);
+				ranOutOfTime = scan.timedOut;
+				if (ranOutOfTime) break;
+			}
+			const wasTruncated = merged.length >= SEARCH_LIMIT;
 
 			// Enforce heading:/task: line-level constraints (only Markdown files & matching heading/task lines).
 			if (hasHeadingFilter || hasTaskFilter) {
@@ -753,6 +776,7 @@ export function Search() {
 			if (merged.length > SEARCH_LIMIT) merged = merged.slice(0, SEARCH_LIMIT);
 			setTruncated(wasTruncated);
 			setTimedOut(ranOutOfTime);
+			setMarks(found);
 			setHits(merged);
 			setStatus("done");
 		} catch (e: any) {
@@ -1004,14 +1028,13 @@ export function Search() {
 
 	// --- replacing -------------------------------------------------------------
 
-	/** The expression the results were found with, for showing what each match would become. Null when it cannot be read. */
-	const pattern = createMemo(() => {
-		try {
-			const q = effectiveAsked() || asked();
-			return q ? searchPattern(q, searched()) : null;
-		} catch {
-			return null;
-		}
+	/** The matches a replace would make, file by file: what is listed and not dismissed. */
+	const listedBy = createMemo(() => hitsByPath(visibleHits()));
+	/** Where the groups of a regular expression's match lie, by the match's file, line and column: for what it would become. */
+	const groupsAt = createMemo(() => {
+		const map = new Map<string, SearchHit>();
+		for (const hit of hits()) if (hit.groups || hit.named) map.set(`${hit.path}\n${hit.line}\n${hit.column}`, hit);
+		return map;
 	});
 
 	// Document-level Safe Docs cache for Markdown protected spans & .plan.json validation during Replace preview.
@@ -1075,32 +1098,22 @@ export function Search() {
 	const invalidPlanPaths = createMemo(() => {
 		const bad = new Set<string>();
 		if (!replacing() || !safeDocs() || searched().syntheticQuery) return bad;
-		const found = pattern();
-		if (!found) return bad;
 		const info = safeDocInfo();
-		const with_ = replacement();
-		const isRegex = Boolean(searched().regex);
-		for (const [path, fileLines] of groups()) {
+		for (const [path] of groups()) {
 			if (!/\.plan\.json$/i.test(path)) continue;
 			const canon = canonical(path);
 			const open = documents.get(canon);
 			const text = open && !open.binary ? open.model.getValue() : info?.planTexts.get(canon);
 			if (!text) continue;
-			const res = replaceSafeInText(text, found, with_, isRegex, {
-				allowedLines: allowedLinesFor(path, fileLines),
-				isPlanJson: true,
-				safeDocs: true,
-				maxSamples: 0,
-			});
-			if (res.invalidJson) bad.add(canon);
+			// A plan changed since the search says nothing here: the replace itself leaves it as it is.
+			if (replaceGuarded(path, text, marks()[path], listedBy().get(path), replacement(), Boolean(searched().regex), true, 0)?.invalidJson) bad.add(canon);
 		}
 		return bad;
 	});
 
 	/** What each marked match of a line would become, by the column it starts at (using document-level Safe Docs spans). */
 	const becomes = (line: LineHit) => {
-		const found = pattern();
-		if (!found || searched().syntheticQuery) return new Map<number, string>();
+		if (searched().syntheticQuery) return new Map<number, string>();
 		const canon = canonical(line.path);
 		if (safeDocs() && /\.plan\.json$/i.test(line.path) && invalidPlanPaths().has(canon)) {
 			return new Map<number, string>();
@@ -1112,9 +1125,13 @@ export function Search() {
 			lineSpans = docSpans?.get(line.line);
 		}
 		const entries: [number, string][] = [];
-		for (const match of matchesOn(line.text, found, replacement(), Boolean(searched().regex))) {
+		const isRegex = Boolean(searched().regex);
+		const where = isRegex ? groupsAt() : null;
+		for (const match of line.matches) {
 			if (overlapsProtectedSpan(match.column, match.length, lineSpans)) continue;
-			entries.push([match.column, match.becomes]);
+			// From where the search found the match and its groups: the expression is not run again here.
+			const text = becomesFound(line.text, line.textOffset ?? 0, where?.get(`${line.path}\n${line.line}\n${match.column}`) ?? match, replacement(), isRegex);
+			if (text !== undefined) entries.push([match.column, text]);
 		}
 		return new Map(entries);
 	};
@@ -1125,6 +1142,10 @@ export function Search() {
 		if (status() === "busy" || (!ignoreReplaceActive && replaceActive())) return "The search is still running";
 		if (searched().syntheticQuery) return "Enter search text to replace — filter-only queries cannot replace";
 		if (status() !== "done" || !visibleHits().length) return "Search for something first: what is found is what is replaced";
+		// What is replaced is the text that was searched. With another text typed in the box since, and Enter not
+		// pressed, that is no longer the text on screen: nothing is replaced until the box and the list agree again.
+		const moved = searchBoxMoved(asked(), typed());
+		if (moved) return moved;
 		// A list cut short by the match limit or by the scan's time budget is not all there is to replace.
 		return shortfallBlocksReplace(shortfall(), SEARCH_LIMIT);
 	};
@@ -1132,15 +1153,18 @@ export function Search() {
 		if (replaceBusy || noReplace(true)) return;
 		const startRoot = state.workspace?.root;
 		const startSearchId = latest;
-		const query = effectiveAsked() || asked();
+		// What the box held when the list was found: the search made again after the replace is that one.
+		const searchedFor = asked();
+		const query = effectiveAsked() || searchedFor;
 		const options = searched();
 		const with_ = replacement();
-		const found = pattern();
-		if (!found) return;
 		const activeGroups = groups();
 		const paths = activeGroups.map(([path]) => path);
 		const total = visibleHits().length;
 		const protect = safeDocs();
+		// What was listed and the texts it was found in, as they are now: asked for again after a wait, they could be another search's.
+		const listed = listedBy();
+		const searchedAs = marks();
 
 		replaceBusy = true;
 		setReplaceActive(true);
@@ -1148,8 +1172,8 @@ export function Search() {
 		let ranReplace = false;
 		replaceBody: try {
 			if (!skipConfirm) {
-				const safeTail = protect ? " Safe docs skips YAML keys, Markdown link targets, and invalid .plan.json edits." : "";
-				const prompt = `Replace ${count(total, "match", "matches")} in ${count(paths.length, "file")} with ${with_ ? `“${with_}”` : "nothing"}? Each file that is written is first kept as it was in its local history.${safeTail}`;
+				// The question names what is replaced: the text that was searched, with the switches it was searched with.
+				const prompt = replaceQuestion({ query, regex: options.regex, caseSensitive: options.caseSensitive, wholeWord: options.wholeWord, replacement: with_, matches: total, files: paths.length, safeDocs: protect });
 				if (paths.length > 1) {
 					const REPLACE = "Replace all";
 					const PREVIEW = "Preview changes…";
@@ -1175,51 +1199,67 @@ export function Search() {
 			const unsaved: string[] = [];
 			const skippedJson: string[] = [];
 			const failed: string[] = [];
+			/** The files left as they are because their text is no longer the one that was searched. */
+			const changed: string[] = [];
 			const onDiskPaths: string[] = [];
 			const linesByPath: Record<string, number[]> = {};
+			const asSearched: Record<string, string> = {};
 			try {
 				for (const [path, fileLines] of activeGroups) {
 					if (state.workspace?.root !== startRoot) return;
 					const at = canonical(path);
 					const allowedLines = allowedLinesFor(path, fileLines);
-					const isMd = /\.(md|markdown)$/i.test(path);
-					const isPlan = /\.plan\.json$/i.test(path);
-					const needsSafe = protect && (isMd || isPlan);
+					const mark = searchedAs[path];
 
 					const doc = documents.get(at);
 					const tabbed = state.groups.some((group) => group.tabs.includes(at));
 					if (!doc || doc.binary || (!tabbed && !state.dirty[at])) {
 						// Route all closed-file replacements (including safeDocs and partial lines) through locked backend.replace.
+						// It is given the mark of the text that was searched, and leaves a file that is no longer that text.
 						onDiskPaths.push(path);
 						if (allowedLines) linesByPath[path] = [...allowedLines];
+						if (mark !== undefined) asSearched[path] = mark;
 						continue;
 					}
 
+					// An open file is replaced in only while its text is the one that was searched: the matches listed, and
+					// the rows dismissed, are places in that text. Typed into since, or changed on disk and loaded again,
+					// it has other lines under those numbers: a dismissed match was replaced and the ones kept were left.
 					const currentValue = doc.model.getValue();
-					let mdProtected: Map<number, TextSpan[]> | undefined;
-					if (needsSafe) {
-						const sim = replaceSafeInText(currentValue, found, with_, Boolean(options.regex), {
-							allowedLines,
-							isMarkdown: isMd,
-							isPlanJson: isPlan,
-							safeDocs: protect,
-						});
-						skippedProtected += sim.skippedProtected;
-						if (sim.invalidJson) {
-							skippedJson.push(baseName(path));
-							continue;
-						}
-						if (!sim.count) continue;
-						if (isMd) mdProtected = protectedMarkdownSpans(currentValue);
+					const version = doc.model.getVersionId();
+					const sim = replaceGuarded(path, currentValue, mark, listed.get(path), with_, Boolean(options.regex), protect, 0);
+					if (!sim) {
+						changed.push(path);
+						continue;
 					}
+					skippedProtected += sim.skippedProtected;
+					if (sim.invalidJson) {
+						skippedJson.push(baseName(path));
+						continue;
+					}
+					if (!sim.count) continue;
 					const wasUnsaved = Boolean(state.dirty[at]);
 					if (!wasUnsaved) {
-						await backend.historyKeep(at).catch(() => {});
+						// The file as it was goes into local history first, as the question said it would. Where that copy
+						// could not be made the file is left and said so: the replace went on without it, and was then saved.
+						const notKept = await backend.historyKeep(at).then(
+							() => "",
+							(e: any) => String(e?.message ?? e),
+						);
 						if (state.workspace?.root !== startRoot) return;
+						if (notKept) {
+							failed.push(`${baseName(path)}: its copy for local history was not made (${notKept})`);
+							continue;
+						}
+						// Typed into, or closed, while its copy for local history was made: the edits are for the text before that.
+						if (doc.model.isDisposed() || doc.model.getVersionId() !== version) {
+							changed.push(path);
+							continue;
+						}
 					}
-					const changed = replaceInModel(doc.model, found, with_, Boolean(options.regex), allowedLines, mdProtected);
-					if (!changed) continue;
-					done += changed;
+					const replaced = replaceInModel(doc.model, sim.edits);
+					if (!replaced) continue;
+					done += replaced;
 					files++;
 					if (wasUnsaved) unsaved.push(path);
 					else {
@@ -1234,11 +1274,16 @@ export function Search() {
 						caseSensitive: options.caseSensitive,
 						wholeWord: options.wholeWord,
 						safeDocs: protect,
+						asSearched,
 						...(Object.keys(linesByPath).length ? { linesByPath } : {}),
 					};
 					const results = await backend.replace(query, with_, replaceOptions, onDiskPaths);
 					if (state.workspace?.root !== startRoot) return;
 					for (const result of results) {
+						if (result.changed) {
+							changed.push(result.path);
+							continue;
+						}
 						if (result.skippedProtected) skippedProtected += result.skippedProtected;
 						if (result.invalidJson) {
 							skippedJson.push(baseName(result.path));
@@ -1263,7 +1308,7 @@ export function Search() {
 			const protectedNote = skippedProtected
 				? ` (${count(skippedProtected, "protected doc match", "protected doc matches")} skipped by Safe docs)`
 				: "";
-			const differs = done !== total && !failed.length && !skippedProtected && !skippedJson.length
+			const differs = done !== total && !failed.length && !skippedProtected && !skippedJson.length && !changed.length
 				? ` ${count(total, "match", "matches")} were listed: a file has changed since the search.`
 				: "";
 			const note = `Replaced ${count(done, "match", "matches")} in ${count(files, "file")}.${protectedNote}${differs}`;
@@ -1277,6 +1322,7 @@ export function Search() {
 			if (skippedJson.length) {
 				notify(`Skipped ${skippedJson.join(", ")}: replacement would break .plan.json JSON syntax.`, "error");
 			}
+			if (changed.length) notify(changedSinceSearch(changed.map(baseName)), "error");
 			if (failed.length) notify(`Not replaced: ${failed.join("; ")}`, "error");
 		} finally {
 			replaceBusy = false;
@@ -1287,7 +1333,9 @@ export function Search() {
 			return;
 		}
 		if (ranReplace && state.workspace?.root === startRoot) {
-			await run();
+			// The search that was replaced from, made again: not whatever has been typed in the box meanwhile, which
+			// nobody pressed Enter on.
+			await run({ query: searchedFor });
 		}
 	};
 	const replaceAll = () => executeReplace(false);
@@ -1295,12 +1343,13 @@ export function Search() {
 		if (replaceBusy || noReplace(true)) return;
 		const startRoot = state.workspace?.root;
 		const startSearchId = latest;
+		const query = effectiveAsked() || asked();
 		const options = searched();
 		const with_ = replacement();
-		const found = pattern();
-		if (!found) return;
 		const activeGroups = groups();
 		const protect = safeDocs();
+		const listed = listedBy();
+		const searchedAs = marks();
 
 		type PreviewRow = {
 			path: string;
@@ -1308,6 +1357,8 @@ export function Search() {
 			count: number;
 			skippedProtected: number;
 			invalidJson: boolean;
+			/** Its text is no longer the one that was searched: a replace leaves it as it is. */
+			changed?: boolean;
 			sampleLine?: number;
 			sampleSummary?: string;
 		};
@@ -1315,6 +1366,7 @@ export function Search() {
 		let totalMatches = 0;
 		let totalProtected = 0;
 		let invalidCount = 0;
+		let changedCount = 0;
 
 		replaceBusy = true;
 		setReplaceActive(true);
@@ -1324,16 +1376,23 @@ export function Search() {
 			for (const [path, fileLines] of activeGroups) {
 				const text = await currentTextFor(path);
 				if (state.workspace?.root !== startRoot || latest !== startSearchId) return;
-				if (!text) continue;
-				const isMd = /\.(md|markdown)$/i.test(path);
-				const isPlan = /\.plan\.json$/i.test(path);
-				const res = replaceSafeInText(text, found, with_, Boolean(options.regex), {
-					allowedLines: allowedLinesFor(path, fileLines),
-					isMarkdown: isMd,
-					isPlanJson: isPlan,
-					safeDocs: protect,
-					maxSamples: 1,
-				});
+				const res = replaceGuarded(path, text, searchedAs[path], listed.get(path), with_, Boolean(options.regex), protect, 1);
+				// A file that is not the text that was searched any more (or cannot be read now) is shown as that: the
+				// replace leaves it as it is, and what it would have become cannot be told from another text.
+				if (!res) {
+					changedCount++;
+					rows.push({
+						path,
+						relPath: rel(path),
+						count: 0,
+						skippedProtected: 0,
+						invalidJson: false,
+						changed: true,
+						sampleLine: fileLines[0]?.line,
+						sampleSummary: "Skipped: changed since the search. Search again to replace in it",
+					});
+					continue;
+				}
 				totalProtected += res.skippedProtected;
 				if (res.invalidJson) {
 					invalidCount++;
@@ -1370,7 +1429,8 @@ export function Search() {
 			const readyFiles = rows.filter((r) => r.count > 0 && !r.invalidJson).length;
 			const APPLY = "__apply__";
 			const picked = await quickPick<string>({
-				title: `Replace preview: ${count(totalMatches, "match", "matches")} in ${count(readyFiles, "file")}`,
+				// "Apply" below replaces with no further question, so what is replaced is named here too.
+				title: replacePreviewTitle({ query, regex: options.regex, caseSensitive: options.caseSensitive, wholeWord: options.wholeWord, replacement: with_, matches: totalMatches, files: readyFiles }),
 				placeholder: "Apply replace or pick a file to inspect…",
 				items: [
 					...(totalMatches > 0
@@ -1382,6 +1442,7 @@ export function Search() {
 									detail: [
 										totalProtected ? `${totalProtected} protected skipped` : "",
 										invalidCount ? `${invalidCount} invalid JSON skipped` : "",
+										changedCount ? `${changedCount} changed since the search skipped` : "",
 									]
 										.filter(Boolean)
 										.join(" · ") || "Local history snapshots kept before writing",
@@ -1389,10 +1450,10 @@ export function Search() {
 							]
 						: []),
 					...rows.map((r, idx) => ({
-						label: `${r.relPath} (${r.invalidJson ? "invalid JSON" : count(r.count, "change")})`,
+						label: `${r.relPath} (${r.invalidJson ? "invalid JSON" : r.changed ? "changed since the search" : count(r.count, "change")})`,
 						value: r.path,
 						file: baseName(r.path),
-						danger: r.invalidJson,
+						danger: r.invalidJson || r.changed,
 						divide: idx === 0 && totalMatches > 0,
 						description: r.sampleSummary,
 						detail: r.skippedProtected && !r.invalidJson ? `${r.skippedProtected} protected` : undefined,

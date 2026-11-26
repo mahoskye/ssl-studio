@@ -109,16 +109,58 @@ export function extractCommentSpans(lines: readonly string[]): CommentSpan[][] {
  * It is asked of the text up to that place with a letter put there: the letter is in a comment exactly when what is
  * written there would be. Asked of the line as it stands, the place just after a comment's end counted as inside
  * it, and so did the place just before its start.
+ *
+ * Null where nothing can say (the grammar is not loaded). That was answered "no", which is an answer: see
+ * `droppedFileNote` for what it wrote into a comment.
  */
 export function writtenInComment(
 	linesBefore: readonly string[],
 	lineText: string,
 	offset: number,
 	spansOf: (lines: readonly string[]) => CommentSpan[][] | null,
-): boolean {
+): boolean | null {
 	const upTo = [...linesBefore, `${lineText.slice(0, offset)}x`];
 	const spans = spansOf(upTo)?.[upTo.length - 1];
-	return Boolean(spans?.some((s) => offset >= s.from && offset < s.to));
+	if (!spans) return null;
+	return spans.some((s) => offset >= s.from && offset < s.to);
+}
+
+/**
+ * Whose comments a file dropped on code of this language is written as: SSL's, SQL's, or none (its path alone).
+ * Every SQL the editor has a language for is SQL here (`shared/languages.ts`): only `sql` was asked for, and on a
+ * `.pgsql` or `.mysql` file the bare path was written into the code.
+ */
+export function droppedNoteLanguage(languageId: string): "ssl" | "sql" | null {
+	if (languageId === "ssl") return "ssl";
+	return languageId === "sql" || languageId === "pgsql" || languageId === "mysql" ? "sql" : null;
+}
+
+/**
+ * As many lines of SSL as are read to learn whether one place is in a comment. A comment may have been opened
+ * anywhere above, so the grammar reads from the first line, at some 25 ms for a thousand lines: half a second here.
+ * The limit was 5,000, taken from the hover, which asks at every move of the mouse; a drop asks once.
+ */
+export const COMMENT_SCAN_LINES = 20_000;
+
+/**
+ * Whether a file dropped at a line (from 1) and a place in it (from 0) lands in a comment, or null where that is
+ * not known: past the lines read for it, or with no grammar to read them.
+ *
+ * Past the limit the answer was "no", and so was it without the grammar. A drop into a long comment down there
+ * then wrote a comment of its own into it, which in SSL ends the comment around it at the note's semicolon and
+ * leaves the rest of that comment as code. SQL has no limit: its comments are found by a walk over the letters.
+ */
+export function droppedInComment(
+	lang: "ssl" | "sql",
+	lineNumber: number,
+	lineAt: (lineNumber: number) => string,
+	offset: number,
+	spansOf: (lines: readonly string[]) => CommentSpan[][] | null,
+): boolean | null {
+	if (lang === "ssl" && lineNumber > COMMENT_SCAN_LINES) return null;
+	const before: string[] = [];
+	for (let n = 1; n < lineNumber; n++) before.push(lineAt(n));
+	return writtenInComment(before, lineAt(lineNumber), offset, spansOf);
 }
 
 /**
@@ -129,11 +171,82 @@ export function writtenInComment(
  * semicolon and then by the mark that closes a comment in SQL, and that mark was left behind as code. Null where
  * the path has in it what ends a comment: written there, the comment would end inside the path and the rest of
  * the path would be code.
+ *
+ * `insideComment` is null where it is not known (`droppedInComment`). Then the path alone is written too: in code
+ * it is plainly out of place and one undo away, while a comment written into a comment breaks that one without a
+ * sign of it.
  */
-export function droppedFileNote(rel: string, lang: "ssl" | "sql", insideComment: boolean): string | null {
+export function droppedFileNote(rel: string, lang: "ssl" | "sql", insideComment: boolean | null): string | null {
 	if (rel.includes(lang === "ssl" ? ";" : "*/")) return null;
-	if (insideComment) return rel;
+	if (insideComment !== false) return rel;
 	return lang === "ssl" ? `/* See ${rel};` : `/* See ${rel} */`;
+}
+
+// --- What is dragged inside the app, and where it may be let go -------------------------------------------------
+
+/** Something dragged: a row of the Explorer, a row of the Docs panel, an editor tab, or files from outside the app. */
+export type DragSource = "explorer-row" | "docs-row" | "tab" | "os-files";
+/** Somewhere it is let go: a folder of the Explorer, the text of a code editor or of a Markdown editor, a row of tabs. */
+export type DropTarget = "explorer-folder" | "code-editor" | "markdown-editor" | "tab-strip";
+/** What the drop does: `move` moves the thing itself; `copy` leaves it where it is (a reference to it is written, or it is brought in). */
+export type DragEffect = "copy" | "move";
+
+/** The kind of data each drag carries: all that a target sees of what is over it. */
+export const DRAG_TYPE: Record<DragSource, string> = {
+	"explorer-row": "application/x-ssl-studio-file",
+	"docs-row": "application/x-ssl-studio-file",
+	tab: "application/x-ssl-studio-tab",
+	"os-files": "Files",
+};
+
+/**
+ * Every drag that is meant to end in a drop, and what the drop does there.
+ *
+ * A browser lets a drop happen only when the effect the target asks for (`dropEffect`) is one the source allowed
+ * (`effectAllowed`); otherwise no `drop` event comes at all. Each side had its own word written where it was
+ * needed. The Explorer's rows and the tabs allowed `move` alone and the editors asked for `copy`, so a file could
+ * never be dropped from the Explorer on code or on a Markdown document, nor a tab on a Markdown document, though
+ * both editors had the code for it; from the Docs panel, which allowed both, the same drop worked. Both sides now
+ * read this one table, so what a source allows is what its targets ask for.
+ */
+export const DRAG_PAIRS: readonly (readonly [from: DragSource, onto: DropTarget, effect: DragEffect])[] = [
+	// The file goes into the folder.
+	["explorer-row", "explorer-folder", "move"],
+	// A note of the file, or a link to it, is written into the text. The file stays where it is.
+	["explorer-row", "code-editor", "copy"],
+	["explorer-row", "markdown-editor", "copy"],
+	["docs-row", "code-editor", "copy"],
+	["docs-row", "markdown-editor", "copy"],
+	// The tab goes to another place in its row, or to another group's row.
+	["tab", "tab-strip", "move"],
+	// A link to the tab's file is written into the document.
+	["tab", "markdown-editor", "copy"],
+	// Brought into the folder, or (a picture) into the document's folder with a link to it.
+	["os-files", "explorer-folder", "copy"],
+	["os-files", "markdown-editor", "copy"],
+];
+
+/**
+ * What a source allows when its drag starts: every effect one of its targets asks for. (Files from outside the
+ * app are not started here: what they allow is the system's to say.)
+ */
+export function effectAllowedFor(from: DragSource): "none" | "copy" | "move" | "copyMove" {
+	const effects = new Set(DRAG_PAIRS.filter(([source]) => source === from).map(([, , effect]) => effect));
+	return effects.has("copy") ? (effects.has("move") ? "copyMove" : "copy") : effects.has("move") ? "move" : "none";
+}
+
+/** What a target asks for while this source is over it: `none` where a drop of it there is not meant. */
+export function dragEffect(from: DragSource, onto: DropTarget): DragEffect | "none" {
+	return DRAG_PAIRS.find(([source, target]) => source === from && target === onto)?.[2] ?? "none";
+}
+
+/**
+ * The same, for a target that sees only the kinds of data over it (`DataTransfer.types`) and not where they come
+ * from: the Explorer's rows and the Docs panel's carry the same kind.
+ */
+export function dropEffectFor(onto: DropTarget, types: Iterable<string> | ArrayLike<string>): DragEffect | "none" {
+	const carried = Array.from(types);
+	return DRAG_PAIRS.find(([source, target]) => target === onto && carried.includes(DRAG_TYPE[source]))?.[2] ?? "none";
 }
 
 const DOC_PATH_RE =

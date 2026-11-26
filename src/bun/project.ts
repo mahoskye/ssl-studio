@@ -57,8 +57,10 @@ export async function readProject(root: string): Promise<Project> {
 		return project;
 	}
 	if (!project.configured) return project;
+	let written = "";
 	try {
-		const toml = Bun.TOML.parse(await Bun.file(path).text()) as Record<string, any>;
+		written = await Bun.file(path).text();
+		const toml = Bun.TOML.parse(written) as Record<string, any>;
 		project.name = text(toml.project?.name) ?? project.name;
 		project.description = text(toml.project?.description) ?? "";
 		for (const key of ["docs", "schema", "tests", "code"] as const) project[key] = folder(toml.folders?.[key], project[key]);
@@ -66,7 +68,11 @@ export async function readProject(root: string): Promise<Project> {
 		const preset = text(toml.style?.preset);
 		if (preset === "house" || preset === "server") project.stylePreset = preset;
 	} catch (e: any) {
-		project.error = String(e?.message ?? e);
+		// A file that is not TOML is told as the editor tells it, in plain words and with its line. What the reader
+		// throws was shown as it came: "Unexpected end of file" on the runtime the tests ran on, "TOML Parse error:
+		// Missing value after '='; values must be on the same line" on the one the app ships with, and no line.
+		const problem = written ? tomlProblem(written) : null;
+		project.error = problem ? `line ${problem.line}: ${problem.message}` : String(e?.message ?? e);
 	}
 	return project;
 }
@@ -1148,6 +1154,13 @@ export async function listDocs(
 		options?.truncatedOut?.push({ folder: rel, limit });
 		options?.truncatedWithTotalsOut?.push({ folder: rel, limit, total });
 	};
+	// The one rule for every file this listing reads at a path it put together itself (a name found in a folder, a
+	// plan's chart beside its document, a folder's catalog, a document already in the list): such a path may be a
+	// link, and one that leads out of the workspace is not read through. What the walks below yield needs no asking:
+	// they follow no link. The rule was held where README's own text is read and nowhere else, so the pass over
+	// the links by name read the same README after all and listed what it names, a plan document's linked chart gave
+	// its title, ticket and scripts, and a linked catalog its links.
+	const held = (path: string) => isInsideWorkspace(root, path);
 	// The project's files by name, read once and only when a link leads nowhere.
 	let names: Map<string, string[]> | undefined;
 	const named = (name: string) => {
@@ -1169,8 +1182,10 @@ export async function listDocs(
 		const actual = found(root, name);
 		const path = join(root, actual ?? name);
 		// A README that is a link to a file outside the workspace is there by name, and is listed, but it is not read
-		// through: its headings and links are another project's, and opening it is refused in the same way.
-		const text = actual && isInsideWorkspace(root, path) ? await textOf(path) : "";
+		// through: its headings and links are another project's, and opening it is refused in the same way. Nor is it
+		// asked when it was last changed: that is the other file's too.
+		const ours = Boolean(actual) && held(path);
+		const text = ours ? await textOf(path) : "";
 		const untouched = actual ? text.includes(PLACEHOLDER[name]!) : undefined;
 		const codeRefs = actual ? markdownCodeRefs(root, path, text) : [];
 		const headings = actual
@@ -1178,7 +1193,7 @@ export async function listDocs(
 					.slice(0, 60)
 					.map((h) => ({ level: h.level, text: h.text, slug: h.anchor, line: h.line }))
 			: [];
-		const mtime = actual ? mtimeOf(path) : undefined;
+		const mtime = ours ? mtimeOf(path) : undefined;
 		list.push({
 			path,
 			name: actual ?? name,
@@ -1195,8 +1210,8 @@ export async function listDocs(
 	const docs = join(root, project.docs);
 	// The state file is read from the docs folder directly, not through the workspace's listing: it is held to the
 	// workspace here, or a docs folder that is a link elsewhere had its state file listed with its title and summary.
-	const state = isFolder(docs) && isInsideWorkspace(root, docs) ? found(docs, STATE_FILE) : undefined;
-	if (state && isInsideWorkspace(root, join(docs, state))) {
+	const state = isFolder(docs) && held(docs) ? found(docs, STATE_FILE) : undefined;
+	if (state && held(join(docs, state))) {
 		const statePath = join(docs, state);
 		const summary = await cachedMdSummary(root, statePath);
 		if (summary) {
@@ -1493,7 +1508,9 @@ export async function listDocs(
 			const said = describedWithLiveSource(mdSummary, root, path);
 			const chartPath = path.replace(/\.plan\.md$/i, ".plan.json");
 			const chartExists = existsSync(chartPath);
-			const paired = chartExists
+			// The chart's path is made from the document's, not found by the walk: a chart that is a link out of the
+			// workspace is named as the document's pair and not read, as a README that leads out is.
+			const paired = chartExists && held(chartPath)
 				? await planSays(chartPath)
 				: { ticket: "", title: "", status: "", codeRefs: [], testScripts: [], planTests: [], nodeDocs: [] };
 			if (paired.title && !mdSummary.fmTitle && !mdSummary.hasH1) said.title = paired.title;
@@ -1638,7 +1655,9 @@ export async function listDocs(
 	for (const doc of list) {
 		if (!doc.exists || !MARKDOWN.test(doc.path)) continue;
 		try {
-			const summary = passSummaries.get(doc.path) ?? (await cachedMdSummary(root, doc.path));
+			// What the walks did not read (README, AGENTS.md, the state file) is read here, and held to the workspace
+			// here as well: a README that leads out had the names it links to listed as broken.
+			const summary = passSummaries.get(doc.path) ?? (held(doc.path) ? await cachedMdSummary(root, doc.path) : null);
 			const places = summary?.names ?? [];
 			if (!places.length) continue;
 			const brokenWiki: { href: string; line: number; column: number; instead?: string }[] = [];
@@ -1676,7 +1695,9 @@ export async function listDocs(
 		if (!isFolder(folder) || !catalogued(name, folder, root, seen)) continue;
 		seen.push(resolve(folder));
 		const file = join(folder, found(folder, CATALOG_FILE) ?? CATALOG_FILE);
-		if (!existsSync(file)) continue;
+		// A catalog that is a link out of the workspace (or in a folder that is one) is not read: whether it has a
+		// place for the list cannot be said, so it is not marked, like a person's own file of that name below.
+		if (!existsSync(file) || !held(file)) continue;
 		const text = await textOf(file);
 		// In a folder that may do without a catalog, a file of that name with no place for the list is a person's own
 		// document: it is not marked, and nothing is written into it.
@@ -1980,33 +2001,124 @@ ${PLACEHOLDER["AGENTS.md"]}
 - \`${project.plans}/\`: plans and tidy notes.
 `;
 
-/** What a TOML reader's own words come to, where they are a parser's and not a person's. */
+const TOML_ONE_TO_A_LINE = "A key is followed by = and a value, one to a line.";
+const TOML_NO_VALUE = "The value is missing: it comes after the =, on the same line.";
+const TOML_NOT_CLOSED = "This string is not closed.";
+/**
+ * What a TOML reader's own words come to, where they are a parser's and not a person's. They are asked last, for
+ * what the questions in tomlProblem do not settle, because they are not the same from one version of the runtime
+ * to the next: the one the tests ran on said "Unexpected end of file" and "Expected t_equal but found ...", the
+ * one the app ships with says "Missing value after '='" and "Expected '=' after a key but found ...". Both are
+ * here. Words that are neither get a plain sentence with the reader's own after it.
+ */
 const TOML_WORDS: [RegExp, (found: RegExpExecArray) => string][] = [
-	[/^Expected t_equal\b/i, () => "A key is followed by = and a value, one to a line."],
+	[/^Cannot redefine key '(.+?)'/i, (found) => `${found[1]} is set twice.`],
+	[/^Cannot redefine table '(.+?)'/i, (found) => `The table ${found[1]} is started twice.`],
+	[/^Expected t_equal\b|^Expected '=' after a key|^Expected a newline or end of file after/i, () => TOML_ONE_TO_A_LINE],
+	[/^Missing value|^Expected a value but found/i, () => TOML_NO_VALUE],
 	[/^Unexpected end of file/i, () => "The file ends in the middle of a value: something is not finished or not closed."],
-	[/^Unterminated .*string/i, () => "This string is not closed."],
-	[/^Cannot redefine key '(.+)'/i, (found) => `${found[1]} is set twice.`],
+	[/^Unterminated .*string/i, () => TOML_NOT_CLOSED],
+	[/^Strings must be quoted: (".*")$/i, (found) => `${found[1]} does not read as a value: text goes in quotes.`],
+	[/^Expected (?:a )?key but found/i, () => "A line starts with a key: a name, then = and its value."],
+	[/escape sequence|Unicode escape|hex escape/i, () => "A backslash in a string in double quotes starts a code. Write it twice, or put the string in single quotes."],
 	[/^Expected (?:t_)?(\w+) but found (?:t_)?(.+)$/i, (found) => `${found[1]!.replace(/_/g, " ")} was expected here, not ${found[2]!.replace(/_/g, " ")}.`],
 ];
+/**
+ * The most text handed to the reader while a mistake's line is looked for, in characters: every line of a file
+ * of some six hundred lines can be asked about, in a few hundredths of a second. Past it the line is the best
+ * one known, and the message says so.
+ */
+const TOML_SEARCH = 6_000_000;
+/** A text longer than this is read once and not again: halving it alone would hand the reader several times TOML_SEARCH. */
+const TOML_SEARCHED = 500_000;
+/** A line longer than this is not read piece by piece for where on it the reader stops. */
+const TOML_LINE = 400;
+
+const readsToml = (text: string): boolean => {
+	try {
+		Bun.TOML.parse(text);
+		return true;
+	} catch {
+		return false;
+	}
+};
 
 /**
  * The first thing that keeps a text from being TOML, and where; null when it
  * can be read. Read by the runtime's own TOML reader, the one project.toml is
  * read with, so what is marked is what would not load.
+ *
+ * The reader is asked only whether a text reads, never where it stopped. What it throws is not the same thing
+ * from one version of the runtime to the next: one gave a place with each error, the next (the one the app
+ * ships with) gives none, and the `line` its error carries is a line of this program. Read as the place, that
+ * put every mistake on the file's last line, under the reader's own words, in the packaged app and in no test.
  */
 export function tomlProblem(text: string): { message: string; line: number; column: number } | null {
 	if (!text.trim()) return null;
+	let said = "";
 	try {
 		Bun.TOML.parse(text);
 		return null;
 	} catch (e: any) {
-		const first = e?.errors?.[0] ?? e;
-		const said = String(first?.message ?? e?.message ?? e);
-		const worded = TOML_WORDS.map(([pattern, words]) => [pattern.exec(said), words] as const).find(([found]) => found);
-		const lines = text.split(/\r?\n/).length;
-		const line = Math.min(Math.max(Number(first?.position?.line ?? e?.line ?? 1), 1), lines);
-		return { message: worded ? worded[1](worded[0]!) : said, line, column: Math.max(Number(first?.position?.column ?? 1), 1) };
+		// One version throws a list of errors, the next a single one; either may one day be neither.
+		const told = (e?.errors?.[0] ?? e)?.message ?? e;
+		said = typeof told === "string" ? told.replace(/^TOML Parse error:\s*/i, "") : "";
 	}
+	const worded = (what: string) => {
+		const known = TOML_WORDS.map(([pattern, words]) => [pattern.exec(said), words] as const).find(([found]) => found);
+		return known ? known[1](known[0]!) : `${what} does not read as TOML${said ? ` (the reader says: ${said})` : ""}.`;
+	};
+	// A place that is not known is not shown as one (ADR 0018): the mark is at the top, and the message says why.
+	if (text.length > TOML_SEARCHED) return { message: `${worded("The file")} The file is too long for the place to be looked for.`, line: 1, column: 1 };
+	// Where each line starts. The first `count` lines are the text before the start of the next one.
+	const starts = [0];
+	for (const end of text.matchAll(/\r?\n/g)) starts.push(end.index + end[0].length);
+	const first = (count: number) => text.slice(0, starts[count]);
+	// The mistake is on the line after the longest beginning of the text that reads on its own. Halving finds a
+	// beginning that reads with a line after it that does not; but a beginning cut in the middle of a list or a
+	// string of several lines does not read either, so every longer one is asked about as well, and the longest
+	// that reads is kept.
+	let good = 0;
+	let bad = starts.length;
+	while (bad - good > 1) {
+		const mid = (good + bad) >> 1;
+		if (readsToml(first(mid))) good = mid;
+		else bad = mid;
+	}
+	let spent = 0;
+	let next = bad + 1;
+	for (; next < starts.length && spent <= TOML_SEARCH; next++) {
+		spent += starts[next]!;
+		if (readsToml(first(next))) good = next;
+	}
+	const head = first(good);
+	const line = text.slice(starts[good], starts[good + 1] ?? text.length).replace(/\r?\n$/, "");
+	const at = (message: string, column: number) => ({ message, line: good + 1, column });
+	const edge = line.length - line.trimStart().length + 1;
+	// Not every longer beginning was asked about: this line may be where a long list opens, above the mistake.
+	// The message says as much, and nothing is said of this line itself.
+	if (next < starts.length) return at(`${worded("The file")} The file is long: the mistake is on this line or further down.`, edge);
+	// What kind of mistake it is, by what would mend the line: the reader is asked whether the text up to the
+	// line's end reads once something is put after it. The answers are the same whatever the reader calls it.
+	const fits = (more: string) => readsToml(head + line + more);
+	const after = line.length + 1;
+	// Any value at all would do, text or a number: there is none.
+	if (fits('""') && fits("0")) return at(TOML_NO_VALUE, after);
+	if (fits('"') || fits("'") || fits('\n"""') || fits("\n'''")) return at(TOML_NOT_CLOSED, after);
+	if (fits("]") || fits("]]") || fits("\n]")) return at("The [ on this line is not closed with ], or something inside it does not read.", after);
+	if (fits("}")) return at("The { on this line is not closed with }.", after);
+	// The line reads up to a point and then goes on: a second value, or one written in a form the reader does not
+	// take. Asked of the line alone, which is short; one that reads alone is at odds with what is above it, and
+	// the reader's words say with what.
+	if (line.length <= TOML_LINE && !readsToml(line)) {
+		let part = line.length - 1;
+		while (part > 0 && !(line.slice(0, part).trim() && readsToml(line.slice(0, part)))) part--;
+		if (part) {
+			const apart = /\s/.test(line[part - 1]!);
+			return at(apart ? TOML_ONE_TO_A_LINE : "This value does not read: a number or a date has a fixed form, and any other text goes in quotes.", line.length - line.slice(part).trimStart().length + 1);
+		}
+	}
+	return at(worded("This line"), edge);
 }
 
 /** The kinds of file a ticket system exports, as a file dialog takes them. */

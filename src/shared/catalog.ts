@@ -45,10 +45,14 @@ export function catalogList(items: readonly CatalogItem[]): string {
 		.join("\n\n");
 }
 
-/** Where a marker stands on a line of its own, from `from` on: a marker named in a sentence, or in a code span, is not one. -1 when there is none. */
-function markerAt(text: string, marker: string, from = 0): number {
+/**
+ * Where a marker stands on a line of its own, from `from` on: a marker named in a sentence, or in a code span, is not
+ * one. -1 when there is none. With `underOpenFence` false, a marker under a code fence that is never closed is
+ * passed over like one inside a closed fence; otherwise it is read (see `fences`).
+ */
+function markerAt(text: string, marker: string, from = 0, underOpenFence = true): number {
 	const pattern = new RegExp(`^[ \\t]*${marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[ \\t]*\\r?$`, "gm");
-	const shown = fenced(text);
+	const shown = underOpenFence ? fences(text).closed : fenced(text);
 	pattern.lastIndex = from;
 	// A marker shown as an example, inside a code fence, is not one either.
 	for (let found = pattern.exec(text); found; found = pattern.exec(text)) {
@@ -60,6 +64,18 @@ function markerAt(text: string, marker: string, from = 0): number {
 
 /** The stretches of a Markdown text that are inside a code fence, each from its opening line to the end of its closing one. */
 export function fenced(text: string): [number, number][] {
+	const { closed, open } = fences(text);
+	return open < 0 ? closed : [...closed, [open, text.length]];
+}
+
+/**
+ * The code fences of a text: those that are closed, and where one that is never closed opens (-1 when every fence
+ * is closed). A fence left open runs to the end of the text, and everything under it is code to a Markdown reader.
+ * A catalog's markers are read under one all the same. Passed over there like the markers of an example, they left
+ * the catalog with no place for its list: each update wrote one more list at the end of the file, under the same
+ * open fence, where the next update passed it over again, and the catalog was never up to date.
+ */
+function fences(text: string): { closed: [number, number][]; open: number } {
 	const ranges: [number, number][] = [];
 	let open = "";
 	let from = 0;
@@ -78,8 +94,18 @@ export function fenced(text: string): [number, number][] {
 		}
 		offset += raw.length + 1;
 	}
-	if (open) ranges.push([from, text.length]);
-	return ranges;
+	return { closed: ranges, open: open ? from : -1 };
+}
+
+/**
+ * The line (from 1) of a code fence that is never closed and that the catalog's list stands under; 0 when the list
+ * stands under no such fence. The list is written there like anywhere else, and is shown as code until the fence is
+ * closed: whoever writes the catalog says so.
+ */
+export function catalogUnderOpenFence(text: string): number {
+	const { open } = fences(text);
+	const start = markerAt(text, CATALOG_START);
+	return open >= 0 && start > open ? text.slice(0, open).split("\n").length : 0;
 }
 
 /** Where the list is in a catalog's text: from the start marker to the end of the end marker. Null when there is no such pair. */
@@ -88,7 +114,10 @@ export const hasCatalogPlace = (text: string) => markerAt(text, CATALOG_START) >
 
 export function catalogBlock(text: string): { start: number; end: number; inner: string } | null {
 	const start = markerAt(text, CATALOG_START);
-	const close = start < 0 ? -1 : markerAt(text, CATALOG_END, start + CATALOG_START.length);
+	// An end marker under a fence left open ends the list only where the list opens under that fence too. After a
+	// start marker that stands above the fence it is an example, as it always was: taken for the list's end, all the
+	// person wrote between the two would be written over.
+	const close = start < 0 ? -1 : markerAt(text, CATALOG_END, start + CATALOG_START.length, start > fences(text).open);
 	if (start < 0 || close < 0) return null;
 	// The list is compared and shown with plain line ends, whichever the file is written with.
 	return { start, end: close + CATALOG_END.length, inner: text.slice(start + CATALOG_START.length, close).replace(/\r\n/g, "\n").trim() };

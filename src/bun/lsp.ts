@@ -19,10 +19,55 @@ function ended(proc: Subprocess): boolean {
 	return proc.exitCode !== null || proc.signalCode !== null;
 }
 
-/** Kills outright, through the process's own handle and only while it is still there: never by a bare process id. */
+/**
+ * The command that ends a server together with what it started, or null where ending the server's own process
+ * ends all of it. On Windows a `.cmd` shim is run by cmd.exe and the server is cmd's child: the process held here
+ * is cmd.exe, killing it ended cmd.exe alone, and the server lived on, one more for each restart. `taskkill /T`
+ * ends the whole tree, as the agent's opencode is ended.
+ */
+export function treeKillCommand(command: readonly string[], pid: number | undefined, platform: string = process.platform): string[] | null {
+	if (platform !== "win32" || !pid || !/^cmd(?:\.exe)?$/i.test(command[0] ?? "")) return null;
+	return ["taskkill", "/T", "/F", "/PID", String(pid)];
+}
+
+/** How a server's tree is ended: as on which system, and what runs the command that does it. */
+export type TreeKill = { platform: string; run: (command: string[]) => boolean };
+
+const SYSTEM_TREE_KILL: TreeKill = {
+	platform: process.platform,
+	run: (command) => Bun.spawnSync(command, { stdout: "ignore", stderr: "ignore" }).exitCode === 0,
+};
+
+/** What each server was started with, and how its tree is ended, until it has been. */
+const trees = new WeakMap<Subprocess, { command: readonly string[]; how: TreeKill }>();
+
+/**
+ * Ends a server that has a tree (`treeKillCommand`) with its tree, and says whether that was done. The command
+ * names the process by its id, so it is run only while Bun has not seen the process end: until then the id is its own.
+ */
+function endTree(proc: Subprocess): boolean {
+	const tree = trees.get(proc);
+	if (!tree || ended(proc)) return false;
+	const command = treeKillCommand(tree.command, proc.pid, tree.how.platform);
+	if (!command) return false;
+	try {
+		if (!tree.how.run(command)) return false;
+	} catch {
+		return false;
+	}
+	// Done once: asked again, a tree that is gone is only an error to wait for.
+	trees.delete(proc);
+	return true;
+}
+
+/**
+ * Kills outright, and only while the process is still there: with its tree where it has one, else through the
+ * process's own handle. Never by a process id that may be another's by now.
+ */
 function kill(proc: Subprocess) {
 	lingering.delete(proc);
 	if (ended(proc)) return;
+	if (endTree(proc)) return;
 	try {
 		proc.kill("SIGKILL");
 	} catch {
@@ -65,6 +110,8 @@ export class LspProcess {
 		private onState: (state: LspState) => void,
 		/** For tests: overrides how long a stopped server has before it is killed (2 s). */
 		private stopGraceMs = STOP_GRACE_MS,
+		/** For tests: stands in for Windows and its taskkill, where neither is there. */
+		private treeKill: TreeKill = SYSTEM_TREE_KILL,
 	) {}
 
 	start() {
@@ -74,8 +121,9 @@ export class LspProcess {
 		let proc: Subprocess<"pipe", "pipe", "pipe">;
 		try {
 			// A shim whose path needs quoting is a line written out for cmd.exe, which Windows must be given as written.
-			const command = lspCommand(this.path, ["--stdio"]);
+			const command = lspCommand(this.path, ["--stdio"], this.treeKill.platform);
 			proc = Bun.spawn(command, { stdin: "pipe", stdout: "pipe", stderr: "pipe", windowsVerbatimArguments: verbatim(command) });
+			trees.set(proc, { command, how: this.treeKill });
 		} catch (err: any) {
 			this.proc = undefined;
 			const msg = String(err?.message ?? err).slice(-500);
@@ -174,7 +222,8 @@ export class LspProcess {
 			// Stdin already closed.
 		}
 		try {
-			proc?.kill();
+			// Behind a shim on Windows the process held here is cmd.exe: the tree is ended, not cmd.exe alone.
+			if (!proc || !endTree(proc)) proc?.kill();
 		} catch {
 			// Process already exited.
 		}

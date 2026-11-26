@@ -261,105 +261,25 @@ const TWO_CHAR_STOP_WORDS = new Set([
 	"an", "be", "he", "it", "me", "my", "so", "up", "us", "we", "ok", "eq", "ne", "gt", "lt", "ge", "le",
 ]);
 
-/** Strips SQL (`--`, `/* ... *\/`) and SSL (`//`, `/* ... ;`) comments once while preserving string literal contents (where SSL SQL queries live). */
-function stripCodeComments(code: string): string {
-	let out = "";
-	let i = 0;
-	const n = code.length;
-	const lastBlockClose = code.lastIndexOf("*/");
-	while (i < n) {
-		const ch = code[i]!;
-		const next = code[i + 1];
-		if (ch === '"' || ch === "'") {
-			const q = ch;
-			out += ch;
-			i++;
-			while (i < n) {
-				if (code[i] === "\\" && q === '"' && i + 1 < n) {
-					out += code[i]! + code[i + 1]!;
-					i += 2;
-					continue;
-				}
-				if (code[i] === q) {
-					out += q;
-					i++;
-					if (q === "'" && code[i] === "'") {
-						out += "'";
-						i++;
-						continue;
-					}
-					break;
-				}
-				out += code[i++]!;
-			}
-			continue;
-		}
-		if ((ch === "-" && next === "-") || (ch === "/" && next === "/")) {
-			while (i < n && code[i] !== "\n") i++;
-			out += " ";
-			continue;
-		}
-		if (ch === "/" && next === "*") {
-			if (lastBlockClose < i + 2) {
-				let k = i + 2;
-				while (k < n && code[k] !== ";") k++;
-				i = k < n ? k + 1 : n;
-				out += " ";
-				continue;
-			}
-			let j = i + 2;
-			let depth = 1;
-			let sslSemiEnd = -1;
-			while (j < n && depth > 0) {
-				if (code[j] === "/" && code[j + 1] === "*") {
-					depth++;
-					j += 2;
-					continue;
-				}
-				if (code[j] === "*" && code[j + 1] === "/") {
-					depth--;
-					j += 2;
-					continue;
-				}
-				if (depth === 1 && code[j] === ";" && sslSemiEnd < 0) {
-					if (/^[ \t]*\r?\n[ \t]*(?:\/\*|:[A-Za-z])/.test(code.slice(j + 1, j + 48))) {
-						sslSemiEnd = j + 1;
-						break;
-					}
-				}
-				j++;
-			}
-			if (depth === 0 && sslSemiEnd < 0) {
-				i = j;
-			} else if (sslSemiEnd >= 0) {
-				i = sslSemiEnd;
-			} else {
-				let k = i + 2;
-				while (k < n && code[k] !== ";") k++;
-				i = k < n ? k + 1 : n;
-			}
-			out += " ";
-			continue;
-		}
-		out += ch;
-		i++;
-	}
-	return out;
-}
-
 /**
  * Scans `codeText` (an SSL/SQL script or selection) in O(N) time for whole-identifier references
  * to documented schema tables/objects (e.g. `DEMO_HOLIDAYS`, `DEMO_OUTAGES`) so the Agent can inject
  * their exact column definitions instead of a generic 25-table summary.
+ *
+ * The text is searched as it is given: a caller that does not want a name in a comment to count gives it without
+ * its comments (`withoutComments` in `src/view/lsp/facts.ts`). This used to take the comments out itself, with one
+ * reader for SQL and SSL at once that read SSL by hand (ADR 0003): it ended an SSL comment at a `*\/` where one
+ * came later in the file and honoured a backslash in a string, neither of which SSL does. Where SSL's comments are
+ * is now asked of the language server.
  */
 export function referencedSchemaTables(codeText: string, files: readonly DocFile[], limit = 8): DocFile[] {
 	if (!codeText.trim()) return [];
 	const schemaDocs = files.filter((f) => f.exists && f.group === "schema" && !isCatalog(f) && SCHEMA_EXT_RE.test(f.name));
 	if (!schemaDocs.length) return [];
 
-	// Strip SQL/SSL comments once and tokenize into a lowercase Set for O(1) per-key lookup.
+	// Tokenize into a lowercase Set for O(1) per-key lookup.
 	// Normalize bracketed/quoted dot-joins (`[dbo].[ORDERS]` -> `dbo.ORDERS`) without breaking `$`/`#` word boundaries.
-	const stripped = stripCodeComments(codeText).replace(/[\]"`]\s*\.\s*[\["`]/g, ".");
+	const stripped = codeText.replace(/[\]"`]\s*\.\s*[\["`]/g, ".");
 	const tokens = new Set<string>();
 	const tokenRe = /[A-Za-z_][A-Za-z0-9_$#]*(?:\.[A-Za-z_][A-Za-z0-9_$#]*)*/g;
 	for (const m of stripped.matchAll(tokenRe)) {

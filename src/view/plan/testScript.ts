@@ -14,7 +14,7 @@ import { catalogsKeptFor, workPrompt } from "../projectDocs";
 import { applyText, canonical, documents, notify, openFile, setState, state } from "../state";
 import { baseName, joinPath } from "../../shared/paths";
 import { TEMPLATES } from "../../shared/houseStyle";
-import { MAX_ATTEMPTS, patternsFrom, placeholderIn, procedureText, retryPrompt, scriptProblem } from "./build";
+import { MAX_ATTEMPTS, modelIsLocal, patternsFrom, placeholderIn, procedureText, retryPrompt, sameText, scriptProblem } from "./build";
 import { builtOf, MAX_PATHS, pathsMissing, planPaths, recordTests, testsPrompt } from "./built";
 import { readingOf } from "./drift";
 import { read, readScript, spansIn } from "./buildRun";
@@ -114,7 +114,10 @@ export function writeTests(path: string) {
 		if (snapshot(state).workspace?.root !== root) return;
 		const missing = pathsMissing(best, paths.length);
 		const unresolved = [...new Set(reading.edges.filter((e) => !e.resolved).map((e) => e.target))];
-		const local = snapshot(agent).models.find((m) => `${m.providerID}/${m.id}` === currentModel())?.local ?? true;
+		// A model opencode does not list was called a local one here (`?? true`). What is not known to be local is not
+		// called local (`modelIsLocal`); with no model chosen opencode takes a local one, or refuses the turn.
+		const model = currentModel();
+		const local = !model || modelIsLocal(snapshot(agent).models, model, snapshot(state).settings.agentOwnModels);
 		const checks: Check[] = [
 			{ label: "A test for every path", ok: !missing.length, detail: missing.length ? `nothing for ${missing.map((n) => `Path ${n}`).join(", ")}` : `${paths.length} ${paths.length === 1 ? "path" : "paths"}` },
 			...(truncated ? [{ label: "Every path was asked for", ok: false, detail: `the chart has more than ${MAX_PATHS} paths; these are the first` }] : []),
@@ -123,45 +126,67 @@ export function writeTests(path: string) {
 			{ label: "These tests have not been run", ok: null, detail: "SSL Studio cannot run SSL. Call RunTests in STARLIMS and read the server log." },
 			...(local ? [{ label: "A draft from a local model", ok: null, detail: "check that each test really tests its path" }] : []),
 		];
-		const existing = await readScript(file, root);
-		if (snapshot(state).workspace?.root !== root) return;
-		openReview({
-			title: `Tests: ${file}`,
-			original: existing ?? "",
-			proposed,
-			language: "ssl",
-			checks,
-			note: problems.length ? `The agent did not get these right in ${MAX_ATTEMPTS} tries:\n\n${problems.map((p) => `- ${p}`).join("\n")}` : undefined,
-			acceptLabel: existing === null ? "Accept and create the file" : "Accept into the editor",
-			onAccept: async (final) => {
-				if (snapshot(state).workspace?.root !== root) return;
-				if (!planOf(path)) await openFile(path);
-				if (snapshot(state).workspace?.root !== root) return;
-				const full = joinPath(root, file);
-				const openNow = documents.has(canonical(full)) || documents.has(full);
-				const existsNow =
-					openNow ||
-					(await fileExists(full));
-				if (snapshot(state).workspace?.root !== root) return;
-				if (!existsNow) {
-					await backend.write(full, final);
+		/**
+		 * Offers `text` for review against the test script as it reads at that moment. Accepting replaces the whole of
+		 * the script, and used to do so with whatever it had come to hold while the review stood open: what was typed
+		 * there meanwhile was written over. Accepted over a script that has changed, nothing is written, and the same
+		 * text is offered again against the script as it now is. It is not asked for again: that is a turn of the
+		 * model. `shown`: wait until the review is up, for a review that takes the place of the one being accepted.
+		 */
+		const offer = async (text: string, shown = false): Promise<void> => {
+			const existing = await readScript(file, root);
+			if (snapshot(state).workspace?.root !== root) return;
+			const again = async (final: string) => {
+				notify(`${file} has changed since this review was opened, so nothing was written. The review now shows the tests against the script as it is.`);
+				await offer(final, true);
+			};
+			const opened = openReview({
+				title: `Tests: ${file}`,
+				original: existing ?? "",
+				proposed: text,
+				language: "ssl",
+				checks,
+				note: problems.length ? `The agent did not get these right in ${MAX_ATTEMPTS} tries:\n\n${problems.map((p) => `- ${p}`).join("\n")}` : undefined,
+				acceptLabel: existing === null ? "Accept and create the file" : "Accept into the editor",
+				onAccept: async (final) => {
 					if (snapshot(state).workspace?.root !== root) return;
-					setState((s) => {
-						s.treeVersion += 1;
-					});
-					void catalogsKeptFor([full]);
-					await openFile(full);
-				} else {
-					await openFile(full);
+					if (!planOf(path)) await openFile(path);
 					if (snapshot(state).workspace?.root !== root) return;
-					applyText(monaco.Uri.file(full).fsPath, final);
-				}
-				if (snapshot(state).workspace?.root !== root) return;
-				const latest = planOf(path);
-				// Against `plan`, which the paths and the prompt were taken from, not the plan as it is by now.
-				if (latest) savePlan(path, recordTests(latest, file, plan));
-				notify(`Wrote ${file}. These tests have not been run: run them in STARLIMS.`);
-			},
-		});
+					const full = joinPath(root, file);
+					const now = await readScript(file, root);
+					if (snapshot(state).workspace?.root !== root) return;
+					if (!sameText(now, existing)) return again(final);
+					if (now === null) {
+						// No script when the review opened, and none that reads now. One that is there is not written over.
+						if (await fileExists(full)) throw new Error(`${file} is there, and could not be read, so nothing was written`);
+						if (snapshot(state).workspace?.root !== root) return;
+						await backend.write(full, final);
+						if (snapshot(state).workspace?.root !== root) return;
+						setState((s) => {
+							s.treeVersion += 1;
+						});
+						void catalogsKeptFor([full]);
+						await openFile(full);
+					} else {
+						await openFile(full);
+						if (snapshot(state).workspace?.root !== root) return;
+						// From here to the edit nothing is waited for: the text is looked at once more, as it stands in the
+						// buffer. A script that could not be opened used to be reported as written, and recorded in the plan
+						// as its tests, though nothing had been written.
+						const doc = documents.get(canonical(full)) ?? documents.get(full);
+						if (!doc) throw new Error(`${file} could not be opened, so nothing was written`);
+						if (!sameText(doc.model.getValue(), existing)) return again(final);
+						if (!applyText(monaco.Uri.file(full).fsPath, final)) throw new Error(`${file} could not be opened, so nothing was written`);
+					}
+					if (snapshot(state).workspace?.root !== root) return;
+					const latest = planOf(path);
+					// Against `plan`, which the paths and the prompt were taken from, not the plan as it is by now.
+					if (latest) savePlan(path, recordTests(latest, file, plan));
+					notify(`Wrote ${file}. These tests have not been run: run them in STARLIMS.`);
+				},
+			});
+			if (shown) await opened;
+		};
+		await offer(proposed);
 	});
 }

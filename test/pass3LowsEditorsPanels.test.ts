@@ -454,8 +454,9 @@ describe("whether a drop lands in a comment", () => {
 		expect(inComment(sqlSpans, "SELECT '-- not a |comment' FROM T")).toBe(false);
 	});
 
-	test("where nothing can say (the grammar is not loaded), it is taken for code", () => {
-		expect(writtenInComment([], "/* a note;", 5, () => null)).toBe(false);
+	test("where nothing can say (the grammar is not loaded), it is not known, and no comment is written", () => {
+		expect(writtenInComment([], "/* a note;", 5, () => null)).toBeNull();
+		expect(droppedFileNote("docs/specs/due-dates.md", "ssl", writtenInComment([], "/* a note;", 5, () => null))).toBe("docs/specs/due-dates.md");
 	});
 });
 

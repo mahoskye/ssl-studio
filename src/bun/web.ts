@@ -123,6 +123,8 @@ export type OutboxSocket = { readyState: number; send(text: string): number; get
 const SOCKET_LOW_WATER = 1024 * 1024;
 /** As much as may wait for one tab, in characters. A tab that far behind is not reading, and is let go of. */
 const MAX_WAITING_CHARS = 256 * 1024 * 1024;
+/** How often what waits is looked at again, should the socket never say that it drained. */
+const OUTBOX_RETRY_MS = 250;
 
 /**
  * What one tab is sent, in order and none of it lost. A socket with a large reply still on its way (a picture)
@@ -130,15 +132,29 @@ const MAX_WAITING_CHARS = 256 * 1024 * 1024;
  * the call it answered waited for ever. Here what the socket has no room for waits, and goes when the socket has
  * drained. A tab that cannot be sent to at all is closed: the view fails every call in flight when its
  * connection closes, which is an answer, where silence is none.
+ *
+ * What waits is never sent from inside the socket's own `drain` call. Bun's socket, given a large message
+ * there, holds it and sends no more of it until something else stirs the connection: the tab's next call, or the
+ * keep-alive ping more than a minute and a half later. A tab that had asked for three pictures and then only
+ * waited (a Markdown preview does) got the first and nothing after it. So `drained()` sends on a later turn of
+ * the event loop (`setImmediate`; a microtask still runs inside the call and stalls the same way).
  */
-export function createOutbox(ws: OutboxSocket, limit = MAX_WAITING_CHARS) {
+export function createOutbox(ws: OutboxSocket, limit = MAX_WAITING_CHARS, retryMs = OUTBOX_RETRY_MS) {
 	const queue: string[] = [];
 	let waiting = 0;
 	let open = true;
-	const giveUp = () => {
-		open = false;
+	/** A send of what waits is due on a later turn. */
+	let due = false;
+	let retry: ReturnType<typeof setTimeout> | undefined;
+	const rest = () => {
 		queue.length = 0;
 		waiting = 0;
+		if (retry !== undefined) clearTimeout(retry);
+		retry = undefined;
+	};
+	const giveUp = () => {
+		open = false;
+		rest();
 		try {
 			ws.close(1013, "SSL Studio could not send this tab its replies.");
 		} catch {
@@ -155,6 +171,21 @@ export function createOutbox(ws: OutboxSocket, limit = MAX_WAITING_CHARS) {
 			return false;
 		}
 	};
+	/** While anything waits it is looked at again after a while, drain or no drain: a reply must not hang on one event. */
+	const watch = () => {
+		if (retry !== undefined || !open || queue.length === 0) return;
+		retry = setTimeout(() => {
+			retry = undefined;
+			flush();
+		}, retryMs);
+		(retry as { unref?: () => void }).unref?.();
+	};
+	/** What waits goes, oldest first, while there is room. Never called from inside the socket's `drain`. */
+	const flush = () => {
+		due = false;
+		while (open && queue.length && room() && give(queue[0]!)) waiting -= queue.shift()!.length;
+		watch();
+	};
 	return {
 		send(text: string) {
 			if (!open || ws.readyState !== 1) return;
@@ -162,17 +193,19 @@ export function createOutbox(ws: OutboxSocket, limit = MAX_WAITING_CHARS) {
 			if (!open) return;
 			queue.push(text);
 			waiting += text.length;
-			if (waiting > limit) giveUp();
+			if (waiting > limit) return giveUp();
+			watch();
 		},
-		/** The socket has sent some of what it held back: what waited here goes, oldest first, while there is room. */
+		/** The socket has sent some of what it held back: what waited here goes on the next turn of the event loop. */
 		drained() {
-			while (open && queue.length && room() && give(queue[0]!)) waiting -= queue.shift()!.length;
+			if (due || !open || queue.length === 0) return;
+			due = true;
+			setImmediate(flush);
 		},
 		/** The socket closed: there is no one to send to. */
 		closed() {
 			open = false;
-			queue.length = 0;
-			waiting = 0;
+			rest();
 		},
 		/** How many messages wait for the socket to drain. */
 		get waiting() {
@@ -371,6 +404,7 @@ export function startWebHost(options?: { port?: number; dist?: string; folder?: 
 		websocket: {
 			maxPayloadLength: MAX_WS_PAYLOAD,
 			open: (ws) => void sockets.set(ws, createOutbox(ws)),
+			// The outbox sends on a later turn, never from in here: see createOutbox.
 			drain: (ws) => sockets.get(ws)?.drained(),
 			close: (ws) => {
 				sockets.get(ws)?.closed();

@@ -719,26 +719,154 @@ function findSectionSiblings(list: MarkdownSection[], headingLine: number): { si
 	return null;
 }
 
+/**
+ * One line of a document and the line end after it: `""` after the last line of a text that does not end in one.
+ *
+ * The moves below put lines in another order. They were joined again with one line end for the whole text (CRLF
+ * if the text had one anywhere), so a file with both kinds came back with CRLF throughout: every line of it
+ * changed for a move of two sections. A line now keeps the end it has, wherever it goes.
+ */
+type DocLine = { text: string; eol: string };
+
+function docLines(text: string): DocLine[] {
+	const lines: DocLine[] = [];
+	let at = 0;
+	while (at < text.length) {
+		const feed = text.indexOf("\n", at);
+		if (feed < 0) {
+			lines.push({ text: text.slice(at), eol: "" });
+			break;
+		}
+		const crlf = feed > at && text[feed - 1] === "\r";
+		lines.push({ text: text.slice(at, crlf ? feed - 1 : feed), eol: crlf ? "\r\n" : "\n" });
+		at = feed + 1;
+	}
+	return lines;
+}
+
+/** A text without the line end it ends in: its lines are then `docLines` of it, one for one. */
+const withoutLastLineEnd = (text: string) => (text.endsWith("\r\n") ? text.slice(0, -2) : text.endsWith("\n") ? text.slice(0, -1) : text);
+
+/** The text's own kind of line end, for a line that has none to keep: one made here with nothing to take it from. */
+const lineEndOf = (text: string): "\r\n" | "\n" => (text.includes("\r\n") ? "\r\n" : "\n");
+
+/**
+ * Lines in their new order, as text. Only the place of the text's end can make a line end change hands: where the
+ * text ended in no line end and its last line is last no more, that line takes the end of the line that now is.
+ */
+function joinDocLines(lines: readonly DocLine[], was: readonly DocLine[], made: string): string {
+	const ended = was.length > 0 && was[was.length - 1]!.eol !== "";
+	const last = lines.length - 1;
+	const spare = (last >= 0 && lines[last]!.eol) || made;
+	return lines.map((line, i) => line.text + (i < last ? line.eol || spare : ended ? line.eol || made : "")).join("");
+}
+
+const FOOTNOTE_DEFINITION = /^ {0,3}\[\^[^\]\s]+\]:/;
+const LINK_DEFINITION = /^ {0,3}\[(?!\^)[^\]]+\]:\s*\S/;
+/** The mark a spec ends in (`plan/assist.ts`): the print of the plan it was written from. */
+const PLAN_MARK = /^ {0,3}<!--\s*plan\s[^\n]*-->\s*$/;
+/** A line that is not more of the paragraph above it: a list item, a quote, a table row, a tag or a comment. */
+const STARTS_A_BLOCK = /^ {0,3}(?:[-*+](?:\s|$)|\d+[.)](?:\s|$)|[>|<])/;
+
+/**
+ * Where a document's own closing lines begin, as an index into `lines` (their count, where it has none): the
+ * footnote definitions and link definitions that stand after the last line of the last section's text, and the
+ * mark a spec ends in. `lastHeading` is the index of the document's last heading.
+ *
+ * A section ran from its heading to the end of the file, so the last section took these lines with it when it
+ * was moved: a document's footnotes and its closing mark ended up in the middle of it. They belong to the
+ * document and stay last.
+ *
+ * Only what is known to be the document's is taken. Any other comment stays with the section it is in: it may be
+ * a note on that section, or the closing half of a pair (`<!-- /catalog -->`, `<!-- /toc -->`,
+ * `<!-- plan-mermaid:end -->`), and a pair torn apart is rewritten wrongly by whatever fills it next. And where
+ * the last heading has nothing under it but definitions, they are that section's own text (a "Footnotes" or
+ * "References" heading), not what is left over after it.
+ */
+function closingLinesStart(lines: readonly DocLine[], lastHeading: number): number {
+	const scan = (definitionsClose: boolean): { start: number; text: boolean } => {
+		let start = lines.length;
+		let text = false;
+		let fence = "";
+		// A footnote's text goes on in indented lines, and in the lines right under its first.
+		let footnote: "no" | "open" | "after blank" = "no";
+		for (let at = lastHeading + 1; at < lines.length; at++) {
+			const line = lines[at]!.text;
+			const fenced = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+			let closing = false;
+			if (fence) {
+				if (fenced && fenced[1]![0] === fence[0] && fenced[1]!.length >= fence.length && !fenced[2]!.trim()) fence = "";
+			} else if (fenced && !(fenced[1]![0] === "`" && fenced[2]!.includes("`"))) {
+				fence = fenced[1]!;
+			} else if (!line.trim()) {
+				if (footnote === "open") footnote = "after blank";
+				continue;
+			} else if (PLAN_MARK.test(line)) {
+				closing = true;
+				footnote = "no";
+			} else if (definitionsClose && FOOTNOTE_DEFINITION.test(line)) {
+				closing = true;
+				footnote = "open";
+			} else if (definitionsClose && LINK_DEFINITION.test(line)) {
+				closing = true;
+				footnote = "no";
+			} else if (footnote !== "no" && (/^(?: {4}|\t)/.test(line) || (footnote === "open" && !STARTS_A_BLOCK.test(line)))) {
+				closing = true;
+				footnote = "open";
+			}
+			if (closing) {
+				if (start === lines.length) start = at;
+			} else {
+				start = lines.length;
+				text = true;
+				footnote = "no";
+			}
+		}
+		return { start, text };
+	};
+	const found = scan(true);
+	return found.text ? found.start : scan(false).start;
+}
+
+/**
+ * A document made ready for a move of its sections: its lines, its sections, and where the sections end (see
+ * `closingLinesStart`). A section that ran to the end of the file ends there instead.
+ */
+function sectionsOf(text: string): { lines: DocLine[]; tree: MarkdownSection[]; end: number } {
+	const lines = docLines(text);
+	const tree = markdownSectionTree(withoutLastLineEnd(text));
+	let last: MarkdownSection | undefined = tree[tree.length - 1];
+	while (last?.children.length) last = last.children[last.children.length - 1];
+	const end = last ? closingLinesStart(lines, last.line - 1) : lines.length;
+	const clamp = (list: MarkdownSection[]) => {
+		for (const section of list) {
+			if (section.endLine > end) section.endLine = end;
+			clamp(section.children);
+		}
+	};
+	if (end < lines.length) clamp(tree);
+	return { lines, tree, end };
+}
+
+const isBlank = (line: DocLine) => line.text.trim() === "";
+
 /** Splits trailing blank lines off a section slice while always keeping the heading line itself. */
-function splitTrailingBlankLines(slice: string[]): { core: string[]; pad: string[] } {
+function splitTrailingBlankLines(slice: DocLine[]): { core: DocLine[]; pad: DocLine[] } {
 	let cut = slice.length;
-	while (cut > 1 && slice[cut - 1]!.trim() === "") cut--;
+	while (cut > 1 && isBlank(slice[cut - 1]!)) cut--;
 	return { core: slice.slice(0, cut), pad: slice.slice(cut) };
 }
 
 /**
  * Moves a Markdown heading and its entire subtree past its adjacent sibling section
- * (`up` or `down`), preserving CRLF/LF line endings, trailing newline, and inter-section
- * blank-line spacing. Returns `null` when already at the sibling boundary or not a heading.
+ * (`up` or `down`), preserving every line's own line ending, the trailing newline, the
+ * document's closing lines (`closingLinesStart`) and inter-section blank-line spacing.
+ * Returns `null` when already at the sibling boundary or not a heading.
  */
 export function moveMarkdownSection(text: string, headingLine: number, direction: "up" | "down"): { text: string; newLine: number } | null {
 	if (!text || headingLine < 1) return null;
-	const eol = text.includes("\r\n") ? "\r\n" : "\n";
-	const hasTrailingNewline = text.endsWith("\r\n") || text.endsWith("\n");
-	const body = hasTrailingNewline ? text.slice(0, text.endsWith("\r\n") ? -2 : -1) : text;
-	const rawLines = body.split(/\r?\n/);
+	const { lines: rawLines, tree, end } = sectionsOf(text);
 
-	const tree = markdownSectionTree(body);
 	const found = findSectionSiblings(tree, headingLine);
 	if (!found) return null;
 	const { siblings, index } = found;
@@ -752,7 +880,7 @@ export function moveMarkdownSection(text: string, headingLine: number, direction
 	const endA = first.endLine - 1;
 	const startB = second.line - 1;
 	const endB = second.endLine - 1;
-	if (startA < 0 || endB >= rawLines.length || endA + 1 !== startB) return null;
+	if (startA < 0 || endB >= end || endA + 1 !== startB) return null;
 
 	const { core: coreA, pad: padA } = splitTrailingBlankLines(rawLines.slice(startA, endA + 1));
 	const { core: coreB, pad: padB } = splitTrailingBlankLines(rawLines.slice(startB, endB + 1));
@@ -766,7 +894,7 @@ export function moveMarkdownSection(text: string, headingLine: number, direction
 		for (const h of collectSectionHeadings(first)) {
 			const relIdx = h.line - first.line;
 			if (relIdx >= 0 && relIdx < rebasedCoreA.length) {
-				rebasedCoreA[relIdx] = shiftHeadingLine(rebasedCoreA[relIdx]!, h.level + deltaA);
+				rebasedCoreA[relIdx] = { ...rebasedCoreA[relIdx]!, text: shiftHeadingLine(rebasedCoreA[relIdx]!.text, h.level + deltaA) };
 			}
 		}
 	}
@@ -774,8 +902,7 @@ export function moveMarkdownSection(text: string, headingLine: number, direction
 	const swapped = [...coreB, ...padA, ...rebasedCoreA, ...padB];
 	const nextLines = [...rawLines.slice(0, startA), ...swapped, ...rawLines.slice(endB + 1)];
 	const newLine = direction === "up" ? startA + 1 : startA + coreB.length + padA.length + 1;
-	const nextText = nextLines.join(eol) + (hasTrailingNewline ? eol : "");
-	return { text: nextText, newLine };
+	return { text: joinDocLines(nextLines, rawLines, lineEndOf(text)), newLine };
 }
 
 /**
@@ -854,33 +981,28 @@ function shiftHeadingLine(line: string, newLevel: number): string {
 	return `${indent}${"#".repeat(clamped)}${rest}`;
 }
 
-function splitDocumentLines(text: string): { eol: "\r\n" | "\n"; hasTrailingNewline: boolean; body: string; rawLines: string[] } {
-	const eol: "\r\n" | "\n" = text.includes("\r\n") ? "\r\n" : "\n";
-	const hasTrailingNewline = text.endsWith("\r\n") || text.endsWith("\n");
-	const body = hasTrailingNewline ? text.slice(0, text.endsWith("\r\n") ? -2 : -1) : text;
-	return { eol, hasTrailingNewline, body, rawLines: body.split(/\r?\n/) };
+/** A document with the level of some of its headings changed by `by`: every line keeps its place and its line end. */
+function withHeadingLevels(text: string, headings: readonly MarkdownSection[], by: number): string {
+	const lines = docLines(text);
+	for (const h of headings) {
+		const line = lines[h.line - 1];
+		if (line) lines[h.line - 1] = { ...line, text: shiftHeadingLine(line.text, Math.max(1, Math.min(6, h.level + by))) };
+	}
+	return lines.map((line) => line.text + line.eol).join("");
 }
 
 /**
  * Promotes a Markdown heading and all of its descendant sub-headings up by one
  * level (clamped at `#` level 1). Returns a no-op when the section is already
- * level 1 or `sectionLine` is not a heading. Preserves CRLF/LF and front matter.
+ * level 1 or `sectionLine` is not a heading. Preserves each line's line ending and front matter.
  */
 export function promoteMarkdownSection(text: string, sectionLine: number): MarkdownSectionTransformResult {
 	const noop: MarkdownSectionTransformResult = { text, newLine: sectionLine, changed: false };
 	if (!text || sectionLine < 1) return noop;
-	const { eol, hasTrailingNewline, body, rawLines } = splitDocumentLines(text);
-	const section = findSectionByLine(markdownSectionTree(body), sectionLine);
+	const section = findSectionByLine(markdownSectionTree(withoutLastLineEnd(text)), sectionLine);
 	if (!section || section.level <= 1) return noop;
 
-	const nextLines = rawLines.slice();
-	for (const h of collectSectionHeadings(section)) {
-		const idx = h.line - 1;
-		if (idx >= 0 && idx < nextLines.length) {
-			nextLines[idx] = shiftHeadingLine(nextLines[idx]!, Math.max(1, h.level - 1));
-		}
-	}
-	const nextText = nextLines.join(eol) + (hasTrailingNewline ? eol : "");
+	const nextText = withHeadingLevels(text, collectSectionHeadings(section), -1);
 	if (nextText === text) return noop;
 	return { text: nextText, newLine: sectionLine, changed: true };
 }
@@ -889,26 +1011,18 @@ export function promoteMarkdownSection(text: string, sectionLine: number): Markd
  * Demotes a Markdown heading and all of its descendant sub-headings down by one
  * level (clamped at `######` level 6). Returns a no-op when the section or any
  * descendant is already level 6, or `sectionLine` is not a heading. Preserves
- * CRLF/LF and front matter.
+ * each line's line ending and front matter.
  */
 export function demoteMarkdownSection(text: string, sectionLine: number): MarkdownSectionTransformResult {
 	const noop: MarkdownSectionTransformResult = { text, newLine: sectionLine, changed: false };
 	if (!text || sectionLine < 1) return noop;
-	const { eol, hasTrailingNewline, body, rawLines } = splitDocumentLines(text);
-	const section = findSectionByLine(markdownSectionTree(body), sectionLine);
+	const section = findSectionByLine(markdownSectionTree(withoutLastLineEnd(text)), sectionLine);
 	if (!section) return noop;
 
 	const headings = collectSectionHeadings(section);
 	if (headings.some((h) => h.level >= 6)) return noop;
 
-	const nextLines = rawLines.slice();
-	for (const h of headings) {
-		const idx = h.line - 1;
-		if (idx >= 0 && idx < nextLines.length) {
-			nextLines[idx] = shiftHeadingLine(nextLines[idx]!, Math.min(6, h.level + 1));
-		}
-	}
-	const nextText = nextLines.join(eol) + (hasTrailingNewline ? eol : "");
+	const nextText = withHeadingLevels(text, headings, 1);
 	if (nextText === text) return noop;
 	return { text: nextText, newLine: sectionLine, changed: true };
 }
@@ -948,7 +1062,8 @@ export function canDropSection(
  * - `"before"` / `"after"` places it as a sibling of `targetLine`, adopting `target.level`
  * - `"inside"` nests it at the end of `targetLine` as a child at `target.level + 1`
  * Automatically rebases descendant heading levels, ignores `#` inside fenced code
- * blocks and front matter, preserves CRLF/LF, and rejects drops onto itself,
+ * blocks and front matter, preserves each line's own line ending, leaves the document's
+ * closing lines (`closingLinesStart`) last, and rejects drops onto itself,
  * inside its own descendant subtree, or where any rebased descendant would exceed H6.
  */
 export function moveMarkdownSectionTo(
@@ -959,8 +1074,11 @@ export function moveMarkdownSectionTo(
 ): MarkdownSectionTransformResult {
 	const noop: MarkdownSectionTransformResult = { text, newLine: sourceLine, changed: false };
 	if (!text || sourceLine < 1 || targetLine < 1 || sourceLine === targetLine) return noop;
-	const { eol, hasTrailingNewline, body, rawLines } = splitDocumentLines(text);
-	const tree = markdownSectionTree(body);
+	const { lines: allLines, tree, end } = sectionsOf(text);
+	// The sections are moved among the lines that are theirs: the document's closing lines are put back after them.
+	const rawLines = allLines.slice(0, end);
+	const closingLines = allLines.slice(end);
+	const eol = lineEndOf(text);
 	const source = findSectionByLine(tree, sourceLine);
 	const target = findSectionByLine(tree, targetLine);
 	if (!source || !target) return noop;
@@ -977,7 +1095,7 @@ export function moveMarkdownSectionTo(
 
 	// Preserve original trailing blank lines at EOF cleanly when moving sections to/from EOF.
 	let eofPadStart = rawLines.length;
-	while (eofPadStart > 0 && rawLines[eofPadStart - 1]!.trim() === "") eofPadStart--;
+	while (eofPadStart > 0 && isBlank(rawLines[eofPadStart - 1]!)) eofPadStart--;
 	const origEofPad = rawLines.slice(eofPadStart);
 
 	const { core: srcCoreRaw, pad: srcPad } = splitTrailingBlankLines(rawLines.slice(srcStart, srcEnd + 1));
@@ -989,35 +1107,37 @@ export function moveMarkdownSectionTo(
 		for (const h of collectSectionHeadings(source)) {
 			const relIdx = h.line - source.line;
 			if (relIdx >= 0 && relIdx < rebasedCore.length) {
-				rebasedCore[relIdx] = shiftHeadingLine(rebasedCore[relIdx]!, h.level + delta);
+				rebasedCore[relIdx] = { ...rebasedCore[relIdx]!, text: shiftHeadingLine(rebasedCore[relIdx]!.text, h.level + delta) };
 			}
 		}
 	}
 
 	// Infer inter-section blank-line spacing from surrounding sections (spaced vs tight documents).
-	const gap: string[] =
+	// A blank line made here stands for the one above the section it is read from, and has that one's line end.
+	const blankLike = (line: DocLine): DocLine[] => [{ text: "", eol: line.eol || eol }];
+	const gap: DocLine[] =
 		srcPad.length > 0
 			? srcPad
-			: srcStart > 0 && rawLines[srcStart - 1]!.trim() === ""
-				? [""]
+			: srcStart > 0 && isBlank(rawLines[srcStart - 1]!)
+				? blankLike(rawLines[srcStart - 1]!)
 				: tgtPad.length > 0
 					? tgtPad
-					: tgtStart > 0 && rawLines[tgtStart - 1]!.trim() === ""
-						? [""]
+					: tgtStart > 0 && isBlank(rawLines[tgtStart - 1]!)
+						? blankLike(rawLines[tgtStart - 1]!)
 						: [];
 
 	// Remove source cleanly while preserving inter-section spacing at the splice site.
 	const beforeSrc = rawLines.slice(0, srcStart);
 	const afterSrc = rawLines.slice(srcEnd + 1);
-	let remaining: string[];
+	let remaining: DocLine[];
 	let removedCount: number;
 	if (afterSrc.length === 0) {
 		let cut = beforeSrc.length;
-		while (cut > 0 && beforeSrc[cut - 1]!.trim() === "") cut--;
+		while (cut > 0 && isBlank(beforeSrc[cut - 1]!)) cut--;
 		remaining = [...beforeSrc.slice(0, cut), ...origEofPad];
 		removedCount = rawLines.length - remaining.length;
 	} else {
-		const keepPad = beforeSrc.length > 0 && beforeSrc[beforeSrc.length - 1]!.trim() !== "" ? srcPad : [];
+		const keepPad = beforeSrc.length > 0 && !isBlank(beforeSrc[beforeSrc.length - 1]!) ? srcPad : [];
 		remaining = [...beforeSrc, ...keepPad, ...afterSrc];
 		removedCount = srcEnd - srcStart + 1 - keepPad.length;
 	}
@@ -1031,23 +1151,23 @@ export function moveMarkdownSectionTo(
 	const head = remaining.slice(0, insertAt);
 	const tail = remaining.slice(insertAt);
 
-	let nextLines: string[];
+	let nextLines: DocLine[];
 	let newLine: number;
 	if (tail.length === 0) {
 		let headCut = head.length;
-		while (headCut > 0 && head[headCut - 1]!.trim() === "") headCut--;
+		while (headCut > 0 && isBlank(head[headCut - 1]!)) headCut--;
 		const cleanHead = head.slice(0, headCut);
 		const leadGap = cleanHead.length > 0 ? gap : [];
 		newLine = cleanHead.length + leadGap.length + 1;
 		nextLines = [...cleanHead, ...leadGap, ...rebasedCore, ...origEofPad];
 	} else {
-		const leadGap = head.length > 0 && head[head.length - 1]!.trim() !== "" ? gap : [];
-		const trailGap = tail[0]!.trim() !== "" ? gap : [];
+		const leadGap = head.length > 0 && !isBlank(head[head.length - 1]!) ? gap : [];
+		const trailGap = !isBlank(tail[0]!) ? gap : [];
 		newLine = head.length + leadGap.length + 1;
 		nextLines = [...head, ...leadGap, ...rebasedCore, ...trailGap, ...tail];
 	}
 
-	const nextText = nextLines.join(eol) + (hasTrailingNewline ? eol : "");
+	const nextText = joinDocLines([...nextLines, ...closingLines], allLines, eol);
 	if (nextText === text) return noop;
 	return { text: nextText, newLine, changed: true };
 }

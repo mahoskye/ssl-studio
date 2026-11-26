@@ -512,10 +512,20 @@ export async function chooseModel(ref: string): Promise<boolean> {
 	// An empty choice takes the setting out, so the default model shows through.
 	const savedModel = await saveSetting({ agentModel: chosen || null }, "user");
 	if (!savedModel) return false;
-	const models = (await backend.agent("models", [])) as AgentModel[];
+	// The setting is saved, so the model has changed: the session that ran on the one before ends here, before
+	// anything else is asked of opencode. It used to end only once the list of models had been read again, and
+	// where that reading failed the list showed the new model, the toast said the model was not changed, and the
+	// next question went on in the old session, on the old model: one that may cost money, and that nothing showed.
 	setAgent((s) => {
-		s.models = models;
 		dropChatSession(s);
+	});
+	// The list is read again for what the change did to it (a model marked as the user's own now counts as local).
+	// Not read, it stays as it was, and that is said for what it is: the model is changed all the same.
+	await safely("The model was changed, but the list of models could not be read again", async () => {
+		const models = (await backend.agent("models", [])) as AgentModel[];
+		setAgent((s) => {
+			s.models = models;
+		});
 	});
 	return true;
 }

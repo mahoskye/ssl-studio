@@ -1546,6 +1546,11 @@ export function copyPlanSelection(plan: Plan, ids: ReadonlySet<string>, sourcePl
  * Pastes copied nodes and internal edges with fresh IDs. Back into the plan they were copied from, each keeps its
  * stage and stands a little off where its original was nudged to.
  *
+ * Its stage, that is, while the plan still has it: the stage with the id and the name it was copied under. A
+ * stage's id is free again once the stage has lost its last step, and the next stage made takes it. Going by the
+ * id alone, a step copied from "Validation" and pasted after that had happened landed in whichever stage held
+ * the id by then. When the stage is not there any more, the step goes where one from another plan would.
+ *
  * Into another plan, nothing of the first plan's layout comes along. A stage's id means something only in its
  * own plan, so a step joins the stage of the same name where the other plan has one, and stands outside every
  * stage otherwise: the stage itself is not copied, as a frame is not on a whiteboard when only what is in it
@@ -1561,7 +1566,7 @@ export function pastePlanSelection(
 ): { plan: Plan; pastedIds: string[] } {
 	if (!clip.nodes.length) return { plan, pastedIds: [] };
 	const idMap = new Map<string, string>();
-	const validGroups = new Set(plan.groups.map((g) => g.id));
+	const stageNames = new Map(plan.groups.map((g) => [g.id, g.name]));
 	const groupByName = new Map(plan.groups.map((g) => [g.name.trim().toLowerCase(), g.id]));
 	const samePlan = !clip.sourcePlanPath || !targetPlanPath || clip.sourcePlanPath === targetPlanPath;
 	let alreadyHasStart = plan.nodes.some((n) => n.kind === "start");
@@ -1586,10 +1591,11 @@ export function pastePlanSelection(
 
 		let resolvedGroup: string | undefined;
 		if (typeof src.group === "string" && src.group) {
-			if (samePlan && validGroups.has(src.group)) {
+			const copiedName = clip.groupNames?.[src.group];
+			if (samePlan && copiedName !== undefined && stageNames.get(src.group) === copiedName) {
 				resolvedGroup = src.group;
-			} else if (!samePlan && clip.groupNames?.[src.group]) {
-				resolvedGroup = groupByName.get(clip.groupNames[src.group]!.trim().toLowerCase());
+			} else if (copiedName) {
+				resolvedGroup = groupByName.get(copiedName.trim().toLowerCase());
 			}
 		}
 

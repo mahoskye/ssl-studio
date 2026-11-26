@@ -2,7 +2,7 @@
 // A command's keys are in DEFAULT_KEYS and nowhere else; the user's own are
 // in the `keys` setting.
 import { snapshot } from "solid-js";
-import { ask, choose, quickPick } from "./dialogs";
+import { ask, browseWorkspaceFile, choose, quickPick, type QuickPickOption } from "./dialogs";
 import { activeEditor, lastActiveMarkdownPath } from "./editor/EditorGroup";
 import { formatFenceInModel, formatNonSslModel, hadRecentFormatError, languageName } from "./editor/languages";
 import { pickLanguageMode } from "./editor/languagePicker";
@@ -12,6 +12,7 @@ import { folderParts } from "../shared/docSections";
 import { canFormatNonSsl } from "../shared/format";
 import { isCatalog, registryTitle, statusChoices, toneOf } from "../shared/projectDocs";
 import { generateMermaidErDiagram, parseCreateTables, type SqlTableDef } from "../shared/sqlSchema";
+import { textOrWhy, unreadFilesSaid, type UnreadFile } from "../shared/tablePower";
 import { workspaceTags } from "../shared/tags";
 import { docsGoverningFile } from "../shared/workContext";
 import { runMonacoMarkdownAction } from "./editor/markdownKeys";
@@ -414,7 +415,7 @@ export const commands: Command[] = [
 	{ id: "release-readiness", label: "Docs: Release Readiness Overview…", detail: "Review ticket completion, approvals, test runs, and deployment readiness across the project", run: () => void runProjectDocAction("openReleaseReadiness") },
 	{ id: "clone-ticket", label: "Ticket: Clone Ticket…", detail: "Clone an existing ticket's template, checklist, and metadata under a new key", run: () => void runProjectDocAction("cloneTicket") },
 	{ id: "split-ticket", label: "Ticket: Split Checklist into Sub-Ticket…", detail: "Extract checked or selected checklist items from a ticket into a linked child sub-ticket", run: () => void runProjectDocAction("splitTicketSubticket") },
-	{ id: "import-mermaid-plan", label: "Plan: Import Mermaid Flowchart as Plan…", detail: "Convert a Mermaid flowchart from the active document or clipboard into a .plan.json chart", run: () => void importMermaidPlanCommand() },
+	{ id: "import-mermaid-plan", label: "Plan: Import Mermaid Flowchart as Plan…", detail: "Convert a Mermaid flowchart from the open document, the clipboard or a file into a .plan.json chart", run: () => void importMermaidPlanCommand() },
 	{ id: "git-blame-line", label: "Git: Show Line Commit & Ticket (Blame)", detail: "Show the commit, author, date, and ticket that last modified the current line", run: () => void gitBlameLineCommand() },
 	{ id: "git-switch-branch", label: "Git: Switch Branch…", detail: "Switch to another local Git branch", run: () => void gitSwitchBranchCommand() },
 	{ id: "git-stash", label: "Git: Stash Changes / Pop Stash…", detail: "Stash working tree changes, pop the latest stash, or inspect saved stashes", run: () => void gitStashCommand() },
@@ -883,13 +884,20 @@ async function generateErDiagramCommand() {
 		relativeTo(wsRoot, a).localeCompare(relativeTo(wsRoot, b), undefined, { numeric: true, sensitivity: "base" }),
 	);
 	const sqlChunks: string[] = [];
+	// The files that are there and could not be read (too large to open, or not text). They were taken for empty
+	// files, and the diagram was drawn without their tables as if it were whole.
+	const unread: UnreadFile[] = [];
 	for (const p of orderedPaths) {
 		const open = documents.get(canonical(p));
-		const text = open ? open.model.getValue() : await backend.read(p).then((r) => (r.binary ? "" : r.text), () => "");
+		const rel = relativeTo(wsRoot, p);
+		const got = open ? { text: open.model.getValue() } : await textOrWhy(() => backend.read(p), rel, wsRoot);
 		if (state.workspace?.root !== wsRoot) return;
-		if (text.trim()) sqlChunks.push(text.trimEnd());
+		if ("why" in got) unread.push({ file: rel, why: got.why });
+		else if (got.text.trim()) sqlChunks.push(got.text.trimEnd());
 	}
-	if (!sqlChunks.length) return notify("No readable SQL content was found in the selected files.");
+	const unreadSaid = unread.length ? `${unreadFilesSaid(unread)} ` : "";
+	const unreadKind = unread.length ? "error" : "info";
+	if (!sqlChunks.length) return notify(`${unreadSaid}No readable SQL content was found in the selected files.`, unreadKind);
 
 	const parsedTables = parseCreateTables(sqlChunks.join("\n;\n"), { includeStandaloneAlter: true });
 	// Deduplicate by table name while keeping the most complete/latest definition if a table was re-created across files.
@@ -920,7 +928,10 @@ async function generateErDiagramCommand() {
 		}
 	}
 	const tables = [...mergedByName.values()];
-	if (!tables.length) return notify("No CREATE TABLE definitions were found in the SQL files.");
+	if (!tables.length) return notify(`${unreadSaid}No CREATE TABLE definitions were found in the SQL files${unread.length ? " that could be read" : ""}.`, unreadKind);
+	// Said before the diagram is offered, and it stays until it is dismissed: what is copied or saved next is not
+	// the whole schema.
+	if (unread.length) notify(`${unreadSaid}The diagram is drawn without ${unread.length === 1 ? "that file" : "those files"}.`, "error");
 
 	const diagram = generateMermaidErDiagram(tables);
 	const canInsert = Boolean(active && isMarkdown(active) && (activeLiveEditor() || activeEditor()?.getDomNode()?.offsetParent));
@@ -969,9 +980,18 @@ async function generateErDiagramCommand() {
 	const dest = joinPath(wsRoot, ...schemaParts, "database", "ER-Diagram.md");
 	const destKey = canonical(dest);
 	const openDest = documents.get(destKey);
-	const existing = openDest
-		? openDest.model.getValue()
-		: await backend.read(dest).then((r) => (r.binary ? null : r.text), () => null);
+	let existing: string | null = null;
+	if (openDest) {
+		existing = openDest.model.getValue();
+	} else {
+		const destRel = relativeTo(wsRoot, dest);
+		const got = await textOrWhy(() => backend.read(dest), destRel, wsRoot);
+		if (state.workspace?.root !== wsRoot) return;
+		if ("text" in got) existing = got.text;
+		// A file that is there and could not be read (a text too large to open) was taken for no file: the diagram
+		// was written over the whole of it, with nothing asked and nothing kept of what it held.
+		else if (await fileExists(dest)) return notify(`${unreadFilesSaid([{ file: destRel, why: got.why }])} The diagram was not saved: nothing was written.`, "error");
+	}
 	if (state.workspace?.root !== wsRoot) return;
 
 	let nextText = `# Database ER Diagram\n\n${diagram}\n`;
@@ -1302,61 +1322,86 @@ function findMermaidBlocks(markdown: string): { code: string; startLine: number;
 	return out;
 }
 
+/** One row of the list "Import Mermaid flowchart as Plan…" opens: where the flowchart is taken from. */
+export type FlowchartPick =
+	| { from: "text"; source: string; name: string }
+	| { from: "clipboard" }
+	| { from: "file" }
+	/** A place that was looked in and holds no flowchart: picking it says so. */
+	| { from: "nothing"; why: string };
+
+/**
+ * What the command has at hand before it asks: the open document, and the clipboard's text. For the clipboard,
+ * null is a read that was refused and undefined one that has no answer yet (`answeredSoon`).
+ */
+export type FlowchartSources = {
+	document?: { name: string; text: string; selection: string; cursorLine: number };
+	clipboard: string | null | undefined;
+};
+
+const flowchartStart = (source: string) => (source.trim().split(/\r?\n/)[0] ?? "").trim().slice(0, 48);
+
+/**
+ * The rows of that list. The flowchart used to be asked for in the one-line prompt, with the clipboard's text or
+ * an example as its value: a one-line box drops the line breaks, the parser wants `flowchart TD` on a line of its
+ * own, and so nothing typed or pasted there was ever imported. A flowchart has several lines and is not typed into
+ * a prompt: it is taken from where it already is. The places that hold one come first, the one the cursor is in
+ * before the others; the open document and the clipboard are listed when they hold none too, and say so, so that
+ * it is plain why they are not the answer; a file of the workspace can always be chosen. `holds` is the parser's
+ * own word on whether a text is a flowchart.
+ */
+export function flowchartSourceRows(at: FlowchartSources, holds: (source: string) => boolean): QuickPickOption<FlowchartPick>[] {
+	const found: QuickPickOption<FlowchartPick>[] = [];
+	const without: QuickPickOption<FlowchartPick>[] = [];
+	const doc = at.document;
+	if (doc) {
+		const name = doc.name.replace(/\.[^.]+$/, "") || doc.name;
+		if (doc.selection.trim() && holds(doc.selection)) found.push({ label: `Selected text in ${doc.name}`, value: { from: "text", source: doc.selection, name }, detail: flowchartStart(doc.selection), icon: "edit" });
+		if (isMarkdown(doc.name)) {
+			const blocks = findMermaidBlocks(doc.text).filter((b) => holds(b.code));
+			const atCursor = (b: { startLine: number; endLine: number }) => doc.cursorLine >= b.startLine && doc.cursorLine <= b.endLine;
+			for (const b of [...blocks.filter(atCursor), ...blocks.filter((b) => !atCursor(b))])
+				found.push({ label: `Flowchart in ${doc.name}, lines ${b.startLine}–${b.endLine}`, value: { from: "text", source: b.code, name }, detail: flowchartStart(b.code), icon: "graph" });
+			if (!blocks.length) without.push({ label: doc.name, value: { from: "nothing", why: `${doc.name} holds no Mermaid flowchart block.` }, description: "Holds no Mermaid flowchart block", icon: "file" });
+		} else if (/\.(mmd|mermaid)$/i.test(doc.name)) {
+			if (holds(doc.text)) found.push({ label: `The whole of ${doc.name}`, value: { from: "text", source: doc.text, name }, detail: flowchartStart(doc.text), icon: "graph" });
+			else without.push({ label: doc.name, value: { from: "nothing", why: `${doc.name} holds no Mermaid flowchart.` }, description: "Holds no flowchart", icon: "file" });
+		}
+	}
+	if (at.clipboard === undefined) without.push({ label: "Clipboard", value: { from: "clipboard" }, description: "Not read yet: waiting for permission", icon: "copy" });
+	else if (at.clipboard === null) without.push({ label: "Clipboard", value: { from: "clipboard" }, description: "This window was not allowed to read the clipboard", icon: "copy" });
+	else if (holds(at.clipboard)) found.push({ label: "Clipboard", value: { from: "clipboard" }, detail: flowchartStart(at.clipboard), icon: "copy" });
+	else without.push({ label: "Clipboard", value: { from: "clipboard" }, description: "The clipboard holds no flowchart", icon: "copy" });
+	return [...found, ...without, { label: "Choose a file…", value: { from: "file" }, detail: "A .mmd or .md file of the workspace", icon: "folder", divide: true }];
+}
+
+/** The clipboard's text, or null when this window may not read it: a web view can refuse, or have no way to. */
+function clipboardText(): Promise<string | null> {
+	try {
+		const reading = navigator.clipboard?.readText?.();
+		return reading ? reading.then((text) => (typeof text === "string" ? text : null), () => null) : Promise.resolve(null);
+	} catch {
+		return Promise.resolve(null);
+	}
+}
+
+/**
+ * The answer to a read of the clipboard, or undefined when there is none yet. A web view that asks the user before
+ * it lets a page read the clipboard holds the read open until they answer: the list of places is not kept back
+ * behind that question, and a command that waited on it did nothing that could be seen.
+ */
+const answeredSoon = (reading: Promise<string | null>) => Promise.race([reading, new Promise<undefined>((done) => setTimeout(() => done(undefined), 400))]);
+
+const CLIPBOARD_REFUSED = "This window was not allowed to read the clipboard. Select the flowchart in an editor, or save it as a .mmd file, and import it from there.";
+const CLIPBOARD_WAITING = "The clipboard was not read: this window is still waiting to be allowed to read it. Allow it and run the command again, or import the flowchart from a file.";
+
 async function importMermaidPlanCommand() {
 	const wsRoot = state.workspace?.root;
 	if (!wsRoot) return notify("Open a folder first.");
-
-	let mermaidSource = "";
-	const p = activePath();
-	const doc = activeDoc();
-	const cursorLine = activeLiveEditor()?.getPosition().lineNumber ?? activeEditor()?.getPosition()?.lineNumber ?? state.cursor.line ?? 1;
-
-	if (p && doc && !doc.binary) {
-		const raw = doc.model.getValue();
-		if (isMarkdown(p)) {
-			const blocks = findMermaidBlocks(raw);
-			const atCursor = blocks.find((b) => cursorLine >= b.startLine && cursorLine <= b.endLine);
-			if (atCursor) {
-				mermaidSource = atCursor.code;
-			} else if (blocks.length === 1) {
-				mermaidSource = blocks[0]!.code;
-			} else if (blocks.length > 1) {
-				const PASTE = "__paste__";
-				const picked = await quickPick<string>({
-					title: `Import Mermaid flowchart from ${displayName(p)}`,
-					placeholder: "Choose a Mermaid block…",
-					items: [
-						...blocks.map((b, idx) => ({
-							label: `Diagram ${idx + 1} (lines ${b.startLine}–${b.endLine})`,
-							value: b.code,
-							detail: (b.code.split("\n")[0] ?? "").trim().slice(0, 48),
-							icon: "graph" as const,
-						})),
-						{ label: "Paste Mermaid flowchart source…", value: PASTE, icon: "edit", divide: true },
-					],
-				});
-				if (!picked) return;
-				if (picked !== PASTE) mermaidSource = picked;
-			}
-		} else if (/\.(mmd|mermaid)$/i.test(p)) {
-			mermaidSource = raw.trim();
-		}
-	}
-
-	if (!mermaidSource) {
-		const clip = (await navigator.clipboard?.readText().catch(() => ""))?.trim() ?? "";
-		const clipHasFlow = /^\s*(?:flowchart|graph)\s+(?:TD|TB|BT|RL|LR)\b/im.test(clip);
-		const entered = await ask(
-			"Mermaid flowchart source to import as a .plan.json",
-			clipHasFlow ? clip : "flowchart TD\n  A([Start]) --> B[Step]\n  B --> C([End])",
-		);
-		if (!entered?.trim()) return;
-		mermaidSource = entered.trim();
-	}
-
-	const defaultTitle = p ? baseName(p).replace(/\.[^.]+$/, "") : "Imported Plan";
-	const title = (await ask("Name of the imported plan", defaultTitle))?.trim();
-	if (!title) return;
+	const elsewhere = () => state.workspace?.root !== wsRoot;
+	// Asked for before anything else, while the key or the click that ran the command still counts as the user's:
+	// a web view may refuse a read of the clipboard that comes later.
+	const clipboardRead = clipboardText();
 
 	const assist = (await import("./plan/assist")) as unknown as {
 		mermaidToPlan?: (source: string, title?: string) => Plan | { plan: Plan; warnings?: string[] } | null;
@@ -1365,37 +1410,151 @@ async function importMermaidPlanCommand() {
 		notify("Mermaid flowchart import is not available in this build.", "error");
 		return;
 	}
-	const converted = assist.mermaidToPlan(mermaidSource, title);
-	const wrappedPlan =
-		converted && typeof converted === "object" && "plan" in converted && (converted as { plan?: unknown }).plan
-			? ((converted as { plan: Plan }).plan)
-			: null;
-	const plan: Plan | null =
-		wrappedPlan && Array.isArray(wrappedPlan.nodes)
-			? wrappedPlan
-			: converted && typeof converted === "object" && "nodes" in converted && Array.isArray((converted as Plan).nodes)
-				? (converted as Plan)
+	const planOf = (source: string, title?: string): Plan | null => {
+		const converted = assist.mermaidToPlan!(source, title);
+		const wrappedPlan =
+			converted && typeof converted === "object" && "plan" in converted && (converted as { plan?: unknown }).plan
+				? ((converted as { plan: Plan }).plan)
 				: null;
-	if (!plan || !Array.isArray(plan.nodes) || !plan.nodes.length) {
-		return notify("Could not parse a Mermaid flowchart from that source.", "error");
+		const plan: Plan | null =
+			wrappedPlan && Array.isArray(wrappedPlan.nodes)
+				? wrappedPlan
+				: converted && typeof converted === "object" && "nodes" in converted && Array.isArray((converted as Plan).nodes)
+					? (converted as Plan)
+					: null;
+		return plan && Array.isArray(plan.nodes) && plan.nodes.length ? plan : null;
+	};
+	const holds = (source: string) => planOf(source) !== null;
+
+	const p = activePath();
+	const doc = activeDoc();
+	const live = activeLiveEditor();
+	const editor = activeEditor();
+	let selection = "";
+	if (p && doc && !doc.binary) {
+		if (live && live.path === p) selection = live.getSelectedText();
+		else if (editor && editor.getModel() === doc.model) {
+			const range = editor.getSelection();
+			if (range && !range.isEmpty()) selection = doc.model.getValueInRange(range);
+		}
 	}
+	const cursorLine = live?.getPosition().lineNumber ?? editor?.getPosition()?.lineNumber ?? state.cursor.line ?? 1;
+	const clipboard = await answeredSoon(clipboardRead);
+	if (elsewhere()) return;
+
+	const rows = flowchartSourceRows({ ...(p && doc && !doc.binary ? { document: { name: displayName(p), text: doc.model.getValue(), selection, cursorLine } } : {}), clipboard }, holds);
+	const anyHolds = rows.some((row) => row.value.from === "text" || (row.value.from === "clipboard" && !row.description));
+	const picked = await quickPick<FlowchartPick>({
+		title: "Import Mermaid flowchart as Plan",
+		placeholder: anyHolds ? "Choose where the flowchart is…" : "No flowchart open or copied: choose a file…",
+		items: rows,
+	});
+	if (!picked || elsewhere()) return;
+
+	let mermaidSource = "";
+	let defaultTitle = "Imported Plan";
+	if (picked.from === "nothing") return notify(picked.why);
+	if (picked.from === "text") {
+		mermaidSource = picked.source;
+		defaultTitle = picked.name;
+	} else if (picked.from === "clipboard") {
+		// Read again when the first read gave nothing to import: picking the row is the user's own act, which a web
+		// view that refused the first read may allow, and the clipboard may have been filled since. A text that
+		// was read is not given up for a second read that is refused or unanswered.
+		let text = clipboard;
+		if (typeof text !== "string" || !holds(text)) {
+			const again = await answeredSoon(clipboardText());
+			if (typeof again === "string" || typeof text !== "string") text = again;
+		}
+		if (elsewhere()) return;
+		if (text === undefined) return notify(CLIPBOARD_WAITING);
+		if (text === null) return notify(CLIPBOARD_REFUSED);
+		if (!holds(text)) return notify("The clipboard holds no Mermaid flowchart.");
+		mermaidSource = text;
+	} else {
+		const mermaidFiles = (await backend.files().catch(() => [] as string[])).filter((f) => /\.(mmd|mermaid)$/i.test(f) && isInside(wsRoot, f));
+		if (elsewhere()) return;
+		const chosen = await browseWorkspaceFile({
+			title: "Import Mermaid flowchart from a .mmd or .md file",
+			root: wsRoot,
+			...(p && !isUntitled(p) && isInside(wsRoot, p) ? { initialDir: dirName(p) } : {}),
+			pinned: mermaidFiles.slice(0, 8).map((f) => ({ path: f, rel: relativeTo(wsRoot, f).replace(/\\/g, "/") })),
+			pinnedLabel: "Mermaid",
+		});
+		if (!chosen || elsewhere()) return;
+		const rel = relativeTo(wsRoot, chosen.path).replace(/\\/g, "/");
+		const open = documents.get(canonical(chosen.path));
+		const got = open && !open.binary ? { text: open.model.getValue() } : await textOrWhy(() => backend.read(chosen.path), rel, wsRoot);
+		if (elsewhere()) return;
+		if ("why" in got) return notify(unreadFilesSaid([{ file: rel, why: got.why }]), "error");
+		if (isMarkdown(chosen.path)) {
+			const blocks = findMermaidBlocks(got.text).filter((b) => holds(b.code));
+			if (!blocks.length) return notify(`${rel} holds no Mermaid flowchart block.`);
+			mermaidSource = blocks[0]!.code;
+			if (blocks.length > 1) {
+				const block = await quickPick<string>({
+					title: `Import Mermaid flowchart from ${baseName(chosen.path)}`,
+					placeholder: "Choose a flowchart…",
+					items: blocks.map((b) => ({ label: `Flowchart at lines ${b.startLine}–${b.endLine}`, value: b.code, detail: flowchartStart(b.code), icon: "graph" as const })),
+				});
+				if (!block || elsewhere()) return;
+				mermaidSource = block;
+			}
+		} else {
+			if (!holds(got.text)) return notify(`${rel} holds no Mermaid flowchart.`);
+			mermaidSource = got.text;
+		}
+		defaultTitle = baseName(chosen.path).replace(/\.[^.]+$/, "") || defaultTitle;
+	}
+
+	const title = (await ask("Name of the imported plan", defaultTitle))?.trim();
+	if (!title || elsewhere()) return;
+	const plan = planOf(mermaidSource, title);
+	if (!plan) return notify("Could not parse a Mermaid flowchart from that source.", "error");
 	const ticket = ticketAtHand();
 	const finalPlan: Plan = ticket && !plan.ticket ? { ...plan, ticket } : plan;
 
 	const planDir = folderParts(state.project?.plans ?? "design");
 	const safeStem = title.replace(/\.plan\.json$/i, "").replace(/[\\/:*?"<>|]+/g, "-").trim() || "imported-plan";
 	const dest = joinPath(wsRoot, ...planDir, `${safeStem}.plan.json`);
-	const exists = await fileExists(dest);
+	const destKey = canonical(dest);
+	const destRel = relativeTo(wsRoot, dest);
+	const openNow = () => {
+		const open = documents.get(destKey);
+		return open && !open.model.isDisposed() ? open : undefined;
+	};
+	// A plan of that name that is open counts as there, on disk or not; and one with changes not yet saved is asked
+	// about as that. The file used to be written under its tab: the tab kept the old plan with its unsaved changes,
+	// the disk held the new one, and the next save put the one over the other.
+	const unsaved = Boolean(openNow() && state.dirty[destKey]);
+	const exists = Boolean(openNow()) || (await fileExists(dest));
+	if (elsewhere()) return;
 	if (exists) {
 		const OVERWRITE = "Overwrite existing plan";
-		const answer = await choose(`${relativeTo(wsRoot, dest)} already exists. Overwrite it?`, [OVERWRITE], { danger: OVERWRITE });
-		if (answer !== OVERWRITE) return;
-		await backend.historyKeep(dest).catch(() => {});
+		const answer = await choose(unsaved ? `${destRel} is open with unsaved changes. Overwrite it with the imported plan?` : `${destRel} already exists. Overwrite it?`, [OVERWRITE], { danger: OVERWRITE });
+		if (answer !== OVERWRITE || elsewhere()) return;
 	}
-	await backend.write(dest, printPlan(finalPlan));
+	const text = printPlan(finalPlan);
+	// An open plan is given the import as one edit of its document, and saved when it had nothing unsaved before.
+	// One that had is left unsaved, as it was: the file on disk is not touched until the user saves.
+	let saved = true;
+	try {
+		const open = openNow();
+		if (open) {
+			const wasClean = !state.dirty[destKey];
+			if (!applyText(destKey, text)) throw new Error(`${destRel} could not be updated because its editor was closed.`);
+			saved = wasClean ? await save(destKey, { format: false }) : false;
+		} else {
+			if (exists) await backend.historyKeep(dest).catch(() => {});
+			await backend.write(dest, text);
+		}
+	} catch (e: any) {
+		return notify(`The plan was not imported: ${String(e?.message ?? e)}`, "error");
+	}
+	if (elsewhere()) return;
 	setState((s) => { s.treeVersion += 1; });
 	await openFile(dest, { keep: true });
-	notify(`Imported Mermaid flowchart to ${relativeTo(wsRoot, dest)} (${finalPlan.nodes.length} nodes).`);
+	notify(`Imported Mermaid flowchart to ${destRel} (${finalPlan.nodes.length} nodes).${saved ? "" : " It is open with the plan in it, and not saved yet."}`);
 }
 
 async function gitBlameLineCommand() {

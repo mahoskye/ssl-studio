@@ -401,10 +401,10 @@ describe("Plan views — Solid 2 audit regression checks", () => {
 		expect(src).toContain("export function samePreviewTarget(");
 		expect(src).toMatch(/const defaultTarget = createMemo<PreviewTarget \| null>\([\s\S]*?\{ equals: samePreviewTarget \}/);
 		expect(src).toContain("const activeTarget = createMemo<PreviewTarget | null>(() => pickedTarget() ?? defaultTarget(), { equals: samePreviewTarget });");
-		expect(src).toContain('const [scriptsDraft, setScriptsDraft, scriptsText] = createDraft(() => targets().join(", "));');
-		expect(src).toContain("ref={props.bindTextarea(scriptsDraft)}");
-		expect(src).toContain("value={scriptsDraft()}");
-		expect(src).toContain("setScriptsDraft(e.currentTarget.value);");
+		expect(src).toContain("const scripts = targetsField({");
+		expect(src).toContain("ref={props.bindTextarea(scripts.draft)}");
+		expect(src).toContain("value={scripts.draft()}");
+		expect(src).toContain("scripts.type(e.currentTarget.value);");
 	});
 
 	test("PlanAssistant.tsx loads saved build runs inside the planPath effect rather than mount-only onSettled", () => {
@@ -539,7 +539,7 @@ describe("Pass-2 adversarial audit fixes — Plan, Graph, Backend & Notices", ()
 
 		expect(src).toContain('import { createEffect, createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";');
 		expect(src).toMatch(
-			/onSettled\(\(\) => \{[\s\S]*?const cur = untrack\(scriptsText\);[\s\S]*?setScriptsDraft\(cur\);[\s\S]*?if \(el\.value !== cur\) el\.value = cur;[\s\S]*?props\.fitTextarea\(el\);/,
+			/onSettled\(\(\) => \{[\s\S]*?const cur = untrack\(\(\) => targets\(\)\.join\(", "\)\);[\s\S]*?scripts\.show\(cur\);[\s\S]*?if \(el\.value !== cur\) el\.value = cur;[\s\S]*?props\.fitTextarea\(el\);/,
 		);
 		expect(src).toContain("onBlur={(e) => {");
 		expect(src).toContain("resyncScripts(e.currentTarget);");
@@ -600,7 +600,7 @@ describe("GraphView.tsx — Solid 2 audit regression checks", () => {
 		// 2. ELK layout effect passes govMap, fitKey, folding, root, byteLimit via compute and cleans up unconditionally
 		expect(src).toContain("const govScriptState = createMemo(");
 		expect(src).toContain(
-			"() => [graph(), drawn(), mode(), gathered(), govScriptState().map, fitKey(), folding(), state.workspace?.root, state.settings.limits.bytes] as const",
+			"() => [graph(), drawn(), mode(), gathered(), govScriptState().map, fitKey(), folding(), state.workspace?.root, state.settings.limits.bytes, answered()] as const",
 		);
 		expect(src).toContain("([g, keep, as, gathering, govMap, layoutKey, canFold, root, byteLimit]) => {");
 		expect(src).toMatch(

@@ -3,7 +3,7 @@
 // (.ssl-studio/settings.json): each later one wins. The agent's model alone
 // goes the other way, the user's over the project's (SettingsStore.load).
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, rmSync, statSync, writeSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { SQL_DIALECTS } from "../shared/format";
 import { jsonProblem } from "../shared/jsonCheck";
@@ -167,12 +167,37 @@ function landing(named: string): string {
 	return named;
 }
 
-async function atomicWrite(named: string, content: string, access: Access = "private"): Promise<void> {
+/** True for a file that is there and that this user may not write: by its own permissions, or on a disk that takes no writing. */
+function readOnly(path: string): boolean {
+	try {
+		if (!lstatSync(path).isFile()) return false;
+	} catch {
+		return false;
+	}
+	try {
+		accessSync(path, constants.W_OK);
+		return false;
+	} catch (e: any) {
+		return e?.code === "EACCES" || e?.code === "EPERM" || e?.code === "EROFS";
+	}
+}
+
+/**
+ * Writes the file beside itself and moves it into place. `again` ends what is said when the file cannot be
+ * written and that is the user's to put right: what there is to do next, in the words of what was asked for.
+ */
+async function atomicWrite(named: string, content: string, access: Access = "private", again = "then try again"): Promise<void> {
 	// A settings file that is a link (kept in a repository of dotfiles and linked into place) is written where the
 	// link leads. The temporary file renamed over the link's own name left a plain file in its place, and the file
 	// in the repository kept the old settings.
 	const path = landing(named);
 	mkdirSync(dirname(path), { recursive: true });
+	// A file this user may not write is not written, as a workspace's own files are not (`atomicWriteFile` in
+	// workspace.ts). The temporary file renamed over its name asks the folder and not the file: a settings file
+	// made read-only on purpose (one kept the same for a team, or checked out read-only) was replaced by a writable
+	// one of this program's at the first change of a setting, or of a panel's width. Its permissions are the
+	// user's to change.
+	if (readOnly(path)) throw new Error(`${named} is read-only, so it is not written over. Make the file writable, ${again}.`);
 	// Beside the file it becomes, under a short name of its own: the file's name with more after it was too long
 	// a name for a theme whose own name was near the most a file system allows. Named as this program's, since
 	// through a link it is made in a folder that is not.
@@ -186,7 +211,18 @@ async function atomicWrite(named: string, content: string, access: Access = "pri
 			: constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
 	let created = false;
 	try {
-		const fd = openSync(temp, flags, 0o600);
+		let fd: number;
+		try {
+			fd = openSync(temp, flags, 0o600);
+		} catch (e: any) {
+			// A folder that takes no new file takes no temporary one. What the system says of that names the
+			// temporary file, which nobody asked to write: the file that was to be written is named here, and what
+			// stands in the way of it (as for a workspace's files, `atomicWriteFile` in workspace.ts).
+			if (e?.code !== "EACCES" && e?.code !== "EPERM" && e?.code !== "EROFS") throw e;
+			// Through a link the folder is another than the one the file is named in, and is named itself.
+			const folder = path === named ? "its folder" : `the folder ${dirname(path)}`;
+			throw new Error(`${named} cannot be saved: ${folder} does not take new files, and a save is written to a new file first. Make the folder writable, ${again}.`);
+		}
 		created = true;
 		try {
 			const buf = Buffer.from(content, "utf8");
@@ -388,7 +424,9 @@ export class SettingsStore {
 	 *
 	 * The file is written beside itself and moved into place, so that it is never half there. A file that is there
 	 * and does not read as settings is not written over: a patch alone would have taken its place, and with it
-	 * everything the file held.
+	 * everything the file held. Nor is a file the user may not write (`atomicWrite`): the save fails and says so.
+	 * A save the view makes by itself (the layout, a moment after a panel is moved) says that once for a folder
+	 * and not at every move (App.tsx), as it does for a file that does not read.
 	 */
 	async save(scope: SettingsScope, patch: SettingsPatch) {
 		const root = scope === "workspace" ? this.root() : null;
@@ -413,7 +451,7 @@ export class SettingsStore {
 				}
 			}
 			if (scope === "workspace") assertPathInsideRoot(root!, path, true);
-			await atomicWrite(path, JSON.stringify(next, null, 2) + "\n", scope === "workspace" ? "shared" : "private");
+			await atomicWrite(path, JSON.stringify(next, null, 2) + "\n", scope === "workspace" ? "shared" : "private", "and change the setting again");
 			return (await this.load()).effective;
 		});
 	}

@@ -116,7 +116,7 @@ export function builderRequests() {
  */
 export function pendingField(
 	props: { readonly value: string; readonly resetKey?: string; readonly onCommit: (value: string, key: string) => void },
-	options: { hold: (commit: () => void) => () => void },
+	options: { hold: (commit: () => void, typed?: () => boolean) => () => void },
 ) {
 	const [draft, setDraft] = createSignal(untrack(() => props.value));
 	/** The key the text not yet handed over was typed under, and the text; no key when there is none. */
@@ -134,9 +134,13 @@ export function pendingField(
 		setDraft(next.value);
 	});
 	onCleanup(
-		options.hold(() => {
-			if (typedFor !== null) hand(typedFor, typed);
-		}),
+		options.hold(
+			() => {
+				if (typedFor !== null) hand(typedFor, typed);
+			},
+			// Whether there is text not yet handed over: a field that is merely shown holds none.
+			() => typedFor !== null,
+		),
 	);
 	onCleanup(() => {
 		if (typedFor === null) return;

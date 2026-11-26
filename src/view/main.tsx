@@ -1,6 +1,6 @@
 import { registerMarkdownLinks } from "./editor/markdownLinks";
 import "./style.css";
-import { Errored, Show, snapshot } from "solid-js";
+import { createSignal, Errored, Show, snapshot } from "solid-js";
 import { render } from "@solidjs/web";
 import { App } from "./App";
 import { connect, backend, onConnectionLost } from "./backend";
@@ -11,7 +11,7 @@ import "./editor/opener";
 import { loadGrammar } from "./editor/textmate";
 import { registerProviders, session } from "./lsp/session";
 import { syncWorkspaceThreads } from "./agent/store";
-import { canonical, commitPendingEdits, loadProject, loadSettings, log, notify, reloadWithoutTabs, restoreTabs, saveAll, setState, snapshotUnsavedPaths, state, unsavedPaths } from "./state";
+import { canonical, commitPendingEdits, loadProject, loadSettings, log, notify, notSavedText, reloadWithoutTabs, restoreTabs, saveAllUnasked, setState, snapshotUnsavedPaths, state, unsavedPaths } from "./state";
 import { applyFonts, applyTheme, resolveTheme, shapeEditorMenus } from "./themes/themes";
 
 export const errors: string[] = [];
@@ -36,6 +36,9 @@ function uncaught(reason: unknown) {
 
 async function start() {
 	await connect();
+	// A window that was reloaded starts with no view open that holds typed text, and the backend still has what the
+	// page before it said (state.ts, `tellHolding`): told now, a close is not sent round by the view for nothing.
+	void backend.typingChanged(false).catch(() => undefined);
 	await Promise.all([loadGrammar(), loadLanguageConfiguration(), loadSettings(true)]);
 	applyFonts(state.settings);
 	applyTheme(resolveTheme(state.settings.theme, state.themes, undefined, state.settings.themeMaterial));
@@ -89,6 +92,21 @@ async function start() {
 						const e = err();
 						return e instanceof Error ? e.message : String(e ?? "Unknown error");
 					};
+					// "Save all" answers on the card itself. The notices and the dialogs are part of what the card stands in
+					// place of: a save that failed said nothing here, and a file that needs a question (changed on disk,
+					// no name yet) asked it where nobody saw it, and the button never came back.
+					const [saving, setSaving] = createSignal(false);
+					const [outcome, setOutcome] = createSignal<string | null>(null);
+					const saveAllHere = async () => {
+						setSaving(true);
+						try {
+							setOutcome(notSavedText(await saveAllUnasked()));
+						} catch (e) {
+							setOutcome(`Not saved: ${e instanceof Error ? e.message : String(e)}`);
+						} finally {
+							setSaving(false);
+						}
+					};
 					return (
 						<div
 							role="alert"
@@ -123,13 +141,19 @@ async function start() {
 									). Reloading discards them.
 								</p>
 							</Show>
+							{/* What the last "Save all" came to: the files it could not save and why, or that everything is saved. */}
+							<Show when={outcome() !== null && (outcome() || unsavedPaths().length === 0)}>
+								<p role="status" style={{ margin: "0", "font-size": "13px", "white-space": "pre-wrap", "word-break": "break-word" }}>
+									{outcome() || "All changes were saved."}
+								</p>
+							</Show>
 							<div style={{ display: "flex", "flex-wrap": "wrap", gap: "8px" }}>
 								<button type="button" class="primary" onClick={() => reset()}>
 									Try again
 								</button>
 								<Show when={unsavedPaths().length > 0}>
-									<button type="button" onClick={() => void saveAll()}>
-										Save all
+									<button type="button" disabled={saving()} onClick={() => void saveAllHere()}>
+										{saving() ? "Saving…" : "Save all"}
 									</button>
 								</Show>
 								<button type="button" onClick={() => window.location.reload()}>

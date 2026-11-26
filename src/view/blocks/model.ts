@@ -161,6 +161,17 @@ export function cardOf(parent: Node, node: Node): Span {
 }
 
 /**
+ * The line a drop on a node goes in at. A drop lands above what it is dropped on, and above the whole card when
+ * that is part of one (`cardOf`): above the doc block, for a procedure that has one. Dropped on such a
+ * procedure's header, text went in at the procedure's own first line, between it and its doc block; so did text
+ * dropped on the blank line or the annotation that stands between the two. Whichever part of a card's head is
+ * dropped on, nothing goes in between a doc block and its procedure.
+ */
+export function dropLine(parent: Node, node: Node): number {
+	return cardOf(parent, node).start;
+}
+
+/**
  * A move of a node's card past the card next to it: the two runs of lines to swap (`a` above `b`), and the line
  * the node's own first line is on once they are swapped. The neighbour is the next card, not the next node: a
  * procedure's doc block is not something to swap it with. Blank lines and container closing lines are stepped
@@ -204,6 +215,120 @@ export function editedLines(start: number, text: string | null, lineCount: numbe
 	// A line break that ends the text ends its last line: it does not begin another.
 	const count = text.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n").length;
 	return { start: within(start), end: within(start + count - 1) };
+}
+
+/** An edit as Monaco has one: 1-based lines and columns, the end not included. */
+export type RangeEdit = { range: { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number }; text: string | null };
+
+/** A text's lines as they would be with edits made to it. The edits do not overlap; the lines given are not changed. */
+export function linesWithEdits(lines: string[], edits: RangeEdit[]): string[] {
+	const starts: number[] = [];
+	let offset = 0;
+	for (const line of lines) {
+		starts.push(offset);
+		offset += line.length + 1;
+	}
+	// A place before the text is its start and one past it its end, as the editor's model has it.
+	const at = (line: number, column: number) => {
+		if (line < 1) return 0;
+		if (line > lines.length) return Math.max(0, offset - 1);
+		return starts[line - 1]! + Math.min(Math.max(1, column) - 1, lines[line - 1]!.length);
+	};
+	let text = lines.join("\n");
+	const placed = edits
+		.map((edit) => ({ from: at(edit.range.startLineNumber, edit.range.startColumn), to: at(edit.range.endLineNumber, edit.range.endColumn), text: (edit.text ?? "").replace(/\r\n?/g, "\n") }))
+		.sort((a, b) => b.from - a.from || b.to - a.to);
+	for (const edit of placed) text = text.slice(0, edit.from) + edit.text + text.slice(edit.to);
+	return text.split("\n");
+}
+
+/**
+ * True when what a range format answered changes lines of the span it was asked for and no others: every line
+ * above the span and every line below it stands as it did. The server formats whole statements, and a statement
+ * it cannot find the end of (a bracket left open) reaches to the end of its procedure: asked for one line, it
+ * answered for seven, and each of them was pushed in by a dozen spaces. `before` and `after` are the text's
+ * lines without the answer and with it.
+ */
+export function formatStaysWithin(before: string[], after: string[], span: Span): boolean {
+	const moved = after.length - before.length;
+	// No more lines can go than the span has.
+	if (span.end + moved < span.start - 1) return false;
+	for (let i = 0; i < span.start - 1; i++) if (before[i] !== after[i]) return false;
+	for (let i = span.end; i < before.length; i++) if (before[i] !== after[i + moved]) return false;
+	return true;
+}
+
+/** The lines within a span that are code the server could not read (raw leaves), as spans in order. */
+export function rawSpans(node: Node | null, within: Span): Span[] {
+	if (!node || node.end < within.start || node.start > within.end) return [];
+	if (node.kind === "raw") return [{ start: Math.max(node.start, within.start), end: Math.min(node.end, within.end) }];
+	return node.children.flatMap((child) => rawSpans(child, within));
+}
+
+/** A span with others cut out of it: the runs of lines that are left, in order. */
+export function cutOut(span: Span, holes: Span[]): Span[] {
+	const runs: Span[] = [];
+	let from = span.start;
+	for (const hole of [...holes].sort((a, b) => a.start - b.start)) {
+		if (hole.end < from || hole.start > span.end) continue;
+		if (hole.start > from) runs.push({ start: from, end: hole.start - 1 });
+		from = Math.max(from, hole.end + 1);
+	}
+	if (from <= span.end) runs.push({ start: from, end: span.end });
+	return runs;
+}
+
+/**
+ * Where a run of lines stands once the runs `a` and `b` are swapped (`swapLines`): one in `b` moves up to where
+ * `a` began, one in `a` down to where `b` ended, one between the two by the difference of their lengths.
+ */
+export function spanAfterSwap(span: Span, a: Span, b: Span): Span {
+	const inside = (outer: Span) => span.start >= outer.start && span.end <= outer.end;
+	const by = inside(b) ? a.start - b.start : inside(a) ? b.end - a.end : span.start > a.end && span.end < b.start ? b.end - b.start - (a.end - a.start) : 0;
+	return { start: span.start + by, end: span.end + by };
+}
+
+/**
+ * What was typed in place of a statement, at the depth the statement stood at. The edit box shows the statement
+ * with its indentation, and one typed anew without it went into the text at the left edge, inside a block whose
+ * other lines are a tab in. The range format that follows settles spacing, not depth, and a save did not either.
+ * Typed with any indentation of its own, the text is taken as it is. Only white space at line starts is read.
+ */
+export function keepDepth(original: string, typed: string): string {
+	const depth = /^[ \t]*/.exec(original)![0];
+	const lines = typed.split("\n");
+	const first = lines.find((line) => line.trim());
+	if (!depth || first === undefined || /^[ \t]/.test(first)) return typed;
+	return lines.map((line) => (line.trim() ? depth + line : line)).join("\n");
+}
+
+/**
+ * Why a name cannot be written as a region's name, or null when it can. "Wrap in a region" writes the name into
+ * a comment (`/* region Name;`), and a comment in SSL runs to its first semicolon and ends there: a name with one
+ * in it ended the comment early, and the rest of the name was left in the text as a statement. A name with a line
+ * break in it broke the region's line in two. That one fact about a comment is all that is read here, the same
+ * one a file dropped on code is refused by (`droppedFileNote`); what else a name may hold is not this view's to say.
+ */
+export function regionNameRefusal(name: string): string | null {
+	if (name.includes(";")) return "Nothing was wrapped: the name has “;” in it, which ends a comment in SSL.";
+	if (/[\r\n]/.test(name)) return "Nothing was wrapped: the name has a line break in it, and a region's name is one line.";
+	return null;
+}
+
+/** The most of the view's height the box a block is edited in grows to by what is typed in it. */
+export const EDIT_BOX_SHARE = 0.6;
+
+/**
+ * How tall the box a block is edited in is to stand, in pixels. The box opened as tall as the block's lines and
+ * stayed so: Enter in a one-line block scrolled the line just typed on out of sight, in a box one line tall. It
+ * grows with its text, so that all of it shows, up to a share of the view's height (`EDIT_BOX_SHARE`); past that
+ * it scrolls in itself, and the view keeps room for the blocks around it. It is never made smaller: not under the
+ * height it opened with, which a long block's is, and not under one the user dragged it to.
+ *
+ * `now` is the box's height, `text` the height that shows all of its text, `view` the height of the view.
+ */
+export function editBoxHeight(now: number, text: number, view: number): number {
+	return Math.max(now, Math.min(text, Math.floor(view * EDIT_BOX_SHARE)));
 }
 
 // --- From the server's syntax tree (L1, docs/LSP-REQUESTS.md) ------------------
@@ -375,6 +500,52 @@ function nameFolds(root: Node) {
 		}
 	};
 	walk(root, "");
+}
+
+/** A file longer than this opens as an outline. */
+const OUTLINE_OVER_LINES = 300;
+
+/** The folds a file is first shown with: its banner folded, and a long file as an outline, every procedure and comment in it folded. */
+export function openingFolds(root: Node, lineCount: number): string[] {
+	// A set: in a long file the banner is one of the comments too.
+	const folds = new Set<string>();
+	const banner = root.children.find((c) => c.kind === "comment" && c.start === 1);
+	if (banner?.fold) folds.add(banner.fold);
+	if (lineCount > OUTLINE_OVER_LINES) {
+		const walk = (n: Node) => n.children.forEach((c) => (c.kind === "procedure" || c.kind === "comment" ? c.fold && folds.add(c.fold) : walk(c)));
+		walk(root);
+	}
+	return [...folds];
+}
+
+/**
+ * Which blocks are folded, by file, for as long as the app runs: each file's folded blocks by fold name
+ * (`nameFolds`), and whether the file's opening folds have been set. It is the view's own and no part of the
+ * text (ADR 0002), and it is kept apart from the view, which is made anew each time its tab or the Blocks mode
+ * is switched to.
+ */
+export type FoldMemory = Map<string, { folded: Set<string>; opened: boolean }>;
+
+/** A file's folded blocks, by fold name. */
+export function foldsOf(memory: FoldMemory, path: string): Set<string> {
+	let file = memory.get(path);
+	if (!file) memory.set(path, (file = { folded: new Set(), opened: false }));
+	return file.folded;
+}
+
+/**
+ * Sets the folds a file opens with (`openingFolds`), the first time its blocks are read and never again: true
+ * when they were set now. Each new view set them anew, so a banner the user had unfolded was folded again on the
+ * way back from Text or from another tab, and in a long file every procedure was. After the first time a file is
+ * as the user left it.
+ */
+export function openFolds(memory: FoldMemory, path: string, root: Node, lineCount: number): boolean {
+	const folded = foldsOf(memory, path);
+	const file = memory.get(path)!;
+	if (file.opened) return false;
+	file.opened = true;
+	for (const fold of openingFolds(root, lineCount)) folded.add(fold);
+	return true;
 }
 
 /**

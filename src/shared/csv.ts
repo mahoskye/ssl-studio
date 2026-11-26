@@ -32,7 +32,11 @@ export type Table = {
 };
 export type CsvTable = Table;
 
-function detectCsvDelimiter(text: string, bomOffset: number, prefer?: CsvDelimiter): CsvDelimiter {
+/**
+ * The first record as the detection goes over it: its characters outside quoted cells, and where it ends (the line
+ * end that closes it, or the end of the text). Nothing after `end` has a say in what the file is read with.
+ */
+function firstRecordUnquoted(text: string, bomOffset: number): { unquoted: string; end: number } {
 	const n = text.length;
 	let i = bomOffset;
 	// Skip leading blank lines starting after BOM before inspecting the first logical record.
@@ -64,6 +68,11 @@ function detectCsvDelimiter(text: string, bomOffset: number, prefer?: CsvDelimit
 		atFieldStart = ch === "," || ch === "\t" || ch === ";" || ch === "|";
 		i++;
 	}
+	return { unquoted, end: i };
+}
+
+function detectCsvDelimiter(text: string, bomOffset: number, prefer?: CsvDelimiter): CsvDelimiter {
+	const { unquoted } = firstRecordUnquoted(text, bomOffset);
 	// A .tsv whose header has a bare comma in one name (`id<tab>Last, First<tab>status`) is still tab-separated.
 	if (prefer && unquoted.includes(prefer)) return prefer;
 	if (unquoted.includes("\t") && !unquoted.includes(",")) return "\t";
@@ -186,6 +195,139 @@ export function csvFirstRecordCell(value: string, delimiter: Table["delimiter"] 
 	return /[,\t;|]/.test(value) ? `"${value.replace(/"/g, '""')}"` : csvCell(value, delimiter);
 }
 
+export type CsvTextEdit = { start: number; end: number; text: string };
+
+/** `text` with the edits made, as an editor makes them: none overlapping, in any order, each a place in `text` as it is. */
+export function applyCsvEdits(text: string, edits: readonly CsvTextEdit[]): string {
+	let out = "";
+	let from = 0;
+	for (const edit of [...edits].sort((a, b) => a.start - b.start || a.end - b.end)) {
+		out += text.slice(from, edit.start) + edit.text;
+		from = edit.end;
+	}
+	return out + text.slice(from);
+}
+
+/**
+ * `text` with the cells of its first record quoted until that record says `delimiter` to whatever reads the file
+ * next, or null when no quoting makes it say so. First the cells that hold what the record is now taken to be
+ * separated with, and those alone when they are enough (`a|b` stays as it is beside `"Smith, John"` in a
+ * semicolon file); then every cell that holds any delimiter or a quote. Each is written with the value it has.
+ */
+function firstRecordSaying(text: string, delimiter: CsvDelimiter, prefer?: CsvDelimiter): string | null {
+	const cells = parseCsv(text, { delimiter, hasHeader: false }).rows[0];
+	// No record at all: nothing is there to be read with the wrong delimiter.
+	if (!cells) return text;
+	const quoted = (cell: Cell) => `"${cell.text.replace(/"/g, '""')}"`;
+	const withQuoted = (holds: (value: string) => boolean) => {
+		let out = "";
+		let from = 0;
+		for (const cell of cells) {
+			if (!holds(cell.text) || text.slice(cell.start, cell.end) === quoted(cell)) continue;
+			out += text.slice(from, cell.start) + quoted(cell);
+			from = cell.end;
+		}
+		return out + text.slice(from);
+	};
+	const taken = csvDelimiterOf(text, prefer);
+	for (const holds of [(value: string) => value.includes(taken), (value: string) => /[,\t;|"]/.test(value)]) {
+		const next = withQuoted(holds);
+		if (csvDelimiterOf(next, prefer) === delimiter) return next;
+	}
+	return null;
+}
+
+/**
+ * The one rule for whatever record is first in a file after an edit: the file must still be read with `delimiter`,
+ * the one the table was read with when the edit was worked out. Every writer of a table's text asks here (or
+ * `csvEditsKeepingDelimiter`) for what to write: `after` as it is where its first record still says `delimiter`,
+ * `after` with cells of that record quoted where that makes it say so, and null where nothing can, in which case
+ * the edit is not made.
+ *
+ * What separates a file's values is read from its first record, where a bare comma outranks a tab, a tab a
+ * semicolon, and a semicolon a pipe. Renaming a column knew that (`csvFirstRecordCell`); a cell typed into the
+ * first row of a table with no header row, a paste or a fill over it, a sort or a move that put another row
+ * first, and a delete of the first row did not: `Smith, John` typed into `1;Ann;x` made the file a comma-separated
+ * one of two columns, and the next edit, worked out on that reading, wrote over a whole row.
+ *
+ * Quoting cannot make a record of ONE cell say anything: with no delimiter in it, it is read as comma-separated.
+ * So an edit that leaves a single cell first in a file separated by semicolons, pipes or tabs is refused (a
+ * delete or a sort that puts a short row first, a column deleted down to one).
+ *
+ * Two things are let through as they are. A text with no record left has no cell to misread. And a file that did
+ * not say `delimiter` before the edit either (the view was set to read it with one its first record does not
+ * name) is not made to say it now: the view's own setting, not the record, is what reads it.
+ */
+export function csvTextKeepingDelimiter(before: string, after: string, delimiter: CsvDelimiter, prefer?: CsvDelimiter): string | null {
+	if (csvDelimiterOf(after, prefer) === delimiter) return after;
+	if (csvDelimiterOf(before, prefer) !== delimiter) return after;
+	return firstRecordSaying(after, delimiter, prefer);
+}
+
+/** The one edit that makes `after` of `before`: from the first character that differs to the last. */
+function editBetween(before: string, after: string): CsvTextEdit {
+	const most = Math.min(before.length, after.length);
+	let start = 0;
+	while (start < most && before[start] === after[start]) start++;
+	let tail = 0;
+	while (tail < most - start && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
+	// Never between the two characters of a CRLF or of a surrogate pair: an editor takes such a place for the one beside it.
+	const splits = (text: string, at: number) =>
+		at > 0 && at < text.length && ((text[at - 1] === "\r" && text[at] === "\n") || (/[\uD800-\uDBFF]/.test(text[at - 1]!) && /[\uDC00-\uDFFF]/.test(text[at]!)));
+	while (start > 0 && (splits(before, start) || splits(after, start))) start--;
+	while (tail > 0 && (splits(before, before.length - tail) || splits(after, after.length - tail))) tail--;
+	return { start, end: before.length - tail, text: after.slice(start, after.length - tail) };
+}
+
+/**
+ * `csvTextKeepingDelimiter` for edits of `text` (none overlapping, in any order): the edits to make, or null when
+ * they may not be made. They come back as they were given, the same list, when the first record still says
+ * `delimiter` with them. Edits that all begin after the first record cannot change what it says and are given back
+ * without a look at the rest of the text: an edit of another row leaves the first record as it is, to the character.
+ *
+ * Where the first record has to be quoted, the edits come back as one edit that holds that quoting and the given
+ * edits it reaches, the first of them always, followed by the rest as they were given: never more edits than
+ * were given, so one edit comes back as one. The quoting is all in the first record, and an edit that begins after
+ * it is not part of it: all the edits were once made one, from the first to the last, so that a column deleted from
+ * every row, or the first row and one far below it deleted together, was written as one edit over every row
+ * between, the rows it did not touch among them.
+ */
+export function csvEditsKeepingDelimiter(
+	text: string,
+	edits: readonly CsvTextEdit[],
+	delimiter: CsvDelimiter,
+	prefer?: CsvDelimiter,
+): readonly CsvTextEdit[] | null {
+	const firstEnds = firstRecordUnquoted(text, text.startsWith("\uFEFF") ? 1 : 0).end;
+	if (edits.every((edit) => edit.start > firstEnds)) return edits;
+	const sorted = [...edits].sort((a, b) => a.start - b.start || a.end - b.end);
+	const after = applyCsvEdits(text, sorted);
+	const kept = csvTextKeepingDelimiter(text, after, delimiter, prefer);
+	if (kept === null) return null;
+	if (kept === after) return edits;
+	// Where the quoting ends in `after`: from there on `kept` is `after`, to the character.
+	let same = 0;
+	while (same < after.length && same < kept.length && after[after.length - 1 - same] === kept[kept.length - 1 - same]) same++;
+	const quotedTo = after.length - same;
+	// The first place at or after that end, past the first edit, that is in no edit: what is before it becomes one
+	// edit, and the edits after it stay as they are. `shift` is how far the text before edit `next` has moved.
+	let shift = sorted[0]!.text.length - (sorted[0]!.end - sorted[0]!.start);
+	let next = 1;
+	while (next < sorted.length && quotedTo > sorted[next]!.start + shift) {
+		shift += sorted[next]!.text.length - (sorted[next]!.end - sorted[next]!.start);
+		next++;
+	}
+	const cutAfter = Math.max(quotedTo, sorted[next - 1]!.end + shift);
+	const cut = cutAfter - shift;
+	const head = editBetween(text.slice(0, cut), kept.slice(0, cutAfter + (kept.length - after.length)));
+	const rest = sorted.slice(next);
+	// Two insertions at one place are one insertion: an editor does not say which of two comes first.
+	if (head.start === head.end && rest[0] && rest[0].start === head.start && rest[0].end === head.start) {
+		return [{ start: head.start, end: head.end, text: head.text + rest[0].text }, ...rest.slice(1)];
+	}
+	return [head, ...rest];
+}
+
 /** A whole row as a line of text. Preserves a 1-column empty row as `""` so re-parsing never drops it as a blank line. */
 export const csvRow = (values: readonly string[], delimiter: Table["delimiter"] = ",") =>
 	values.length === 1 && values[0] === "" ? '""' : values.map((v) => csvCell(v, delimiter)).join(delimiter);
@@ -305,6 +447,85 @@ export function appendRowEdit(
 	return { offset: text.length, text: `${prefix}${line}${nl}` };
 }
 
+// --- Changes of Columns and Rows, as Edits of the Places They Touch -----------
+//
+// Renaming, adding, deleting and reordering columns, and deleting rows, each as the edits of the text it means
+// (ADR 0002): none overlapping, each a place in `text` as it is, to be made together. The view wrote the whole
+// document for each of them, from a text worked out here. A record no edit touches is not written at all,
+// however the parser reads it: a row short of the column, a blank line, a line with a stray quote.
+
+/** The records as they stand in the text: the header's first, where the table has one. */
+function recordsOf(table: Table): Cell[][] {
+	if (table.hasHeader === false) return table.rows;
+	const all: Cell[][] = [table.header];
+	for (const row of table.rows) all.push(row);
+	return all;
+}
+
+/**
+ * Whether a cell as written opens a quote and never closes it. Such a cell runs to the end of the text, and
+ * whatever is written after it is read as more of it.
+ */
+function opensUnclosedQuote(raw: string): boolean {
+	if (raw[0] !== '"') return false;
+	for (let i = 1; i < raw.length; i++) {
+		if (raw[i] !== '"') continue;
+		if (raw[i + 1] !== '"') return false;
+		i++;
+	}
+	return true;
+}
+
+/**
+ * The edits that put every record's cells in `newOrder` (`newOrder[newIdx] = oldIdx`): one for each record, from
+ * the first cell that changes place to the last, each cell written as it is (quotes and line breaks in it too).
+ * A row has no edit when the cells that would change places are written alike, or when it is too short to have
+ * any of them; one too short to have them all gets empty cells only as far as its last cell that moves, and
+ * cells past the header's width stay where they are. Every row was written to the header's full width, so a
+ * short row grew delimiters at its end though none of its cells had moved. Null when `newOrder` is not an order
+ * of the columns, or is the order they are in.
+ */
+export function reorderCsvColumnsEdits(text: string, table: Table, newOrder: readonly number[]): CsvTextEdit[] | null {
+	const count = table.header.length;
+	if (count < 2 || newOrder.length !== count) return null;
+	const seen = new Set<number>();
+	for (const col of newOrder) {
+		if (!Number.isInteger(col) || col < 0 || col >= count || seen.has(col)) return null;
+		seen.add(col);
+	}
+	let lo = 0;
+	while (lo < count && newOrder[lo] === lo) lo++;
+	if (lo === count) return null;
+	let hi = count - 1;
+	while (newOrder[hi] === hi) hi--;
+
+	const edits: CsvTextEdit[] = [];
+	for (const cells of recordsOf(table)) {
+		// The places from `lo` to `hi` hold the same columns after as before, in another order: a row that ends
+		// before `lo` has none of them.
+		if (cells.length <= lo) continue;
+		const parts: string[] = [];
+		let last = -1;
+		for (let place = lo; place <= hi; place++) {
+			const cell = cells[newOrder[place]!];
+			if (!cell) {
+				parts.push("");
+				continue;
+			}
+			const raw = text.slice(cell.start, cell.end);
+			// A quote left open is closed where its cell is moved to: what follows it there would be read into it.
+			parts.push(opensUnclosedQuote(raw) ? `${raw}"` : raw);
+			last = place - lo;
+		}
+		parts.length = last + 1;
+		const start = cells[lo]!.start;
+		const end = cells[Math.min(hi, cells.length - 1)]!.end;
+		const written = parts.join(table.delimiter);
+		if (text.slice(start, end) !== written) edits.push({ start, end, text: written });
+	}
+	return edits;
+}
+
 /**
  * Reorders every row's columns in `text` according to `newOrder` (where
  * `newOrder[newIdx] = oldIdx`). Preserves each cell's raw source text
@@ -313,38 +534,39 @@ export function appendRowEdit(
  * Returns `null` when `newOrder` is invalid or already the natural order.
  */
 export function reorderCsvColumns(text: string, table: Table, newOrder: readonly number[]): string | null {
-	const count = table.header.length;
-	if (count < 2 || newOrder.length !== count) return null;
-	const seen = new Set<number>();
-	for (const col of newOrder) {
-		if (!Number.isInteger(col) || col < 0 || col >= count || seen.has(col)) return null;
-		seen.add(col);
-	}
-	if (newOrder.every((col, idx) => col === idx)) return null;
+	const edits = reorderCsvColumnsEdits(text, table, newOrder);
+	return edits ? applyCsvEdits(text, edits) : null;
+}
 
-	const allRows: Cell[][] = table.hasHeader === false ? table.rows : [table.header, ...table.rows];
-	let out = "";
-	let cursor = 0;
-	for (const cells of allRows) {
+/**
+ * The edits that add a column after the last: one insertion for each record, the name in the header (or, in a
+ * table with no header row, `defaultValue` in every row) and `defaultValue` below it. A row short of the header
+ * gets the delimiters between, so that its new cell is under the new column; a row with more cells than the
+ * header gets it after the header's last column, before its other cells. Nothing that is in the text is written
+ * anew. Null when there is no name or no column to add one after.
+ */
+export function addCsvColumnEdits(text: string, table: Table, name: string, defaultValue = ""): CsvTextEdit[] | null {
+	const trimmed = name.trim();
+	if (!trimmed || !table.header.length) return null;
+	const count = table.header.length;
+	const headerless = table.hasHeader === false;
+	const records = recordsOf(table);
+	const edits: CsvTextEdit[] = [];
+	for (let r = 0; r < records.length; r++) {
+		const cells = records[r]!;
 		if (!cells.length) continue;
-		const rowStart = cells[0]!.start;
-		const rowEnd = cells[cells.length - 1]!.end;
-		out += text.slice(cursor, rowStart);
-		const parts: string[] = [];
-		for (const oldCol of newOrder) {
-			const cell = cells[oldCol];
-			parts.push(cell ? text.slice(cell.start, cell.end) : "");
-		}
-		// Keep any extra ragged cells past the header width rather than dropping data.
-		for (let extra = count; extra < cells.length; extra++) {
-			const cell = cells[extra]!;
-			parts.push(text.slice(cell.start, cell.end));
-		}
-		out += parts.join(table.delimiter);
-		cursor = rowEnd;
+		const isHeaderRow = !headerless && r === 0;
+		const isLongRagged = !isHeaderRow && cells.length > count;
+		const before = isLongRagged ? cells[count - 1]! : cells[cells.length - 1]!;
+		const padCount = isHeaderRow ? 0 : Math.max(0, count - cells.length);
+		const value = isHeaderRow ? trimmed : defaultValue;
+		// The first row is the first record with or without a header.
+		const val = r === 0 ? csvFirstRecordCell(value, table.delimiter) : csvCell(value, table.delimiter);
+		// A quote left open in the cell before is closed first: the new cell would be read into it.
+		const close = opensUnclosedQuote(text.slice(before.start, before.end)) ? '"' : "";
+		edits.push({ start: before.end, end: before.end, text: close + table.delimiter.repeat(padCount + 1) + val });
 	}
-	out += text.slice(cursor);
-	return out;
+	return edits;
 }
 
 /**
@@ -352,39 +574,52 @@ export function reorderCsvColumns(text: string, table: Table, newOrder: readonly
  * cells verbatim and padding short ragged rows so the new cell aligns cleanly (ADR 0002).
  */
 export function addCsvColumn(text: string, table: Table, name: string, defaultValue = ""): string | null {
-	const trimmed = name.trim();
-	if (!trimmed || !table.header.length) return null;
-	const count = table.header.length;
-	const headerless = table.hasHeader === false;
-	const allRows: Cell[][] = headerless ? table.rows : [table.header, ...table.rows];
-	let out = "";
-	let cursor = 0;
-	for (let r = 0; r < allRows.length; r++) {
-		const cells = allRows[r]!;
-		if (!cells.length) continue;
-		const isHeaderRow = !headerless && r === 0;
-		const isLongRagged = !isHeaderRow && cells.length > count;
-		const insertAt = isLongRagged ? cells[count - 1]!.end : cells[cells.length - 1]!.end;
-		out += text.slice(cursor, insertAt);
-		const padCount = isHeaderRow ? 0 : Math.max(0, count - cells.length);
-		const value = isHeaderRow ? trimmed : defaultValue;
-		// The first row is the first record with or without a header.
-		const val = r === 0 ? csvFirstRecordCell(value, table.delimiter) : csvCell(value, table.delimiter);
-		out += table.delimiter.repeat(padCount + 1) + val;
-		cursor = insertAt;
-	}
-	out += text.slice(cursor);
-	return out;
+	const edits = addCsvColumnEdits(text, table, name, defaultValue);
+	return edits ? applyCsvEdits(text, edits) : null;
 }
 
-/** Renames a single column header cell in `text`, touching nothing else (ADR 0002). */
-export function renameCsvColumn(text: string, table: Table, colIdx: number, newName: string): string | null {
+/** The one edit that renames a column: its cell in the header, and nothing else (ADR 0002). Null when there is no header row, no such column, no name, or the name it has. */
+export function renameCsvColumnEdits(table: Table, colIdx: number, newName: string): CsvTextEdit[] | null {
 	if (table.hasHeader === false) return null;
 	const trimmed = newName.trim();
 	const cell = table.header[colIdx];
 	if (!trimmed || !cell) return null;
 	if (cell.text === trimmed) return null;
-	return text.slice(0, cell.start) + csvFirstRecordCell(trimmed, table.delimiter) + text.slice(cell.end);
+	return [{ start: cell.start, end: cell.end, text: csvFirstRecordCell(trimmed, table.delimiter) }];
+}
+
+/** Renames a single column header cell in `text`, touching nothing else (ADR 0002). */
+export function renameCsvColumn(text: string, table: Table, colIdx: number, newName: string): string | null {
+	const edits = renameCsvColumnEdits(table, colIdx, newName);
+	return edits ? applyCsvEdits(text, edits) : null;
+}
+
+/**
+ * The edits that delete column `colIdx`: from each record that has the cell, that cell and one delimiter beside it
+ * (the one after the first cell, the one before any other). A row too short to have the cell has no edit. A row
+ * that would be left with nothing, or with one empty cell, is left as `""`, so that it is not read as a blank line
+ * and passed over. Null when it is the only column, or no column.
+ */
+export function deleteCsvColumnEdits(text: string, table: Table, colIdx: number): CsvTextEdit[] | null {
+	const count = table.header.length;
+	if (count < 2 || colIdx < 0 || colIdx >= count) return null;
+	const edits: CsvTextEdit[] = [];
+	for (const cells of recordsOf(table)) {
+		const cell = cells[colIdx];
+		if (!cell) continue;
+		if (cells.length === 1) {
+			if (text.slice(cell.start, cell.end) !== '""') edits.push({ start: cell.start, end: cell.end, text: '""' });
+			continue;
+		}
+		const other = cells[colIdx === 0 ? 1 : 0]!;
+		if (cells.length === 2 && other.start === other.end) {
+			edits.push({ start: cells[0]!.start, end: cells[1]!.end, text: '""' });
+			continue;
+		}
+		if (colIdx === 0) edits.push({ start: cell.start, end: cells[1]!.start, text: "" });
+		else edits.push({ start: cells[colIdx - 1]!.end, end: cell.end, text: "" });
+	}
+	return edits;
 }
 
 /**
@@ -392,29 +627,8 @@ export function renameCsvColumn(text: string, table: Table, colIdx: number, newN
  * every remaining cell's exact raw quoting and formatting untouched (ADR 0002).
  */
 export function deleteCsvColumn(text: string, table: Table, colIdx: number): string | null {
-	const count = table.header.length;
-	if (count < 2 || colIdx < 0 || colIdx >= count) return null;
-	const allRows: Cell[][] = table.hasHeader === false ? table.rows : [table.header, ...table.rows];
-	let out = "";
-	let cursor = 0;
-	for (const cells of allRows) {
-		if (!cells.length) continue;
-		const rowStart = cells[0]!.start;
-		const rowEnd = cells[cells.length - 1]!.end;
-		out += text.slice(cursor, rowStart);
-		const kept: string[] = [];
-		for (let i = 0; i < cells.length; i++) {
-			if (i === colIdx) continue;
-			const c = cells[i]!;
-			kept.push(text.slice(c.start, c.end));
-		}
-		// If deleting column `colIdx` leaves zero cells or a single empty unquoted cell,
-		// emit `""` so the row isn't silently dropped as a blank line on re-parse.
-		out += kept.length === 0 || (kept.length === 1 && kept[0] === "") ? '""' : kept.join(table.delimiter);
-		cursor = rowEnd;
-	}
-	out += text.slice(cursor);
-	return out;
+	const edits = deleteCsvColumnEdits(text, table, colIdx);
+	return edits ? applyCsvEdits(text, edits) : null;
 }
 
 /**
@@ -483,31 +697,44 @@ export function moveCsvRow(text: string, table: CsvTable, fromRow: number, toRow
 	return edit ? text.slice(0, edit.start) + edit.text + text.slice(edit.end) : text;
 }
 
+/** What of a cell as written is outside its quotes: all of it, or what follows the closing quote of one that begins with a quote. */
+function outsideQuotes(raw: string): string {
+	if (raw[0] !== '"') return raw;
+	for (let i = 1; i < raw.length; i++) {
+		if (raw[i] !== '"') continue;
+		if (raw[i + 1] !== '"') return raw.slice(i + 1);
+		i++;
+	}
+	return "";
+}
+
 /**
- * Converts `text` from `table.delimiter` to `nextDelimiter`, re-quoting cells only
- * as required by `nextDelimiter` while preserving BOM, blank lines, and line endings.
+ * Converts `text` from `table.delimiter` to `nextDelimiter`: every delimiter between two cells becomes the new
+ * one, and all else stays as it is written (BOM, blank lines, line ends, and each cell with its quotes and the
+ * spaces around it). A cell is written anew only where it must be: one that holds the new delimiter outside
+ * quotes, which is then quoted. Every cell was written anew from its value, which took the quotes off a file that
+ * quotes all its cells, put them on a cell with a space at its end, and made `"a"b` into `ab`.
  */
 export function convertCsvDelimiter(text: string, table: CsvTable, nextDelimiter: CsvDelimiter): string {
 	if (table.delimiter === nextDelimiter) return text;
-	const allRows: Cell[][] = table.hasHeader === false ? table.rows : [table.header, ...table.rows];
 	let out = "";
 	let cursor = 0;
 	// The first record's cells are quoted when they hold any delimiter, not only the new one: a comma left bare
 	// there (`id<tab>Last, First`) makes the file a comma-separated one to whatever reads it next.
 	let first = true;
-	for (const cells of allRows) {
+	for (const cells of recordsOf(table)) {
 		if (!cells.length) continue;
-		const rowStart = cells[0]!.start;
-		const rowEnd = cells[cells.length - 1]!.end;
-		out += text.slice(cursor, rowStart);
-		if (cells.length === 1 && cells[0]!.text === "") {
-			out += '""';
-		} else {
-			const written = first ? csvFirstRecordCell : csvCell;
-			out += cells.map((c) => written(c.text, nextDelimiter)).join(nextDelimiter);
-		}
+		const inFirst = first;
 		first = false;
-		cursor = rowEnd;
+		out += text.slice(cursor, cells[0]!.start);
+		for (let c = 0; c < cells.length; c++) {
+			const cell = cells[c]!;
+			const raw = text.slice(cell.start, cell.end);
+			const bare = outsideQuotes(raw);
+			const asIs = inFirst ? !/[,\t;|]/.test(bare) : !bare.includes(nextDelimiter);
+			out += (c ? nextDelimiter : "") + (asIs ? raw : inFirst ? csvFirstRecordCell(cell.text, nextDelimiter) : csvCell(cell.text, nextDelimiter));
+		}
+		cursor = cells[cells.length - 1]!.end;
 	}
 	out += text.slice(cursor);
 	return out;
@@ -540,16 +767,15 @@ export function tableToMarkdown(headers: readonly string[], rows: readonly (read
 }
 
 /**
- * Deletes multiple rows cleanly in one pass without overlapping ranges (even on
- * files with no trailing newline, where deleting both the last row and the row
- * above it would otherwise collide on the separating newline). Preserves every
- * remaining row's raw source text verbatim (ADR 0002).
+ * The edits that delete the rows: each row's line with its line end (`rowSpan`), rows that stand together as one
+ * edit, so that none overlaps another (on a file with no line end after its last row, that row and the one above
+ * it would both take the line end between them). Nothing else is written. Null when none of the rows is there.
  */
-export function deleteCsvRows(text: string, table: Table, rowIndices: readonly number[]): string | null {
+export function deleteCsvRowsEdits(text: string, table: Table, rowIndices: readonly number[]): CsvTextEdit[] | null {
 	const count = table.rows.length;
 	const unique = [...new Set(rowIndices)].filter((r) => Number.isInteger(r) && r >= 0 && r < count).sort((a, b) => a - b);
 	if (!unique.length) return null;
-	const spans: { start: number; end: number }[] = [];
+	const spans: CsvTextEdit[] = [];
 	for (const r of unique) {
 		const sp = rowSpan(text, table, r);
 		if (!sp) continue;
@@ -557,16 +783,21 @@ export function deleteCsvRows(text: string, table: Table, rowIndices: readonly n
 		if (prev && sp.start <= prev.end) {
 			prev.end = Math.max(prev.end, sp.end);
 		} else {
-			spans.push({ start: sp.start, end: sp.end });
+			spans.push({ start: sp.start, end: sp.end, text: "" });
 		}
 	}
-	if (!spans.length) return null;
-	let out = text;
-	for (let i = spans.length - 1; i >= 0; i--) {
-		const sp = spans[i]!;
-		out = out.slice(0, sp.start) + out.slice(sp.end);
-	}
-	return out;
+	return spans.length ? spans : null;
+}
+
+/**
+ * Deletes multiple rows cleanly in one pass without overlapping ranges (even on
+ * files with no trailing newline, where deleting both the last row and the row
+ * above it would otherwise collide on the separating newline). Preserves every
+ * remaining row's raw source text verbatim (ADR 0002).
+ */
+export function deleteCsvRows(text: string, table: Table, rowIndices: readonly number[]): string | null {
+	const edits = deleteCsvRowsEdits(text, table, rowIndices);
+	return edits ? applyCsvEdits(text, edits) : null;
 }
 
 /** Finds duplicate non-empty primary keys in column `colIdx` (case-insensitive). */

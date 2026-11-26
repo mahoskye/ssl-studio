@@ -93,6 +93,17 @@ export function useGit() {
 	});
 }
 
+/**
+ * Whether an entry of the list is no file but a folder with a git repository of its own, as the backend marks it
+ * (src/bun/git.ts, `status`): git here does not look into it, and lists it as one new name. It is shown as what
+ * it is, and is not let go from here: as one new file, "Move to trash" took the whole folder and its history.
+ */
+export const isOwnRepository = (file: GitFile): boolean => file.repository === true;
+
+/** What is said of such a folder where a file's step was asked of it. */
+const ownRepositoryNote = (file: GitFile, asked: string) =>
+	`${baseName(file.path)} is a folder with a git repository of its own: git here does not look inside it. ${asked} Open that folder to work with what is in it.`;
+
 export const branchText = () => (status() ? branchLabel(status()!) : "");
 export const changedCount = () => status()?.files.length ?? 0;
 
@@ -150,6 +161,8 @@ export async function commit(message: string): Promise<boolean> {
 
 /** Lets a file's unstaged changes go, after asking. An open copy of it follows what is then on disk. */
 export async function discard(file: GitFile): Promise<void> {
+	// Not asked, and not done: the backend refuses it too (`Git.follows`).
+	if (isOwnRepository(file)) return notify(ownRepositoryNote(file, "It is not discarded or moved to the trash from here."));
 	const root = state.workspace?.root;
 	const canon = canonical(file.path);
 	const name = baseName(file.path);
@@ -199,6 +212,8 @@ export async function showChange(file: GitFile, staged: boolean): Promise<void> 
 	const stale = () => req !== showingChange || state.workspace?.root !== root;
 	const name = relativeTo(root, file.path);
 	const kind = staged ? file.staged : file.unstaged;
+	// A folder has no text to show: it was read as a file, and said it "could not be compared".
+	if (!staged && isOwnRepository(file)) return notify(ownRepositoryNote(file, "There is no change of it to show here."));
 	try {
 		// A file in conflict has three texts in git, not one: which to show beside it is settled with git's own tools.
 		if (kind === "conflict") return notify(`${baseName(file.path)} is in conflict: there is no one earlier text to show beside it. Open the file to see git's marks in it.`);

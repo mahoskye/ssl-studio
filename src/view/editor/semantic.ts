@@ -17,7 +17,8 @@ export type Legend = { tokenTypes: string[]; tokenModifiers: string[] };
 
 /** What Monaco is told. A server's indices are translated to these, so rule names are known. */
 export const LEGEND: Legend = {
-	tokenTypes: ["function", "method", "parameter", "variable", "property", "class"],
+	// `label` since starlims-lsp 0.32.0, which names what a `:LABEL` declares. It is last there too.
+	tokenTypes: ["function", "method", "parameter", "variable", "property", "class", "label"],
 	tokenModifiers: ["declaration", "defaultLibrary", "readonly", "public", "unknown"],
 };
 
@@ -35,6 +36,9 @@ const SCOPES: Record<string, string[]> = {
 	"property.readonly": ["variable.other.constant.property"],
 	class: ["entity.name.type.class"],
 	"class.defaultLibrary": ["support.class"],
+	// VS Code maps a label to no scope. The grammar's own scope for one is used, so that a theme which colours
+	// labels colours them the same either way, and one with a `label` rule of its own is heard.
+	label: ["entity.name.label"],
 };
 
 /** The name Monaco looks a token up by: the type, then its modifiers in legend order. */

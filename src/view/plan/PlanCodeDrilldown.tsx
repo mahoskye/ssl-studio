@@ -4,14 +4,15 @@
 // expand once to inspect implementing scripts, functions, called procedures,
 // and live read-only SSL previews (all ranges from starlims-lsp, ADR 0003).
 import { createEffect, createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";
-import { createDraft } from "../draft";
 import { baseName, dirName } from "../../shared/paths";
 import { Icon } from "../Icon";
 import { IconButton } from "../panels/Rows";
+import { holdsPendingEdit } from "../state";
 import { planTargetsOf } from "./assist";
 import { nodeCodeDetails, type BuiltUnit } from "./built";
 import { readProcedurePreview, type ProcedurePreview } from "./drift";
 import type { Plan, PlanNode } from "./model";
+import { pendingField } from "./planBridge";
 
 export type PreviewTarget = { name: string; script?: string; hintScript?: string; label: string };
 
@@ -267,6 +268,46 @@ export function NodeImplementation(props: {
 	);
 }
 
+/**
+ * The "Target scripts" field while it is typed in: one field, holding the whole list, so one text to hand over.
+ *
+ * It was a plain draft, which the plan was given only when the field was left (the browser's change event). Text
+ * typed and not left was therefore lost when the inspector was replaced (a node selected by a click that does not
+ * move focus: an engine that fires no change event for a field it removes drops the text), and Ctrl+S saved the
+ * plan without it. It is now a field like the Palette's own (`pendingField`), held with the app's pending edits:
+ * a save, a close, and a change of tab or view ask it for its text first, and taken away it hands the text over.
+ * It needs no key: the inspector is built anew for each plan, so the text can only be for the plan it is in.
+ */
+export function targetsField(props: { readonly targets: readonly string[]; readonly onSetTargets: (value: string) => void }) {
+	const shown = () => props.targets.join(", ");
+	const field = pendingField(
+		{
+			get value() {
+				return shown();
+			},
+			get onCommit() {
+				// Read now, called later: the field is gone by the time a text handed over on its way out arrives.
+				const setTargets = props.onSetTargets;
+				return (text: string) => setTargets(text);
+			},
+		},
+		{ hold: holdsPendingEdit },
+	);
+	return {
+		...field,
+		/**
+		 * A keystroke. Text typed back to exactly what the plan holds is not pending: there is nothing to hand over,
+		 * and leaving the field then changes nothing, as it did not before. Handing it over all the same would not
+		 * always be harmless: the plan's list is written again from the text, so a target the plan writes out in
+		 * full ({ script, ... }) would come back as its path alone.
+		 */
+		type(text: string) {
+			if (text === untrack(shown)) field.revert();
+			else field.type(text);
+		},
+	};
+}
+
 export function PlanImplementation(props: {
 	plan: Plan;
 	builtUnits: BuiltUnit[];
@@ -281,12 +322,19 @@ export function PlanImplementation(props: {
 }) {
 	const targets = createMemo(() => planTargetsOf(props.plan));
 	const allScripts = createMemo(() => [...new Set([...targets(), ...props.builtUnits.map((u) => u.script).filter(Boolean)])]);
-	const [scriptsDraft, setScriptsDraft, scriptsText] = createDraft(() => targets().join(", "));
+	const scripts = targetsField({
+		get targets() {
+			return targets();
+		},
+		get onSetTargets() {
+			return props.onSetTargets;
+		},
+	});
 	const resyncScripts = (el: HTMLTextAreaElement) => {
 		onSettled(() => {
 			if (!el.isConnected) return;
-			const cur = untrack(scriptsText);
-			setScriptsDraft(cur);
+			const cur = untrack(() => targets().join(", "));
+			scripts.show(cur);
 			if (el.value !== cur) el.value = cur;
 			props.fitTextarea(el);
 		});
@@ -372,22 +420,26 @@ export function PlanImplementation(props: {
 					<label class="plan-prop-field">
 						<span>Target scripts</span>
 						<textarea
-							ref={props.bindTextarea(scriptsDraft)}
+							ref={props.bindTextarea(scripts.draft)}
 							class="plan-scripts-input"
 							rows={2}
-							value={scriptsDraft()}
+							value={scripts.draft()}
 							placeholder="Sample/Release.ssl"
 							onKeyDown={(e) => props.onCommitOnEnter(e)}
 							onInput={(e) => {
-								setScriptsDraft(e.currentTarget.value);
+								scripts.type(e.currentTarget.value);
 								props.fitTextarea(e.currentTarget);
 							}}
 							onChange={(e) => {
 								const el = e.currentTarget;
-								props.onSetTargets(el.value);
+								scripts.commit(el.value);
 								resyncScripts(el);
 							}}
 							onBlur={(e) => {
+								// Left with no change event: the text is what it was when the field was entered, though a
+								// save since then has put other text in the plan. What was typed still goes to the plan,
+								// before the field shows the plan's text again. After a change event nothing is pending.
+								scripts.commit(e.currentTarget.value);
 								resyncScripts(e.currentTarget);
 							}}
 						/>

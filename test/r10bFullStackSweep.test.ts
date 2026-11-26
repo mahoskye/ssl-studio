@@ -9,7 +9,7 @@ import { WorkspaceFiles } from "../src/bun/workspace";
 import { replaceSafeInText } from "../src/shared/menuBar";
 import type { BackendEvents, Info, LspState, Settings } from "../src/shared/protocol";
 import { DEFAULT_SETTINGS } from "../src/shared/protocol";
-import { REGEX_MAX_LINE_LENGTH, replaceIn, searchPattern } from "../src/shared/searchPattern";
+import { REGEX_MAX_LINE_LENGTH, replaceIn, replaceSearched, searchPattern, textMark } from "../src/shared/searchPattern";
 
 // Minimal browser & Monaco shims so view modules load cleanly under Bun tests.
 const origLocation = (globalThis as any).location;
@@ -676,17 +676,21 @@ describe("R10B #6 — REGEX_MAX_LINE_LENGTH consistency across Search/Replace & 
 		expect(litRep!.count).toBe(2);
 	});
 
-	test("Search.tsx scanTextBuffer() and replaceInModel() enforce REGEX_MAX_LINE_LENGTH and drop backend.replace cast", async () => {
-		const { replaceInModel, scanTextBuffer } = await import("../src/view/panels/Search");
+	test("the scan of an open file's text and Search.tsx replaceInModel() enforce REGEX_MAX_LINE_LENGTH and drop backend.replace cast", async () => {
+		const { replaceInModel } = await import("../src/view/panels/Search");
 		const overLine = `${"z".repeat(REGEX_MAX_LINE_LENGTH + 10)}TOKEN`;
 		const shortLine = "let TOKEN = 1;";
 		const text = `${overLine}\n${shortLine}`;
 
-		const regexHits = scanTextBuffer("/ws/a.ssl", text, searchPattern("TOKEN", { regex: true }), true, 100);
+		// An open file's unsaved text is searched by the backend's scan, given with the search: the window runs no expression.
+		const openWs = join(rootTmp, "ws-open-text");
+		mkdirSync(openWs, { recursive: true });
+		const open = [{ path: join(openWs, "a.ssl"), text }];
+		const regexHits = (await new WorkspaceFiles(openWs).searchScan("TOKEN", { regex: true }, open)).hits;
 		expect(regexHits.length).toBe(1);
 		expect(regexHits[0]!.line).toBe(2);
 
-		const litHits = scanTextBuffer("/ws/a.ssl", text, searchPattern("TOKEN", { regex: false }), false, 100);
+		const litHits = (await new WorkspaceFiles(openWs).searchScan("TOKEN", { regex: false }, open)).hits;
 		expect(litHits.length).toBe(2);
 
 		const lines = [overLine, shortLine];
@@ -701,13 +705,14 @@ describe("R10B #6 — REGEX_MAX_LINE_LENGTH consistency across Search/Replace & 
 			},
 		} as any;
 
-		const changedRegex = replaceInModel(fakeModel, searchPattern("TOKEN", { regex: true }), "VALUE", true);
+		// What is replaced in an open file is what the search found in its text.
+		const changedRegex = replaceInModel(fakeModel, replaceSearched(text, textMark(text), regexHits, "VALUE", true)!.edits);
 		expect(changedRegex).toBe(1);
 		expect(applied.length).toBe(1);
 		expect(applied[0]!.range.startLineNumber).toBe(2);
 
 		applied.length = 0;
-		const changedLit = replaceInModel(fakeModel, searchPattern("TOKEN", { regex: false }), "VALUE", false);
+		const changedLit = replaceInModel(fakeModel, replaceSearched(text, textMark(text), litHits, "VALUE", false)!.edits);
 		expect(changedLit).toBe(2);
 		expect(applied.length).toBe(2);
 

@@ -10,6 +10,7 @@ import {
 	readdirSync,
 	readlinkSync,
 	realpathSync,
+	renameSync,
 	rmSync,
 	statSync,
 	watch,
@@ -17,9 +18,21 @@ import {
 } from "node:fs";
 import { cp, open, rm, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Entry, FileText, SearchHit } from "../shared/protocol";
-import { excerptForMatch, matchesOn, REGEX_MAX_LINE_LENGTH, replaceIn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../shared/searchPattern";
+import {
+	excerptForMatch,
+	matchesOn,
+	REGEX_MAX_LINE_LENGTH,
+	replaceIn,
+	SEARCH_LIMIT,
+	SEARCH_MAX_TEXT,
+	searchPattern,
+	textMark,
+	withGroups,
+	type OpenText,
+	type SearchOptions,
+} from "../shared/searchPattern";
 import { createFileFilter } from "../shared/fileGlob";
 import { replaceSafeInText } from "../shared/menuBar";
 import { renameReplacing } from "./atomic";
@@ -68,6 +81,22 @@ export function foldsCase(root: string): boolean {
 	return folds;
 }
 
+/**
+ * A Windows path with what is never told apart by case folded: the drive's letter, and the server and share of a
+ * network path. A folder there can be case-sensitive (one made from WSL, or marked so), and then its paths are
+ * compared as written; but `C:` and `c:` are one drive all the same, and the editor writes the letter small in
+ * every path it sends. Compared as written to the last letter, each file of such a workspace was "outside the
+ * workspace". Other systems have no such part of a path, and theirs come back as they are.
+ */
+export function foldVolume(p: string, win32 = process.platform === "win32"): string {
+	if (!win32) return p;
+	const volume = /^(?:[a-zA-Z]:|[\\/]{2}[^\\/]+[\\/]+[^\\/]+)/.exec(p)?.[0];
+	return volume ? volume.toLowerCase() + p.slice(volume.length) : p;
+}
+
+/** How two paths in `root` are compared: without case where its names fold (`foldsCase`), else as written but for the volume. */
+const folding = (root: string) => (foldsCase(root) ? (p: string) => p.toLowerCase() : (p: string) => foldVolume(p));
+
 /** Ensures a trailing path separator without doubling root paths like `/` or `C:\`. */
 export function withSep(p: string): string {
 	return p.endsWith(sep) ? p : p + sep;
@@ -113,7 +142,7 @@ export function isPathInsideRoot(root: string, target: string, strict = false): 
 	try {
 		const resolvedRoot = resolve(root);
 		const resolvedTarget = resolve(target);
-		const fold = foldsCase(resolvedRoot) ? (p: string) => p.toLowerCase() : (p: string) => p;
+		const fold = folding(resolvedRoot);
 		const rootF = fold(resolvedRoot);
 		const targetF = fold(resolvedTarget);
 		const lexInside = strict ? targetF.startsWith(withSep(rootF)) : targetF === rootF || targetF.startsWith(withSep(rootF));
@@ -142,6 +171,23 @@ export function assertPathInsideRoot(root: string, target: string, strict = fals
  * again is the same files.
  */
 const writes = new Serial();
+
+/**
+ * A file that has other names (hard links), read or written where it is, one such piece of work after another
+ * whatever name each came by. Such a file is not replaced by a save but emptied and filled (`atomicWriteFile`),
+ * and `writes` lines the saves up by the name they were asked under, which is one line to each of its names: two
+ * saves of it by two names ran at once, and the file was left a mix of the two texts. Here the file is known by
+ * what it is on the disk, not by a name.
+ *
+ * A place here is only ever taken by work that has its place in `writes` already, never the other way round, and
+ * what runs here is one reading or one writing of the file, which waits for no line at all: so nothing here can
+ * be kept waiting without end. Work on a folder (`held`, `quiet`) looks only at `writes`, and still sees each of
+ * these saves there, under the name it came by, until it has ended.
+ */
+const linked = new Serial();
+
+/** A file's own name in `linked`: the disk it is on and its number there, which every name of it gives alike. */
+const linkedKey = (there: { dev: number | bigint; ino: number | bigint }) => `${there.dev}:${there.ino}`;
 
 /**
  * One name for a file however it was reached: through a link to its folder, through a link to itself, or in other
@@ -204,6 +250,8 @@ export class WorkspaceFiles {
 	static quietMs = 10_000;
 	/** Safety time budget (ms) for `search()` across workspace files. */
 	static searchTimeoutMs = SEARCH_TIMEOUT_MS;
+	/** How a folder is moved: the system's rename, once. Here so that a test can make it fail as Windows does. */
+	static moveFolder: (from: string, to: string) => void = renameSync;
 	/** Paths (normalized via fileKey) this process wrote recently; their watch events are not external changes. */
 	private ownWrites = new Map<string, number>();
 
@@ -217,7 +265,7 @@ export class WorkspaceFiles {
 		const full = resolve(path);
 		// Without case where this folder's names fold: the usual on Windows and macOS, but asked of the folder
 		// (`foldsCase`), since on a case-sensitive volume a sibling whose name differs only by case is another folder.
-		const fold = foldsCase(this.root) ? (p: string) => p.toLowerCase() : (p: string) => p;
+		const fold = folding(this.root);
 		const fullF = fold(full);
 		const rootF = fold(this.root);
 		if (fullF !== rootF && !fullF.startsWith(withSep(rootF))) {
@@ -394,7 +442,7 @@ export class WorkspaceFiles {
 			return full;
 		}
 		const real = resolveRealPath(full);
-		const fold = foldsCase(this.root) ? (p: string) => p.toLowerCase() : (p: string) => p;
+		const fold = folding(this.root);
 		if (!fold(real).startsWith(withSep(fold(this.realRoot)))) throw new Error(`outside the workspace: ${full}`);
 		return real;
 	}
@@ -425,14 +473,18 @@ export class WorkspaceFiles {
 			// rename's all-or-nothing: a crash or a full disk part of the way leaves the file cut short under every name,
 			// and a reader in that moment sees it so.
 			if (there.nlink > 1) {
-				this.markOwnWrite(full);
-				const fh = await open(full, process.platform === "win32" ? "w" : constants.O_WRONLY | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0));
-				try {
-					await fh.writeFile(bytes);
-				} finally {
-					await fh.close();
-				}
-				this.markOwnWrite(full);
+				// One such write of the file at a time, by whatever names they come (`linked`): the line a save stands
+				// in is its name's, and two names of one file are two lines.
+				await linked.run(linkedKey(there), async () => {
+					this.markOwnWrite(full);
+					const fh = await open(full, process.platform === "win32" ? "w" : constants.O_WRONLY | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0));
+					try {
+						await fh.writeFile(bytes);
+					} finally {
+						await fh.close();
+					}
+					this.markOwnWrite(full);
+				});
 				return;
 			}
 		}
@@ -446,7 +498,17 @@ export class WorkspaceFiles {
 				: constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
 		let created = false;
 		try {
-			const fh = await open(temp, flags, 0o666);
+			const fh = await open(temp, flags, 0o666).catch((e: any) => {
+				// A folder that takes no new file takes no temporary one. What the system says of that names the
+				// temporary file, which nobody asked to save and no listing shows: the file that was to be saved is
+				// named here, and what stands in the way of it.
+				if (e?.code !== "EACCES" && e?.code !== "EPERM" && e?.code !== "EROFS") throw e;
+				// The folder is named too: through a link it is another than the one the file is named in (and is then
+				// known by its real name, as the workspace's own folder has to be to say where in it that is).
+				const folder = dirname(full);
+				const within = relative(full === named ? this.root : this.realRoot, folder);
+				throw new Error(`${relative(this.root, named)} cannot be saved: the folder ${within || basename(folder)} does not take new files, and a save is written to a new file first. Make the folder writable, then save again.`);
+			});
 			created = true;
 			try {
 				await fh.writeFile(bytes);
@@ -492,6 +554,8 @@ export class WorkspaceFiles {
 				err.code = "EISDIR";
 				throw err;
 			}
+			// The file itself: for a link, the one it leads to.
+			let file = st;
 			if (st.isSymbolicLink()) {
 				const targetStat = statSync(full);
 				if (targetStat.isDirectory()) {
@@ -500,10 +564,15 @@ export class WorkspaceFiles {
 					throw err;
 				}
 				prevMode = targetStat.mode;
+				file = targetStat;
 			} else {
 				prevMode = st.mode;
 			}
-			bytesNow = new Uint8Array(await Bun.file(full).arrayBuffer());
+			// A file with other names is read between two writes of it and not in the middle of one (`linked`). A
+			// save by another of its names empties the file before it fills it: read just then it had no mark and no
+			// bytes to tell its encoding by, and this save wrote a UTF-16 file back as plain UTF-8.
+			const whole = async () => new Uint8Array(await Bun.file(full).arrayBuffer());
+			bytesNow = await (file.nlink > 1 ? linked.run(linkedKey(file), whole) : whole());
 		} catch (e: any) {
 			if (e?.code !== "ENOENT") throw e;
 			// ENOENT: new file, write as UTF-8.
@@ -602,7 +671,13 @@ export class WorkspaceFiles {
 			}
 			// A name with a folder in it moves the file there, and the folder is made if it is not there yet.
 			mkdirSync(dirname(target), { recursive: true });
-			await renameReplacing(source, target);
+			// A folder is moved in this one turn, with no second try. That nothing in it is being saved was looked at
+			// in this turn (`quiet`), and holds only until the turn ends: tried again after a wait, as a file's rename is
+			// on Windows, a save asked for in between brought the old folder back with that one file in it, and both
+			// the rename and the save said they had been done. A file's own name is held while it is renamed, so its
+			// rename can wait and try again.
+			if (isFolder(source)) WorkspaceFiles.moveFolder(source, target);
+			else await renameReplacing(source, target);
 		});
 	}
 
@@ -723,26 +798,89 @@ export class WorkspaceFiles {
 	 * The search, and whether its time budget ran out before every file was read. The hits of a scan that timed out
 	 * are only those of the files it got to: given back as a bare list they read as all there is, and a replace made
 	 * from them left the rest of the workspace as it was without a word.
+	 *
+	 * `open` is given by the caller that replaces from the hits (the Search panel): the open files with unsaved
+	 * changes, as they are in the editor. Each is searched here in place of the file of its name on disk, first and
+	 * under the same budget. They used to be searched in the window, with no budget at all: a regular expression
+	 * that takes minutes over one line froze the window for as long, and nothing could stop it. With `open`, even
+	 * empty, the answer also has `marks`, for each file something was found in a mark of its text as it was searched
+	 * (`replaced` holds a replace to it), and a regular expression's hits say where their groups lie. Which open
+	 * files are among the files asked for is the caller's to say: every text given is searched.
+	 *
+	 * The budget is looked at between lines, and for a regular expression between the matches of a line. One match
+	 * cannot be cut short: while the expression runs nothing else does, here as anywhere.
 	 */
-	async searchScan(query: string, options: SearchOptions): Promise<{ hits: SearchHit[]; timedOut: boolean }> {
-		if (!query) return { hits: [], timedOut: false };
-		if (options.paths !== undefined && options.paths.length === 0) return { hits: [], timedOut: false };
-		const pattern = searchPattern(query, options);
+	async searchScan(query: string, options: SearchOptions, open?: readonly OpenText[]): Promise<{ hits: SearchHit[]; timedOut: boolean; marks?: Record<string, string> }> {
+		const marks: Record<string, string> | undefined = open ? {} : undefined;
+		const answer = (hits: SearchHit[], timedOut: boolean) => (marks ? { hits, timedOut, marks } : { hits, timedOut });
+		if (!query) return answer([], false);
+		// A text too large to search is searched no more for being open than the file is on disk (`SEARCH_MAX_BYTES`).
+		const named = (open ?? []).filter((each) => typeof each?.path === "string");
+		const texts = named.filter((each): each is { path: string; text: string } => typeof each.text === "string" && each.text.length <= SEARCH_MAX_TEXT);
+		const noFiles = options.paths !== undefined && options.paths.length === 0;
+		if (noFiles && !texts.length) return answer([], false);
+		const isRegex = Boolean(options.regex);
+		const pattern = open && isRegex ? withGroups(searchPattern(query, options)) : searchPattern(query, options);
 		const filter = createFileFilter(options.include, options.exclude);
 		const normRel = (p: string) => p.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "").replace(/^\/+/, "");
 		const pathSet =
 			options.paths !== undefined
 				? new Set(options.paths.map((p) => foldPath(normRel(p))))
 				: null;
+		// The files that are open with unsaved changes, by where they are in the folder: what is on disk of them is
+		// not what the editor shows, and is not read.
+		const openRel = new Set(named.filter((each) => isAbsolute(each.path)).map((each) => foldPath(normRel(relative(this.root, resolve(each.path))))));
 		const hits: SearchHit[] = [];
+		const unsaved: SearchHit[] = [];
 		const deadline = performance.now() + WorkspaceFiles.searchTimeoutMs;
-		const isRegex = Boolean(options.regex);
+		const clock = isRegex ? { until: deadline, late: false } : undefined;
+		/** One text's lines, its hits added to `into`. Says why it stopped short: the budget ran out, or the list is full. */
+		const scan = (path: string, text: string, into: SearchHit[]): "time" | "full" | undefined => {
+			const before = into.length;
+			try {
+				const lines = text.split(/\r?\n/);
+				for (let i = 0; i < lines.length; i++) {
+					if ((isRegex || (i & 63) === 0) && performance.now() > deadline) return "time";
+					const line = lines[i]!;
+					if (isRegex && line.length > REGEX_MAX_LINE_LENGTH) continue;
+					// The same walk a replace makes over the line: what is listed is what would be replaced.
+					for (const match of matchesOn(line, pattern, "", false, SEARCH_LIMIT - into.length, clock)) {
+						const { text: excerpt, textOffset } = excerptForMatch(line, match.column, match.length);
+						into.push({
+							path,
+							line: i + 1,
+							column: match.column,
+							length: match.length,
+							text: excerpt,
+							...(textOffset > 0 ? { textOffset } : {}),
+							...(match.groups ? { groups: match.groups } : {}),
+							...(match.named ? { named: match.named } : {}),
+						});
+						if (into.length >= SEARCH_LIMIT) return "full";
+					}
+					if (clock?.late) return "time";
+				}
+				return undefined;
+			} finally {
+				if (marks && into.length > before) marks[path] = textMark(text);
+			}
+		};
+		// As the window listed them when it searched them itself: after the files on disk, and as many again at most.
+		const all = () => (unsaved.length ? [...hits, ...unsaved] : hits);
+		for (const each of texts) {
+			if (performance.now() > deadline) return answer(all(), true);
+			const cut = scan(each.path, each.text, unsaved);
+			if (cut === "time") return answer(all(), true);
+			if (cut === "full") break;
+		}
+		if (noFiles) return answer(all(), false);
 		for (const path of this.files()) {
-			if (performance.now() > deadline) return { hits, timedOut: true };
+			if (performance.now() > deadline) return answer(all(), true);
 			if (imageType(path)) continue;
 			const relPath = normRel(relative(this.root, path));
 			if (pathSet !== null && !pathSet.has(foldPath(relPath))) continue;
 			if (!filter(relPath)) continue;
+			if (openRel.size && openRel.has(foldPath(relPath))) continue;
 			try {
 				const st = statSync(path);
 				if (!st.isFile() || st.size > SEARCH_MAX_BYTES) continue;
@@ -758,67 +896,68 @@ export class WorkspaceFiles {
 			if (looksBinary(sniff, true)) continue;
 			const text = await textOf(path);
 			if (text.includes("\u0000")) continue;
-			const lines = text.split(/\r?\n/);
-			for (let i = 0; i < lines.length; i++) {
-				if ((isRegex || (i & 63) === 0) && performance.now() > deadline) return { hits, timedOut: true };
-				const line = lines[i]!;
-				if (isRegex && line.length > REGEX_MAX_LINE_LENGTH) continue;
-				// The same walk a replace makes over the line: what is listed is what would be replaced.
-				for (const match of matchesOn(line, pattern, "", false, SEARCH_LIMIT - hits.length)) {
-					const { text: excerpt, textOffset } = excerptForMatch(line, match.column, match.length);
-					hits.push({
-						path,
-						line: i + 1,
-						column: match.column,
-						length: match.length,
-						text: excerpt,
-						...(textOffset > 0 ? { textOffset } : {}),
-					});
-					if (hits.length >= SEARCH_LIMIT) return { hits, timedOut: false };
+			const cut = scan(path, text, hits);
+			if (cut) return answer(all(), cut === "time");
+		}
+		return answer(all(), false);
+	}
+
+	/**
+	 * What a replace holds for one file in a list keyed by path (`linesByPath`, `asSearched`): by the name it was
+	 * asked under, by its whole path or by its path in the folder, and where names fold, by any name of the file.
+	 */
+	private forPath<T>(byPath: Record<string, T>, path: string, full: string): T | undefined {
+		const relNorm = relative(this.root, full).replace(/\\/g, "/");
+		const direct = byPath[path] ?? byPath[full] ?? byPath[relNorm];
+		if (direct !== undefined) return direct;
+		if (process.platform === "win32" || process.platform === "darwin") {
+			const targetKey = fileKey(full);
+			for (const [k, v] of Object.entries(byPath)) {
+				try {
+					if (fileKey(this.inside(k)) === targetKey) return v;
+				} catch {
+					if (k.replace(/\\/g, "/").toLowerCase() === relNorm.toLowerCase()) return v;
 				}
 			}
 		}
-		return { hits, timedOut: false };
+		return undefined;
 	}
 
 	/**
 	 * One file as it would be with every match replaced: its text before and after, and how many matches. Null
 	 * when it has none, or is a file the search does not look in (too large, or not text).
+	 *
+	 * With `options.asSearched` the file is held to the text that was searched: where its text now has another
+	 * mark, or the file is gone or is no longer text to search, it comes back `changed` with nothing to write. The
+	 * lines a replace is allowed on (`linesByPath`) are line numbers of the text that was searched: with a line
+	 * added above them since, they named other lines, and a match the user had taken out of the replace was
+	 * replaced while the ones kept were left.
 	 */
 	async replaced(
 		path: string,
 		query: string,
 		replacement: string,
 		options: SearchOptions,
-	): Promise<{ before: string; after: string; count: number; skippedProtected?: number; invalidJson?: boolean } | null> {
+	): Promise<{ before: string; after: string; count: number; skippedProtected?: number; invalidJson?: boolean; changed?: boolean } | null> {
 		const full = this.inside(path);
-		if (!query || statSync(full).size > SEARCH_MAX_BYTES) return null;
-		const file = await this.read(full);
-		if (file.binary || file.text.includes("\u0000")) return null;
-
-		const relNorm = relative(this.root, full).replace(/\\/g, "/");
-		let allowedLines: ReadonlySet<number> | undefined;
-		if (options.linesByPath) {
-			const direct = options.linesByPath[path] ?? options.linesByPath[full] ?? options.linesByPath[relNorm];
-			if (direct) {
-				allowedLines = new Set(direct);
-			} else if (process.platform === "win32" || process.platform === "darwin") {
-				const targetKey = fileKey(full);
-				for (const [k, v] of Object.entries(options.linesByPath)) {
-					try {
-						if (fileKey(this.inside(k)) === targetKey) {
-							allowedLines = new Set(v);
-							break;
-						}
-					} catch {
-						if (k.replace(/\\/g, "/").toLowerCase() === relNorm.toLowerCase()) {
-							allowedLines = new Set(v);
-							break;
-						}
-					}
-				}
-			}
+		if (!query) return null;
+		const held = options.asSearched !== undefined;
+		const changed = { before: "", after: "", count: 0, changed: true };
+		let size: number;
+		try {
+			size = statSync(full).size;
+		} catch (e: any) {
+			if (held && (e?.code === "ENOENT" || e?.code === "ENOTDIR")) return changed;
+			throw e;
 		}
+		if (size > SEARCH_MAX_BYTES) return held ? changed : null;
+		const file = await this.read(full);
+		if (file.binary || file.text.includes("\u0000")) return held ? changed : null;
+		// A file with no mark in a replace that gives marks was not searched: it is left as it is too.
+		if (held && this.forPath(options.asSearched!, path, full) !== textMark(file.text)) return changed;
+
+		const listed = options.linesByPath ? this.forPath(options.linesByPath, path, full) : undefined;
+		const allowedLines: ReadonlySet<number> | undefined = listed ? new Set(listed) : undefined;
 
 		const isMd = /\.(md|markdown)$/i.test(full);
 		const isPlan = /\.plan\.json$/i.test(full);
@@ -861,10 +1000,13 @@ export class WorkspaceFiles {
 		this.watcher?.close();
 		this.watcher = undefined;
 		try {
-			const watcher = watch(this.root, { recursive: true }, (_event, name) => {
+			const watcher = watch(this.root, { recursive: true }, (event, name) => {
 				if (!name) return;
 				const rel = String(name);
-				if (rel.split(/[\\/]/).some((part) => SKIP.has(part)) || rel.endsWith(TMP_SUFFIX)) return;
+				// The `.git` folder itself appearing or going (git init, a clone, a repository removed) is told of, so
+				// that source control asks git again; what changes inside it is not.
+				const repository = event === "rename" && rel === ".git";
+				if (!repository && (rel.split(/[\\/]/).some((part) => SKIP.has(part)) || rel.endsWith(TMP_SUFFIX))) return;
 				const path = join(this.root, rel);
 				const own = this.ownWrites.get(fileKey(path));
 				if (own && Date.now() - own < 1500) return;

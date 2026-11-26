@@ -4,11 +4,12 @@
 // or lets its changes go (after asking). Everything stays on this machine:
 // there is no fetch, pull or push here.
 import { Icon } from "../Icon";
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
 import { createAsyncQuery } from "../asyncQuery";
 import { changeLetter, changeWord, commitProblem, GIT_ACTIONS, rowMenuEntries, stagedOf, unstagedOf, type GitFile } from "../../shared/gitStatus";
 import { draftCommitMessage, formatTicketChangelog } from "../../shared/markdownDiff";
 import { detectBranchTicketMismatch } from "../../shared/menuBar";
+import type { RowMenuEntry } from "../../shared/contextMenu";
 import { baseName, dirName, isInside, relativeTo, resolvePath } from "../../shared/paths";
 import type { DocFile, TicketGitCommit } from "../../shared/protocol";
 import { codeMatchesRef, docsGoverningFile, ticketsForFile, ticketWork } from "../../shared/workContext";
@@ -17,7 +18,7 @@ import { docAuditData } from "../docAudit";
 import { languageFor } from "../editor/languages";
 import { openComparison } from "../editor/Review";
 import { FileMark } from "../FileMark";
-import { branchText, commit, discard, gitFailure, gitStatus, gitVersion, refreshGit, showChange, stage, unstage } from "../git";
+import { branchText, commit, discard, gitFailure, gitStatus, gitVersion, isOwnRepository, refreshGit, showChange, stage, unstage } from "../git";
 import { docs } from "../project";
 import { appendNoteToTicket, staleCatalogSummary, ticketAtHand, updateCatalogs, updateManifest } from "../projectDocs";
 import { activePath, canonical, notify, openFile, state } from "../state";
@@ -44,6 +45,19 @@ const More = (props: { count: number }) => (
 
 const CODE_OR_SQL_RE = /\.(ssl|srvscr|ds|sql|ddl|pks|pkb|xfd|xml|js|ts|html|css)$/i;
 
+/** What a folder with a repository of its own is called in the list, where a file has its change. */
+const OWN_REPOSITORY = "a repository of its own";
+/**
+ * What the menu offers for such a folder. It has no change to show, no text to open and nothing to go back to: a
+ * file's menu offered it "Move to trash…", which took the whole folder with its own history.
+ */
+const ownRepositoryMenu = (inWorkspace: boolean): RowMenuEntry[] => [
+	STAGE,
+	"separator",
+	{ label: "Copy path", children: [COPY_PATH, ...(inWorkspace ? [COPY_RELATIVE] : []), COPY_NAME] },
+	...(inWorkspace ? [SHOW_EXPLORER] : []),
+];
+
 function formatCommitDate(ms: number): string {
 	const d = new Date(ms);
 	if (Number.isNaN(d.getTime())) return "";
@@ -51,6 +65,11 @@ function formatCommitDate(ms: number): string {
 }
 
 export function GitPanel() {
+	// git is asked again each time the panel is shown: a folder that has become a repository since (`git init` in a
+	// terminal, a clone that finished) is found on a look at this panel, not only when the app is started again.
+	onSettled(() => {
+		void refreshGit();
+	});
 	createEffect(
 		() => state.workspace?.root,
 		(root) => {
@@ -340,7 +359,8 @@ export function GitPanel() {
 	};
 	const menu = async (file: GitFile, isStaged: boolean, at: Point) => {
 		const inWorkspace = Boolean(state.workspace && isInside(state.workspace.root, file.path));
-		const action = await chooseFromMenu(`Actions for ${baseName(file.path)}`, rowMenuEntries(file, isStaged, inWorkspace), at);
+		const entries = !isStaged && isOwnRepository(file) ? ownRepositoryMenu(inWorkspace) : rowMenuEntries(file, isStaged, inWorkspace);
+		const action = await chooseFromMenu(`Actions for ${baseName(file.path)}`, entries, at);
 		if (action === SHOW) await showChange(file, isStaged);
 		else await act(action, file);
 	};
@@ -359,9 +379,20 @@ export function GitPanel() {
 	};
 	const stageAll = async () => {
 		const all = changes();
-		const stageable = all.filter((f) => f.unstaged !== "conflict");
-		const skipped = all.length - stageable.length;
+		// A folder with a repository of its own is not one of the files. Given to git in the one command with them,
+		// one that has no commit yet made git refuse the lot ("does not have a commit checked out"): nothing was
+		// staged. One that has a commit was put into the commit as a pointer to it, unasked.
+		const own = all.filter(isOwnRepository);
+		const stageable = all.filter((f) => f.unstaged !== "conflict").filter((f) => !isOwnRepository(f));
+		const skipped = all.length - stageable.length - own.length;
 		if (stageable.length) await stage(stageable);
+		if (own.length) {
+			notify(
+				own.length === 1
+					? `Left out ${baseName(own[0]!.path)}: a folder with a git repository of its own is not staged with the files. Stage it from its own row if that is meant.`
+					: `Left out ${own.length} folders with git repositories of their own: they are not staged with the files. Stage one from its own row if that is meant.`,
+			);
+		}
 		if (skipped > 0) {
 			notify(
 				skipped === 1
@@ -461,25 +492,34 @@ export function GitPanel() {
 	const FileRow = (props: { file: GitFile; staged: boolean }) => {
 		const kind = () => (props.staged ? props.file.staged : props.file.unstaged)!;
 		const name = () => baseName(props.file.path);
+		/** Not a file: a folder with a repository of its own, which git here lists as one new name. */
+		const own = () => !props.staged && isOwnRepository(props.file);
 		return (
 			<Row
 				class="tree-row git-row"
 				key={`${props.staged ? "staged" : "changed"}:${props.file.path}`}
 				label={name()}
-				title={`${relativeTo(state.workspace?.root, props.file.path)}: ${changeWord(kind())}${props.file.from ? `, was ${relativeTo(state.workspace?.root, props.file.from)}` : ""}. Enter shows the change; the menu key has more.`}
+				title={
+					own()
+						? `${relativeTo(state.workspace?.root, props.file.path)}: a folder with a git repository of its own. git here does not look inside it, and it is not discarded or moved to the trash from this list. The menu key has more.`
+						: `${relativeTo(state.workspace?.root, props.file.path)}: ${changeWord(kind())}${props.file.from ? `, was ${relativeTo(state.workspace?.root, props.file.from)}` : ""}. Enter shows the change; the menu key has more.`
+				}
 				onActivate={() => void showChange(props.file, props.staged)}
 				onMenu={(at) => void menu(props.file, props.staged, at)}
 			>
-				<FileMark name={name()} />
+				<FileMark name={name()} folder={own() ? { open: false } : undefined} />
 				<span class={["label", { gone: kind() === "deleted" }]}>
 					{name()}
+					<Show when={own()}>
+						<span class="git-folder">{OWN_REPOSITORY}</span>
+					</Show>
 					<Show when={folder(props.file.path)}>
 						<span class="git-folder">{folder(props.file.path)}</span>
 					</Show>
 				</span>
 				{/* The same steps as the row's menu, for the pointer: out of the keyboard's way, which has the menu key. */}
 				<span class="git-acts" onClick={(e) => e.stopPropagation()}>
-					<Show when={!props.staged && kind() !== "conflict"}>
+					<Show when={!props.staged && kind() !== "conflict" && !own()}>
 						<button type="button" tabindex={-1} title={kind() === "untracked" ? "Move to trash…" : "Discard changes…"} aria-label={`${kind() === "untracked" ? "Move to trash" : "Discard the changes to"} ${name()}`} onClick={() => void discard(props.file)}>
 							<Icon name="discard" />
 						</button>
@@ -488,7 +528,7 @@ export function GitPanel() {
 						<Icon name={props.staged ? "remove" : "add"} />
 					</button>
 				</span>
-				<span class={`git-letter ${kind()}`} aria-label={changeWord(kind())}>
+				<span class={`git-letter ${kind()}`} aria-label={own() ? OWN_REPOSITORY : changeWord(kind())}>
 					{changeLetter(kind())}
 				</span>
 			</Row>

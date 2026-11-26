@@ -1873,6 +1873,84 @@ describe("SolidJS 2.0.3 audit — state.ts & recentTabs.ts", () => {
 			}
 		});
 
+		// Pass 4, M6: the step by Ctrl+PageDown was the one way of leaving a tab that put the text in first.
+		test("is put in its document on every other way of leaving the tab: Ctrl+Tab, a click, Go back, a new file, another view of it", async () => {
+			const { cell, release } = await openCell();
+			const other = "/ws/data/other.csv";
+			const back = async () => {
+				await openFile(path, { keep: true });
+				flush();
+				expect(snapshot(state).groups[0]!.active).toBe(path);
+			};
+			const kept = (typed: string) => {
+				flush();
+				expect(cell.typed).toBeNull();
+				expect(documents.get(path)!.model.getValue()).toBe(`id,name\n1,${typed}\n`);
+			};
+			try {
+				rpcHandler = (method) => (method === "read" ? { text: "other\n", mtime: 1, encoding: "utf-8" } : null);
+				await openFile(other, { keep: true });
+
+				// Ctrl+Tab: to the tab used before this one.
+				await back();
+				cell.typed = "BYTAB";
+				stepRecent(1, false);
+				expect(snapshot(state).groups[0]!.active).toBe(other);
+				kept("BYTAB");
+
+				// A press on another tab, as the tab strip does it: the state is set, nothing more.
+				await back();
+				cell.typed = "CLICK";
+				setState((s) => {
+					s.groups[0]!.active = other;
+				});
+				kept("CLICK");
+
+				// Go back, Go to file, a result in a list: all open a file.
+				await back();
+				cell.typed = "OPENS";
+				await openFile(other, { keep: true });
+				kept("OPENS");
+
+				// A new file.
+				await back();
+				cell.typed = "NEWED";
+				const untitled = newUntitled();
+				expect(snapshot(state).groups[0]!.active).toBe(untitled);
+				kept("NEWED");
+				await closeTab(untitled, 0, { discard: true });
+
+				// The same file in its other view: Table to Text.
+				await back();
+				cell.typed = "TEXTS";
+				setState((s) => {
+					s.groups[0]!.tableText = !s.groups[0]!.tableText;
+				});
+				kept("TEXTS");
+			} finally {
+				release();
+			}
+		});
+
+		test("a change of state that leaves every view where it is commits nothing", async () => {
+			const { cell, release } = await openCell();
+			try {
+				cell.typed = "STILL TYPING";
+				setState((s) => {
+					s.bottomMaximized = !s.bottomMaximized;
+				});
+				setState((s) => {
+					s.groups[0]!.active = path;
+				});
+				flush();
+				expect(cell.typed).toBe("STILL TYPING");
+				expect(documents.get(path)!.model.getValue()).not.toContain("STILL TYPING");
+				cell.typed = null;
+			} finally {
+				release();
+			}
+		});
+
 		test("a view that has gone is not asked, and one that fails does not stop the others", async () => {
 			const { cell, release } = await openCell();
 			let asked = 0;

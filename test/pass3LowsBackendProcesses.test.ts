@@ -147,8 +147,11 @@ function socket(limit = 16) {
 	};
 }
 
+/** One turn of the event loop: what the outbox put off until after the socket's `drain` call has run by then. */
+const turn = () => new Promise<void>((done) => setImmediate(done));
+
 describe("the browser host's outbox", () => {
-	test("what the socket has no room for waits, and goes in order when it has drained", () => {
+	test("what the socket has no room for waits, and goes in order when it has drained", async () => {
 		const ws = socket();
 		const outbox = createOutbox(ws);
 		outbox.send("picture");
@@ -161,16 +164,67 @@ describe("the browser host's outbox", () => {
 		// Some of it has gone, not enough: nothing is handed over to be dropped.
 		ws.held = 5 * 1024 * 1024;
 		outbox.drained();
+		await turn();
 		expect(ws.sent).toEqual(["picture"]);
 		// A reply that comes now goes after the two that wait, not before them.
 		outbox.send("reply 3");
 		ws.held = 0;
 		outbox.drained();
+		await turn();
 		expect(ws.sent).toEqual(["picture", "reply 1", "reply 2", "reply 3"]);
 		expect(outbox.waiting).toBe(0);
 	});
 
-	test("a message the socket says it dropped is kept and sent again", () => {
+	test("what waits is never sent from inside the socket's drain call, and goes on the next turn", async () => {
+		const ws = socket();
+		const outbox = createOutbox(ws);
+		outbox.send("picture 1");
+		ws.held = 20 * 1024 * 1024;
+		outbox.send("picture 2");
+		outbox.send("reply");
+		ws.held = 0;
+		// As Bun calls it: from inside its own drain. A large message given to the socket in there is held for good.
+		outbox.drained();
+		expect(ws.sent).toEqual(["picture 1"]);
+		// A microtask still runs inside that call.
+		await Promise.resolve();
+		expect(ws.sent).toEqual(["picture 1"]);
+		// A reply that comes before the turn is over keeps its place behind what waits.
+		outbox.send("reply 2");
+		// A second drain before the turn is over sends nothing twice.
+		outbox.drained();
+		await turn();
+		expect(ws.sent).toEqual(["picture 1", "picture 2", "reply", "reply 2"]);
+		expect(outbox.waiting).toBe(0);
+	});
+
+	test("what waits goes after a while when the socket never says that it drained", async () => {
+		const ws = socket();
+		const outbox = createOutbox(ws, undefined, 20);
+		outbox.send("picture");
+		ws.held = 20 * 1024 * 1024;
+		outbox.send("reply 1");
+		outbox.send("reply 2");
+		await Bun.sleep(60);
+		// No room yet: it goes on waiting, and is looked at again.
+		expect(ws.sent).toEqual(["picture"]);
+		ws.held = 0;
+		expect(await until(() => ws.sent.length === 3, 2000)).toBe(true);
+		expect(ws.sent).toEqual(["picture", "reply 1", "reply 2"]);
+		expect(outbox.waiting).toBe(0);
+
+		// A tab that closed is not looked at again.
+		const gone = socket();
+		const other = createOutbox(gone, undefined, 20);
+		gone.held = 20 * 1024 * 1024;
+		other.send("kept");
+		other.closed();
+		gone.held = 0;
+		await Bun.sleep(60);
+		expect(gone.sent).toEqual([]);
+	});
+
+	test("a message the socket says it dropped is kept and sent again", async () => {
 		const ws = socket();
 		const outbox = createOutbox(ws);
 		const real = ws.send.bind(ws);
@@ -180,10 +234,11 @@ describe("the browser host's outbox", () => {
 		expect(ws.sent).toEqual([]);
 		expect(outbox.waiting).toBe(1);
 		outbox.drained();
+		await turn();
 		expect(ws.sent).toEqual(["reply"]);
 	});
 
-	test("a tab that is too far behind, or cannot be sent to, is closed: its calls fail, they do not wait", () => {
+	test("a tab that is too far behind, or cannot be sent to, is closed: its calls fail, they do not wait", async () => {
 		const behind = socket();
 		const outbox = createOutbox(behind, 10);
 		behind.held = 20 * 1024 * 1024;
@@ -207,6 +262,7 @@ describe("the browser host's outbox", () => {
 		third.closed();
 		closed.held = 0;
 		third.drained();
+		await turn();
 		expect(closed.sent).toEqual([]);
 		expect(third.waiting).toBe(0);
 	});
@@ -230,6 +286,28 @@ describe("the browser host's outbox", () => {
 			expect(replies).not.toBeNull();
 			for (const reply of replies!.slice(0, 3)) expect(reply.result.base64.length).toBeGreaterThan(25_000_000);
 			expect(replies!.slice(3).every((reply) => typeof reply.result?.root === "string")).toBe(true);
+			tab.close();
+		} finally {
+			host.stop();
+		}
+	}, 40_000);
+
+	test("a real tab that asks for three pictures and then only waits gets all three", async () => {
+		const { host, folder } = webHost("outbox-waits");
+		try {
+			await host.backend.ready;
+			const picture = join(folder, "big.png");
+			writeFileSync(picture, randomBytes(4 * 1024 * 1024));
+			const tab = await openTab(host);
+			// As a Markdown preview with three pictures asks: all at once, and then nothing more from the tab. Each call a
+			// tab makes stirs its socket, so a test that keeps calling (the one above) cannot see a socket that has stopped
+			// sending: the second picture, given to the socket from inside its drain call, stayed there, and the third
+			// behind it, until the tab's next call.
+			const calls = [tab.call("image", picture), tab.call("image", picture), tab.call("image", picture), tab.call("workspace")];
+			const replies = await Promise.race([Promise.all(calls), Bun.sleep(15_000).then(() => null)]);
+			expect(replies).not.toBeNull();
+			for (const reply of replies!.slice(0, 3)) expect(reply.result.base64.length).toBeGreaterThan(5_000_000);
+			expect(typeof replies![3].result?.root).toBe("string");
 			tab.close();
 		} finally {
 			host.stop();
@@ -874,7 +952,8 @@ describe.skipIf(!hasGit)("git, asked from a workspace below the repository's top
 
 	test("a workspace folder with an odd name, and one in which git follows nothing", async () => {
 		const { top, git } = repository("stash-odd");
-		const ws = join(top, "a[b]*c");
+		// Every sign git reads as a pattern that the system lets a folder be named with: Windows allows no `*` in a name.
+		const ws = join(top, posix ? "a[b]*c" : "a[b]c");
 		const untracked = join(top, "only-new");
 		mkdirSync(ws, { recursive: true });
 		mkdirSync(untracked, { recursive: true });

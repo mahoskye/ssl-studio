@@ -14,13 +14,12 @@ import {
 	formatFrontMatterInnerReplacement,
 	frontMatter,
 	frontMatterInnerSpan,
-	innerLineEndingFrontMatter,
 	one,
-	quoteYamlScalar,
 	removeFrontMatterKey,
 	removeFromFrontMatterList,
 	stripEmptyFrontMatter,
 	withFrontMatter,
+	yamlBoxStep,
 } from "../../shared/frontMatter";
 import { findHeadingLine } from "../../shared/markdownEdit";
 import { docByName, linkedFrom, namedLink, nameFor } from "../../shared/namedLinks";
@@ -72,6 +71,7 @@ import {
 	generateSchemaDocFromSql,
 	generateSqlFromSchemaDoc,
 	generateTestExecutionProtocol,
+	hidesTemplateHeader,
 	isArchivedTicket,
 	linkDocumentToTicket,
 	linkNonTicketToTicket,
@@ -86,8 +86,9 @@ import {
 	unarchiveTicket,
 	unlinkDocumentFromTicket,
 	unlinkSchemaDocSql,
+	withTitleFrontMatter,
 } from "../projectDocs";
-import { activePath, canonical, documents, markdownMode, notify, openFile, save, setState, state } from "../state";
+import { activePath, canonical, documents, holdsPendingEdit, markdownMode, notify, openFile, save, setState, state } from "../state";
 import {
 	chooseDefaultLinksTab,
 	computeMinimalTextChange,
@@ -111,6 +112,14 @@ type HoverCardState = HoverPreviewData & {
 	maxHeight: number;
 	anchorRect: RectBox;
 };
+
+/**
+ * Said when a first front-matter block has nowhere to go in a template file: its header comment is one the
+ * templater reads and the front matter's reader does not, so a block under it would not be read, and one above it
+ * would take the template's name and folder from it.
+ */
+const TEMPLATE_HEADER_IN_THE_WAY =
+	"Front matter cannot be added to this template from here: its header comment (<!-- template: … -->) is not one line at the very top of the file. Write the front matter in Source mode, under the header.";
 
 const LIST_PROP_KEYS = new Set(["tags", "tickets", "related", "blocks", "blocked-by", "specs", "plans"]);
 const EDITABLE_LINK_KEYS = new Set(["parent", "ticket", "source", "supersedes", "superseded-by"]);
@@ -175,6 +184,19 @@ async function readFileText(path: string): Promise<string> {
 	}
 }
 
+/**
+ * What the panel says of a list that a search of the workspace filled, when the search ran out of time before it
+ * had read every file ("" when it read them all). Such a list is only what was found in the files the search got
+ * to. It was shown as all there is: a schema object with no card at all read as used nowhere, and "No unlinked
+ * plain-text mentions found" was said of documents that had not been read.
+ */
+export function unfinishedSearchNote(timedOut: boolean, found: number, what: "uses" | "mentions"): string {
+	if (!timedOut) return "";
+	const ranOut = "The search ran out of time before it had read every file";
+	if (what === "uses") return found > 0 ? `${ranOut}: there may be more uses than are listed.` : `${ranOut}: it is not known whether this is used in code.`;
+	return found > 0 ? `${ranOut}: there may be more mentions than are listed.` : `${ranOut}: it is not known whether other documents mention this one.`;
+}
+
 export function MarkdownInspector() {
 	const path = createMemo(() => {
 		const p = activePath();
@@ -220,13 +242,14 @@ export function MarkdownInspector() {
 	let hoverCardEl: HTMLDivElement | undefined;
 	let hoverBodyEl: HTMLDivElement | undefined;
 	let lastYamlEditAt = 0;
-	// The raw YAML box holds a line that is not written (see applyYamlInnerEdit): said once, and marked on the box.
-	let yamlHeld = false;
-	const holdYaml = (held: boolean) => {
-		yamlHeld = held;
-		if (held) yamlInputEl?.setAttribute("aria-invalid", "true");
-		else yamlInputEl?.removeAttribute("aria-invalid");
-	};
+	// The raw YAML box (see `yamlBoxStep`): the text it had after its last step, what the document has of it (the
+	// text it last wrote, or showed), the document it writes to, and what it says under itself while it holds a line
+	// that cannot be written. That was a notice, and an error notice stays until it is dismissed: it went on saying
+	// the box was not written after the line had been mended.
+	let yamlBoxText = "";
+	let yamlBoxWritten = "";
+	let yamlBoxDoc: ReturnType<typeof activeMdDoc>;
+	const [yamlRefusal, setYamlRefusal] = createSignal<string | null>(null);
 	let hoverTimer: ReturnType<typeof setTimeout> | undefined;
 	let hideTimer: ReturnType<typeof setTimeout> | undefined;
 	let hoverSeq = 0;
@@ -328,8 +351,7 @@ export function MarkdownInspector() {
 	);
 
 	// --- Model Editing (ADR 0002: single source of truth via Monaco model) ---
-	const applyDocTextUpdate = (nextText: string, coalesceUndo = false) => {
-		const d = activeMdDoc();
+	const applyDocTextUpdate = (nextText: string, coalesceUndo = false, d = activeMdDoc()) => {
 		if (!d) return;
 		const prev = d.model.getValue();
 		const diff = computeMinimalTextChange(prev, nextText);
@@ -355,9 +377,21 @@ export function MarkdownInspector() {
 			if (inner === null) return;
 			queueMicrotask(() => {
 				if (!yamlInputEl) return;
-				if (yamlInputEl.value !== inner) yamlInputEl.value = inner;
-				// The box shows the document again: nothing in it is held back.
-				holdYaml(false);
+				// The document has what the box itself last wrote: there is nothing to show again, and what the box
+				// holds back since (a line being typed, or one it cannot write) stays in it.
+				if (inner !== yamlBoxWritten) {
+					if (yamlInputEl.value !== inner) {
+						// The front matter was changed from elsewhere (an undo, a property set in the list above), and the
+						// box shows the document again. What it held and could not write is gone with that, and is said.
+						const lost = yamlBoxStep(yamlBoxWritten, yamlInputEl.value, yamlInputEl.value, "close").lost;
+						if (lost) notify(lost, "error");
+						yamlInputEl.value = inner;
+					}
+					// The box shows the document again: nothing in it is held back.
+					yamlBoxText = inner;
+					yamlBoxWritten = inner;
+					setYamlRefusal(null);
+				}
 				resizeYamlInput(yamlInputEl);
 			});
 		},
@@ -381,33 +415,55 @@ export function MarkdownInspector() {
 		},
 	);
 
-	const applyYamlInnerEdit = (nextInner: string) => {
-		const d = activeMdDoc();
-		if (!d) return;
+	/**
+	 * Writes the box's text between the two fences of its document; true when the document then has it. With
+	 * `over`, only where the document still has that text there: what the box held back is not written over a
+	 * front matter that has been changed from elsewhere since.
+	 */
+	const writeYamlInner = (d: NonNullable<typeof yamlBoxDoc>, nextInner: string, over?: string): boolean => {
+		if (d.model.isDisposed()) return false;
 		const cur = d.model.getValue();
 		const span = frontMatterInnerSpan(cur);
-		if (!span) return;
-		// Three dashes or three dots on a line of their own end the front matter where they stand. Written in, the
-		// block closed there, the lines typed under it became the document's text, and the box was emptied of them.
-		// No spelling keeps such a line inside the block, so the box is not written while it holds one: the document
-		// stays as it was, the box keeps what was typed, and the person is told once. The next edit that leaves no
-		// such line is written whole.
-		const ends = innerLineEndingFrontMatter(nextInner);
-		if (ends) {
-			if (!yamlHeld) {
-				notify(`Line ${ends.line} of the YAML is ${ends.text}, which ends the front matter there: the lines under it would become the document's text. Nothing in the box is written until that line is changed.`, "error");
-			}
-			holdYaml(true);
-			return;
-		}
-		holdYaml(false);
+		if (!span || (over !== undefined && span.inner !== over)) return false;
 		const replacement = formatFrontMatterInnerReplacement(nextInner, span.eol);
-		if (cur.slice(span.start, span.end) === replacement) return;
+		if (cur.slice(span.start, span.end) === replacement) return true;
 		const now = Date.now();
 		const coalesce = now - lastYamlEditAt < 450;
 		lastYamlEditAt = now;
 		const nextDoc = `${cur.slice(0, span.start)}${replacement}${cur.slice(span.end)}`;
-		applyDocTextUpdate(nextDoc, coalesce);
+		applyDocTextUpdate(nextDoc, coalesce, d);
+		return true;
+	};
+
+	/**
+	 * One step of the raw YAML box, for the text it now has: after an input, and when it is left ("leave": focus
+	 * goes, or a save or a change of tab asks for what is pending). What is written, what is held back and what is
+	 * said is `yamlBoxStep`'s to say: three dashes or dots on a line of their own end the front matter where they
+	 * stand, no spelling keeps such a line inside the block, and the box is not written while it holds one (written
+	 * in, the lines typed under it became the document's text, and the box was emptied of them).
+	 */
+	const stepYamlBox = (boxText: string, event: "input" | "leave" = "input") => {
+		// An input is for the document shown. What is pending when the box is left belongs to the document it was
+		// typed for, which is no longer the one shown when a change of tab asks for it.
+		if (event === "input") yamlBoxDoc = activeMdDoc() ?? yamlBoxDoc;
+		const step = yamlBoxStep(yamlBoxWritten, yamlBoxText, boxText, event);
+		yamlBoxText = boxText;
+		// Leaving the box changes nothing of what is said under it, and a blur may come while the box is being taken
+		// away, inside an update: nothing of the view's own state is written then.
+		if (event === "input") setYamlRefusal(step.say);
+		if (step.write !== null && yamlBoxDoc && writeYamlInner(yamlBoxDoc, step.write, event === "input" ? undefined : yamlBoxWritten)) yamlBoxWritten = step.write;
+	};
+
+	/**
+	 * The box is taken away with the text it has (Escape, the YAML button, another file, Read mode, the section
+	 * folded): what it had not yet written is written where it can be, and said where it cannot. Before, the lines
+	 * held back went with the box without a word.
+	 */
+	const closeYamlBox = (boxText: string, written: string, d: typeof yamlBoxDoc) => {
+		const step = yamlBoxStep(written, boxText, boxText, "close");
+		setYamlRefusal(null);
+		if (step.lost) notify(step.lost, "error");
+		if (step.write !== null && d) writeYamlInner(d, step.write, written);
 	};
 
 	const focusYamlInput = () => {
@@ -429,9 +485,15 @@ export function MarkdownInspector() {
 				notify("Fix the unclosed YAML frontmatter block (missing closing ---) in Source mode first.", "error");
 				return;
 			}
-			const eol = d.model.getEOL();
 			const stem = baseName(p).replace(/\.(md|markdown)$/i, "");
-			applyDocTextUpdate(`---${eol}title: ${quoteYamlScalar(stem)}${eol}---${eol}${eol}${cur}`);
+			// Under a template's header comment, not above it (`withTitleFrontMatter`); the line ends are the
+			// document's own, and one with no line end yet takes the model's when the edit is made.
+			const next = withTitleFrontMatter(cur, stem);
+			if (next === null) {
+				notify(TEMPLATE_HEADER_IN_THE_WAY, "error");
+				return;
+			}
+			applyDocTextUpdate(next);
 		}
 		setPropsOpen(true);
 		setEditYaml(true);
@@ -595,8 +657,11 @@ export function MarkdownInspector() {
 		},
 		async ({ ident, root }) => {
 			const exclude = codeExcludeGlob();
-			const hits = await backend.search(ident, { wholeWord: true, exclude }).catch(() => []);
-			const codeHits = hits.map((h) => ({
+			// Asked for with whether the scan read every file: the hits of one that ran out of time are not all the uses.
+			// A search that fails is, as before, one that found nothing.
+			const scan = await backend.searchScan(ident, { wholeWord: true, exclude }).catch(() => null);
+			const timedOut = Boolean(scan?.timedOut);
+			const codeHits = (scan?.hits ?? []).map((h) => ({
 				path: h.path,
 				rel: relativeTo(root, h.path).replace(/\\/g, "/"),
 				line: h.line,
@@ -626,7 +691,7 @@ export function MarkdownInspector() {
 				key: `${root}\0${ident}`,
 				ident,
 				root,
-				value: { ident, exclude, groups, totalFiles, totalRefs },
+				value: { ident, exclude, groups, totalFiles, totalRefs, timedOut },
 			};
 		},
 	);
@@ -741,10 +806,10 @@ export function MarkdownInspector() {
 	const [unlinkedMentions] = createAsyncQuery(
 		unlinkedQuerySource,
 		async (src) => {
-			if (!src) return { key: "", path: "", root: "", value: [] as UnlinkedMentionItem[] };
+			if (!src) return { key: "", path: "", root: "", value: [] as UnlinkedMentionItem[], timedOut: false };
 			const key = `${src.root}\0${src.path}`;
 			const terms = mentionTermsForDoc({ title: src.title, ticket: src.ticket, stem: src.stem });
-			if (!terms.length) return { key, path: src.path, root: src.root, value: [] as UnlinkedMentionItem[] };
+			if (!terms.length) return { key, path: src.path, root: src.root, value: [] as UnlinkedMentionItem[], timedOut: false };
 			const linkedSet = new Set(src.linkedPaths.map((p) => canonical(p)));
 			const allMd = new Map<string, { path: string; name: string; title?: string }>();
 			for (const d of untrack(docs)) {
@@ -753,18 +818,22 @@ export function MarkdownInspector() {
 				if (k === canonical(src.path) || linkedSet.has(k)) continue;
 				allMd.set(k, { path: d.path, name: d.name, title: d.title });
 			}
-			if (!allMd.size) return { key, path: src.path, root: src.root, value: [] as UnlinkedMentionItem[] };
+			if (!allMd.size) return { key, path: src.path, root: src.root, value: [] as UnlinkedMentionItem[], timedOut: false };
 			const candidatePaths = new Set<string>();
+			// Whether a scan ran out of time before it had read every file: the documents it did not get to were not
+			// looked at, and "no mentions found" is not said of them (`unfinishedSearchNote`).
+			let timedOut = false;
 			for (const term of terms.slice(0, 2)) {
-				const hits = await backend.search(term, { wholeWord: true, caseSensitive: false }).catch(() => []);
-				for (const h of hits) {
+				const scan = await backend.searchScan(term, { wholeWord: true, caseSensitive: false }).catch(() => null);
+				if (scan?.timedOut) timedOut = true;
+				for (const h of scan?.hits ?? []) {
 					const k = canonical(h.path);
 					if (allMd.has(k)) candidatePaths.add(k);
 					if (candidatePaths.size >= 24) break;
 				}
 				if (candidatePaths.size >= 24) break;
 			}
-			if (!candidatePaths.size) return { key, path: src.path, root: src.root, value: [] as UnlinkedMentionItem[] };
+			if (!candidatePaths.size) return { key, path: src.path, root: src.root, value: [] as UnlinkedMentionItem[], timedOut };
 			const candidates = await Promise.all(
 				[...candidatePaths].map(async (k) => {
 					const info = allMd.get(k)!;
@@ -776,14 +845,14 @@ export function MarkdownInspector() {
 				candidates,
 				linkedSet,
 			);
-			return { key, path: src.path, root: src.root, value: items };
+			return { key, path: src.path, root: src.root, value: items, timedOut };
 		},
 	);
 	const currentUnlinkedState = createMemo(() => {
 		const p = path();
 		const key = linksResourceKey();
 		const items = freshResourceValue(unlinkedMentions.loading, unlinkedMentions(), key);
-		return p && items ? { path: p, items } : { path: "", items: [] as UnlinkedMentionItem[] };
+		return p && items ? { path: p, items, timedOut: Boolean(unlinkedMentions()?.timedOut) } : { path: "", items: [] as UnlinkedMentionItem[], timedOut: false };
 	});
 	const currentUnlinked = () => currentUnlinkedState().items;
 
@@ -1302,6 +1371,8 @@ export function MarkdownInspector() {
 		}
 		const next = isListProperty(key) ? addToFrontMatterList(cur, key, val) : withFrontMatter(cur, key, val);
 		if (next && next !== cur) {
+			// A first property makes the block, as the YAML button does: not above a template's header comment.
+			if (hidesTemplateHeader(cur, next)) return void notify(TEMPLATE_HEADER_IN_THE_WAY, "error");
 			applyDocTextUpdate(next);
 			setPropsOpen(true);
 		} else if (next === null) {
@@ -1784,6 +1855,25 @@ export function MarkdownInspector() {
 								yamlCompleter = undefined;
 								yamlInputEl = undefined;
 							});
+							// What the box holds and has not written is put in its document before a save, a close and a change
+							// of tab (state.ts): Ctrl+S is the app's key before it is the box's, and saved the file without it.
+							let box: HTMLTextAreaElement | undefined;
+							const release = holdsPendingEdit(
+								() => {
+									if (box) stepYamlBox(box.value, "leave");
+								},
+								// Only while the box has text the document does not: an open box with nothing held keeps no window open.
+								() => Boolean(box && box.value !== yamlBoxWritten),
+							);
+							// And when the box itself is taken away. A microtask later, because that is inside an update; and
+							// for the document the box was open on, which may not be the one shown by then.
+							onCleanup(() => {
+								release();
+								const el = box;
+								const written = yamlBoxWritten;
+								const d = yamlBoxDoc;
+								if (el) queueMicrotask(() => closeYamlBox(el.value, written, d));
+							});
 							return (
 								<div class="cm-md-props-yaml-wrap">
 									<div class="cm-md-props-yaml-fence" aria-hidden="true">---</div>
@@ -1791,31 +1881,39 @@ export function MarkdownInspector() {
 										ref={(el) => {
 											yamlCompleter?.dispose();
 											yamlInputEl = el;
-											yamlHeld = false;
+											box = el;
 											el.value = untrack(() => span().inner);
+											yamlBoxText = el.value;
+											yamlBoxWritten = el.value;
+											yamlBoxDoc = untrack(() => activeMdDoc());
 											yamlCompleter = createTextareaCompleter(el, {
 												mode: "yaml",
 												filePath: () => path(),
 												getListedDoc: () => listed(),
 												onApply: () => {
 													resizeYamlInput(el);
-													applyYamlInnerEdit(el.value);
+													stepYamlBox(el.value);
 												},
 											});
 											queueMicrotask(() => resizeYamlInput(el));
 										}}
 										class="cm-md-props-yaml"
 										aria-label="Raw YAML frontmatter"
+										aria-invalid={yamlRefusal() ? "true" : "false"}
 										spellcheck="false"
 										rows={3}
 										onInput={(e) => {
 											const el = e.currentTarget;
 											resizeYamlInput(el);
-											applyYamlInnerEdit(el.value);
+											stepYamlBox(el.value);
 											yamlCompleter?.update();
 										}}
-										onBlur={() => {
+										onBlur={(e) => {
 											yamlCompleter?.close();
+											// A line that was held while it might yet become three dashes is a line like any other once
+											// the box is left: it is written then. (A box that is being taken away is seen to by its
+											// own cleanup, a moment later and outside the update that removes it.)
+											if (e.currentTarget.isConnected) stepYamlBox(e.currentTarget.value, "leave");
 										}}
 										onKeyDown={(e) => {
 											if (yamlCompleter?.handleKeyDown(e)) return;
@@ -1835,7 +1933,7 @@ export function MarkdownInspector() {
 												el.value = next;
 												el.setSelectionRange(s + 2, s + 2);
 												resizeYamlInput(el);
-												applyYamlInnerEdit(next);
+												stepYamlBox(next);
 											} else if ((e.ctrlKey || e.metaKey) && !e.altKey) {
 												const k = e.key.toLowerCase();
 												const model = activeMdDoc()?.model;
@@ -1850,6 +1948,13 @@ export function MarkdownInspector() {
 										}}
 									/>
 									<div class="cm-md-props-yaml-fence" aria-hidden="true">---</div>
+									<Show when={yamlRefusal()}>
+										{(said) => (
+											<p class="cm-md-props-yaml-refused" role="alert">
+												{said()}
+											</p>
+										)}
+									</Show>
 								</div>
 							);
 						}}
@@ -2387,7 +2492,8 @@ export function MarkdownInspector() {
 			</Show>
 
 			{/* Section 4: Used in Code & Registries (for schema/ docs) */}
-			<Show when={(currentSchemaUsages()?.totalFiles ?? 0) > 0 ? currentSchemaUsages() : undefined}>
+			{/* A search that ran out of time is shown too, though it found nothing: no card at all read as "used nowhere". */}
+			<Show when={(currentSchemaUsages()?.totalFiles ?? 0) > 0 || currentSchemaUsages()?.timedOut ? currentSchemaUsages() : undefined}>
 				{(usages) => {
 					const USAGE_GROUP_CAP = 8;
 					const filteredGroups = createMemo(() => filterSchemaUsageGroups(usages().groups, usageFilter()));
@@ -2420,8 +2526,12 @@ export function MarkdownInspector() {
 								>
 									<Icon name={schemaUsagesOpen() ? "chevron-down" : "chevron-right"} />
 									<span>Used in code &amp; registries</span>
-									<span class="md-insp-count" title={`${usages().totalFiles} files · ${usages().totalRefs} references`}>
+									<span
+										class="md-insp-count"
+										title={`${usages().timedOut ? "At least " : ""}${usages().totalFiles} files · ${usages().totalRefs} references`}
+									>
 										{usages().totalFiles}
+										{usages().timedOut ? "+" : ""}
 									</span>
 								</button>
 								<button
@@ -2435,6 +2545,9 @@ export function MarkdownInspector() {
 								</button>
 							</div>
 							<Show when={schemaUsagesOpen()}>
+								<Show when={usages().timedOut}>
+									<p class="md-insp-empty">{unfinishedSearchNote(true, usages().totalFiles, "uses")}</p>
+								</Show>
 								<Show when={usages().totalFiles > 4 || usages().groups.length > 1}>
 									<div class="md-usage-filter">
 										<Icon name="search" class="md-usage-filter-icon" />
@@ -2460,7 +2573,12 @@ export function MarkdownInspector() {
 								</Show>
 								<Show
 									when={filteredGroups().length > 0}
-									fallback={<p class="md-insp-empty">No usages match "{usageFilter().trim()}".</p>}
+									fallback={
+										// Nothing is listed without a filter only when the search ran out of time, which is said above.
+										<Show when={isFiltering()}>
+											<p class="md-insp-empty">No usages match "{usageFilter().trim()}".</p>
+										</Show>
+									}
 								>
 									<div class="md-usage-groups">
 										<For each={filteredGroups()}>
@@ -2663,7 +2781,10 @@ export function MarkdownInspector() {
 							aria-selected={linksTab() === "unlinked" ? "true" : "false"}
 							onClick={() => setLinksTab("unlinked")}
 						>
-							<span>Unlinked ({currentUnlinked().length})</span>
+							<span>
+								Unlinked ({currentUnlinked().length}
+								{currentUnlinkedState().timedOut ? "+" : ""})
+							</span>
 						</button>
 					</div>
 
@@ -2790,9 +2911,17 @@ export function MarkdownInspector() {
 					</Show>
 
 					<Show when={linksTab() === "unlinked"}>
+						<Show when={currentUnlinkedState().timedOut}>
+							<p class="md-insp-empty">{unfinishedSearchNote(true, currentUnlinked().length, "mentions")}</p>
+						</Show>
 						<Show
 							when={currentUnlinked().length > 0}
-							fallback={<p class="md-insp-empty">No unlinked plain-text mentions found in other workspace docs.</p>}
+							fallback={
+								// Said only of a search that read every file.
+								<Show when={!currentUnlinkedState().timedOut}>
+									<p class="md-insp-empty">No unlinked plain-text mentions found in other workspace docs.</p>
+								</Show>
+							}
 						>
 							<ul>
 								<For each={currentUnlinked()}>

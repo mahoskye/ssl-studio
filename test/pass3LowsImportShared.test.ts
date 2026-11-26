@@ -415,6 +415,25 @@ describe("2. Word import: document text is written as text", () => {
 		expect((marked.parse(withAddress, { gfm: true }) as string).replace(/<[^>]+>/g, "").trim()).toBe("https://docs.example/a*b\\|c");
 	});
 
+	// Pass 4, M2: the pipes of a cell were found by counting the backslashes before each, begun again at every
+	// backslash of a run: a cell of 40,000 backslashes (a 470-byte file) took 6.3 s, and the backend is one thread.
+	test("a cell of backslashes is read in one pass, and comes out as it did", () => {
+		const cell = (text: string) => `<w:tc>${para(run(xml(text)))}</w:tc>`;
+		const long = "\\".repeat(40_000);
+		const started = performance.now();
+		const { markdown } = read(`<w:tbl><w:tr>${cell(long)}${cell("b")}</w:tr></w:tbl>`);
+		const took = performance.now() - started;
+		// Each backslash of the text is written as two, and no pipe is among them.
+		expect(markdown).toBe(`| ${"\\".repeat(80_000)} | b |\n| --- | --- |`);
+		// Milliseconds now; the limit is far above that for a slow machine, and far under what it took.
+		expect(took).toBeLessThan(3000);
+		// Pipes with none, one, two and three backslashes before them, and a backslash at the cell's end: as before.
+		const mixed = read(`<w:tbl><w:tr>${cell("a|b")}${cell("a\\|b")}${cell("a\\\\|b|")}${cell("a\\\\\\|b")}${cell("end\\")}</w:tr></w:tbl>`).markdown;
+		expect(mixed.split("\n")[0]).toBe("| a\\|b | a\\\\\\|b | a\\\\\\\\\\|b\\| | a\\\\\\\\\\\\\\|b | end\\\\ |");
+		const html = marked.parse(mixed, { gfm: true }) as string;
+		expect([...html.matchAll(/<t[hd]>(.*?)<\/t[hd]>/g)].map((m) => m[1])).toEqual(["a|b", "a\\|b", "a\\\\|b|", "a\\\\\\|b", "end\\"]);
+	});
+
 	test("the text of a link cannot end the link, and a link's own address is kept in angle brackets", () => {
 		const rels = {
 			name: "word/_rels/document.xml.rels",

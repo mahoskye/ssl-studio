@@ -300,8 +300,10 @@ export function selftestWork(): Promise<Steps> {
 			const target = await until(() => keyed("SELF-2"));
 			const box = target!.getBoundingClientRect();
 			target!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: box.left + 8, clientY: box.top + 4 }));
+			// By its label: an item that opens a submenu also holds its arrow, which is a character of the icon font, so
+			// its whole text is never the label alone, and this step never found the item.
 			const statusTrigger = await until(() =>
-				[...document.querySelectorAll<HTMLElement>(".menu-pop.row-menu [role=menuitem]")].find((item) => item.textContent?.trim() === "Set status"),
+				[...document.querySelectorAll<HTMLElement>(".menu-pop.row-menu [role=menuitem]")].find((item) => (item.querySelector(".menu-label") ?? item).textContent?.trim() === "Set status"),
 			);
 			if (!statusTrigger) return false;
 			statusTrigger.click();

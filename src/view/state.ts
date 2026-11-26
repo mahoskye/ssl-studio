@@ -81,7 +81,7 @@ type Doc = {
 	validatorDispose?: () => void;
 };
 
-export const [state, setState] = createStore({
+const [state, setStore] = createStore({
 	workspace: null as Workspace | null,
 	/** The open folder's project settings; null until a folder is open. */
 	project: null as Project | null,
@@ -192,15 +192,61 @@ export const snapshotUnsavedPaths = () => {
 	return Object.keys(dirty).filter((path) => dirty[path]);
 };
 
-const pendingEdits = new Set<() => void>();
+/** The views that keep typed text outside the document, each by how it puts that text in, with how it says whether it has any (where it can). */
+const pendingEdits = new Map<() => void, (() => boolean) | undefined>();
+/** Whether the backend was last told that such a view may have text now. */
+let holdingTold = false;
+
+/**
+ * Tells the backend whether a view is there that may hold text still being typed. The desktop window closes on the
+ * backend's own count of unsaved files, and what is typed in an open cell is in no file yet: with nothing else
+ * unsaved the count was 0, the window closed at once, and the text went with it, unasked. Told that such a view is
+ * there, the backend asks the view first (`closeRequested`, below), which puts the text in its document and counts
+ * then. With no such view the window closes on the count as before. A view that does not say whether it has text
+ * (`typed`) is taken to have some for as long as it is there: asked for nothing, the view answers at once.
+ */
+function tellHolding() {
+	let holding = false;
+	for (const typed of pendingEdits.values()) {
+		try {
+			if (!typed || typed()) holding = true;
+		} catch {
+			holding = true;
+		}
+		if (holding) break;
+	}
+	if (holding === holdingTold) return;
+	holdingTold = holding;
+	void backend.typingChanged(holding).catch(() => undefined);
+}
+
+// A view that says whether it has typed text is asked again after what can change the answer: a key, text put in a
+// field, a field left. A moment after, when the view has heard of it too.
+let holdingAsked = false;
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+	const askAgain = () => {
+		if (holdingAsked || ![...pendingEdits.values()].some(Boolean)) return;
+		holdingAsked = true;
+		setTimeout(() => {
+			holdingAsked = false;
+			tellHolding();
+		}, 0);
+	};
+	for (const type of ["keydown", "input", "focusout"]) window.addEventListener(type, askAgain, true);
+}
 
 /**
  * A view that keeps what is being typed outside the document until it is committed (a table's open cell) says
- * here how to put it in. Returns how to take that back, for when the view goes.
+ * here how to put it in, and with `typed`, where it can, whether it has any such text now. Returns how to take that
+ * back, for when the view goes.
  */
-export function holdsPendingEdit(commit: () => void): () => void {
-	pendingEdits.add(commit);
-	return () => void pendingEdits.delete(commit);
+export function holdsPendingEdit(commit: () => void, typed?: () => boolean): () => void {
+	pendingEdits.set(commit, typed);
+	tellHolding();
+	return () => {
+		pendingEdits.delete(commit);
+		tellHolding();
+	};
 }
 
 /**
@@ -209,14 +255,40 @@ export function holdsPendingEdit(commit: () => void): () => void {
  * without it, and a close found nothing unsaved, asked nothing, and dropped it.
  */
 export function commitPendingEdits() {
-	for (const commit of [...pendingEdits]) {
+	for (const commit of [...pendingEdits.keys()]) {
 		try {
 			commit();
 		} catch (e) {
 			log(`what was being typed could not be put in the document: ${e instanceof Error ? e.message : String(e)}`);
 		}
 	}
+	// What was typed is in its document now: a view that says so is no longer one the window waits for.
+	tellHolding();
 }
+
+/** What each group shows: its tab, and the view that tab is in. When it changes, the view that was there is taken away. */
+const shownIn = (s: typeof state) => `${s.centerView}\n${s.groups.map((g) => [g.active, g.mode, g.mdMode, g.planMode, g.tableText].join("\t")).join("\n")}`;
+
+export { state };
+
+/**
+ * Changes the app's state. A change of what a group shows (another tab, another view of the same file, another
+ * centre view) puts what is still being typed there into its document: the view is taken away with the
+ * change, and the text was only in its field. The step by Ctrl+PageDown did this itself, and every other way of
+ * leaving a tab did not: Ctrl+Tab, a click on another tab, Go back, a new file, Table to Text. Each lost the
+ * text without a word, and the document was not marked unsaved. It is done here, for every way there is or will
+ * be, and before the views are drawn again: the view that held the text is still there to hand it over.
+ */
+export const setState: typeof setStore = ((change: (s: typeof state) => unknown) => {
+	let leaves = false;
+	(setStore as (change: (s: typeof state) => unknown) => void)((s) => {
+		const before = shownIn(s);
+		const result = change(s);
+		leaves = shownIn(s) !== before;
+		return result;
+	});
+	if (leaves) commitPendingEdits();
+}) as typeof setStore;
 
 /**
  * Before anything that would drop every open document. Says whether to go on:
@@ -363,6 +435,11 @@ async function switchFolder(path: string | undefined, seq: number, droppedByChoi
 	resetRecentTabs();
 	const oldDocs = [...docs.values()];
 	docs.clear();
+	// The notices go below, and with them the one that a settings file does not read. It was kept on record as said,
+	// so the reading for this folder passed it over: opening a folder from the Welcome page, the ordinary start,
+	// took the notice away for good while the person's own settings stayed unused. The record goes with the
+	// notices, and the reading that follows says again what still stands.
+	settingsProblemsSaid = [];
 	setState((s) => {
 		s.workspace = workspace;
 		s.groups = [{ tabs: [], active: null }];
@@ -580,14 +657,26 @@ export async function loadProject() {
  */
 let settingsProblemsSaid: readonly string[] = [];
 
+/** A reading's word on which settings files do not read: those not yet said are said, and those that read again are forgotten. */
+function saySettingsProblems(problems: readonly string[]) {
+	for (const problem of problems) if (!settingsProblemsSaid.includes(problem)) notify(problem, "error");
+	settingsProblemsSaid = problems;
+}
+
+/** Asks the backend once more which settings files do not read, for the record alone: the settings on screen are not touched. */
+async function recheckSettingsProblems() {
+	const startRoot = snapshot(state).workspace?.root;
+	const read = await backend.settings().catch(() => null);
+	if (read && snapshot(state).workspace?.root === startRoot) saySettingsProblems(read.problems ?? []);
+}
+
 export async function loadSettings(fresh = false) {
 	const startRoot = snapshot(state).workspace?.root;
 	const [{ effective, problems = [] }, themes] = await Promise.all([backend.settings(), backend.themes()]);
 	if (snapshot(state).workspace?.root !== startRoot) return;
 	// A settings file with a slip in it gives none of its settings. Without a word here the app started with the
 	// defaults and the person's own settings seemed lost, until the next change of a setting was refused.
-	for (const problem of problems) if (!settingsProblemsSaid.includes(problem)) notify(problem, "error");
-	settingsProblemsSaid = problems;
+	saySettingsProblems(problems);
 	knownSaved = { root: startRoot, settings: structuredClone(effective) };
 	const { layout: _onDisk, ...rest } = effective;
 	setState((s) => {
@@ -660,6 +749,10 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 	if (!effective && sameWorkspace) settingFailed = true;
 	// Whether or not it is shown (below): an answer is the settings as the save left them on disk.
 	if (effective && sameWorkspace) knownSaved = { root: startRoot, settings: structuredClone(effective) };
+	// A file on record as not reading may be the one this save has just written, which then reads again: a file
+	// that does not is never written over. Left on record, the same slip made in it later was taken for the one
+	// already said, and was not said. Only a reading tells which files still do not read.
+	if (effective && sameWorkspace && settingsProblemsSaid.length) void recheckSettingsProblems();
 	// Saves land, and answer, in the order they were asked for, and each answer is the settings as they then are:
 	// the answer to a save asked for after this one holds this one's change too, and this older answer is not put
 	// over what has been shown since.
@@ -1494,7 +1587,7 @@ export function split() {
  * The file on disk is not the one these edits started from. Nothing is written
  * until the user has chosen; says whether to go on and write.
  */
-async function settleConflict(doc: Doc): Promise<boolean> {
+async function settleConflict(doc: Doc, unasked?: (why: string, asks?: boolean) => void): Promise<boolean> {
 	let disk;
 	try {
 		disk = await backend.read(doc.path);
@@ -1506,28 +1599,76 @@ async function settleConflict(doc: Doc): Promise<boolean> {
 	// Bytes where there was text have no text to compare: they are a change, whatever the empty text of them equals.
 	const turnedBytes = Boolean(disk.binary) && !doc.binary;
 	if (!turnedBytes && (disk.text === doc.savedText || disk.text === doc.model.getValue())) return true;
+	// Where nothing can be asked (see `saveAllUnasked`) the file on disk stays as it is, and that is the answer.
+	if (unasked) return unasked("it changed on disk after it was opened, and which of the two to keep cannot be asked here", true), false;
 	const name = baseName(doc.path);
 	const answer = await choose(`${name} changed on disk after you opened it. Saving would replace what is there.`, ["Compare", "Overwrite the file on disk", "Reload from disk"], { danger: "Overwrite the file on disk" });
 	if (docs.get(doc.path) !== doc || doc.model.isDisposed()) return false;
 	if (answer === "Overwrite the file on disk") return true;
 	if (answer === "Reload from disk") await revert(doc.path);
-	if (answer === "Compare") {
-		openReview({
-			title: `${name}: the file on disk, against your edits`,
-			original: disk.text,
-			proposed: doc.model.getValue(),
-			language: doc.model.getLanguageId(),
-			note: "Left: the file as it is on disk now. Right: your edits, which you can change here. Accept keeps the right side and saves it over the file.",
-			acceptLabel: "Keep mine and save",
-			onAccept: async (text) => {
-				applyText(doc.path, text);
-				doc.mtime = disk.mtime;
-				doc.savedText = disk.text;
-				await save(doc.path);
-			},
-		});
-	}
+	if (answer === "Compare") void reviewConflict(doc, disk);
 	return false;
+}
+
+/** The same text, line ends apart: a review's right side has the line ends of its left, whatever the document has. */
+const sameButLineEnds = (a: string, b: string) => a === b || a.replace(/\r\n/g, "\n") === b.replace(/\r\n/g, "\n");
+
+/**
+ * The review of a file that changed on disk, against the edits made here: `disk` is the file as it was just read,
+ * and `shown` what stands on the right, which is the document unless it is given.
+ *
+ * "Keep mine and save" acts on the document and the file as they are when it is chosen, not as they were when the
+ * review opened. It wrote the text the review was opened with: a property set in the Info panel, a table action or
+ * a replace made while the review stood open was undone by it without a word, and whether the text went into the
+ * document and the save went through was not looked at, so a save that failed closed the review as if it had not.
+ * Now, if the document or the file is no longer what the review shows, nothing is applied and the review is opened
+ * again on both as they are. One case cannot be shown in two columns: the document changed elsewhere and the right
+ * side was edited here too. Then the review stays as it is and says so, for the edits made in it to be copied out.
+ */
+function reviewConflict(doc: Doc, disk: { text: string; mtime: number; binary?: unknown }, shown = doc.model.getValue()): Promise<boolean> {
+	const name = baseName(doc.path);
+	/** The document's text that the right side stands for: as the review found it, then as the review left it. */
+	let known = doc.model.getValue();
+	const openAsText = () => docs.get(doc.path) === doc && !doc.model.isDisposed() && !doc.binary;
+	return openReview({
+		title: `${name}: the file on disk, against your edits`,
+		original: disk.text,
+		proposed: shown,
+		language: doc.model.getLanguageId(),
+		note: "Left: the file as it is on disk now. Right: your edits, which you can change here. Accept keeps the right side and saves it over the file.",
+		acceptLabel: "Keep mine and save",
+		onAccept: async (text) => {
+			// What is still being typed in a cell or a field is part of the document as it is now.
+			commitPendingEdits();
+			if (!openAsText()) throw new Error(`${name} is no longer open as text`);
+			// The file as it is now. Gone from the disk, there is nothing there to lose: the save puts it back.
+			const now = await backend.read(doc.path).catch(() => null);
+			if (!openAsText()) throw new Error(`${name} is no longer open as text`);
+			const docChanged = doc.model.getValue() !== known;
+			const diskChanged = Boolean(now) && (Boolean(now!.binary) !== Boolean(disk.binary) || now!.text !== disk.text);
+			if (docChanged || diskChanged) {
+				// Edited here: the right side is not the document the review was opened on. (It may have been given so:
+				// the right side of a review before this one, kept when the file changed again.)
+				if (docChanged && !sameButLineEnds(text, known)) {
+					throw new Error(`${name} was also changed outside this review, and keeping the right side as it stands would undo that. Copy what you changed here, close the review, and save again`);
+				}
+				const where = docChanged ? (diskChanged ? "in the app and on disk" : "in the app") : "on disk again";
+				notify(`${name} changed ${where} while the review was open. Nothing was saved: the review now shows both sides as they are.`);
+				// The review that is being accepted gives way to the next without a question (reviewFlow).
+				await reviewConflict(doc, now ?? disk, docChanged ? undefined : text);
+				return;
+			}
+			if (!applyText(doc.path, text)) throw new Error(`${name} is no longer open as text`);
+			known = doc.model.getValue();
+			// The save that follows starts from the file as it is: it was looked at here, and is not asked about again.
+			if (now) {
+				doc.mtime = now.mtime;
+				doc.savedText = now.text;
+			}
+			// Why it was not saved has been said by the save itself. The review stays open, and says that it was not.
+			if (!(await save(doc.path))) throw new Error(`${name} was not saved: the right side is in the document now, unsaved`);
+		},
+	});
 }
 
 /** Says whether the file is on disk as it is in the editor. */
@@ -1538,6 +1679,12 @@ export async function save(
 		format?: boolean;
 		/** Receives the promoted file path when saving an untitled buffer. */
 		onPromoted?: (target: string) => void;
+		/**
+		 * For where no question can be asked and no notice is seen (`saveAllUnasked`): a file that needs a question is
+		 * not saved, and this is told why any file was not, in words that follow its name. `asks` when it is for want
+		 * of a question.
+		 */
+		unasked?: (why: string, asks?: boolean) => void;
 	} = {},
 ): Promise<Saved> {
 	// What is being typed in an open cell is part of what is saved.
@@ -1547,9 +1694,10 @@ export async function save(
 	if (!resolvedPath) return false;
 	path = resolvedPath;
 	const doc = docs.get(path);
-	if (!doc || doc.model.isDisposed()) return false;
+	if (!doc || doc.model.isDisposed()) return options.unasked?.("it is no longer open"), false;
 	// First save of a floating untitled buffer: ask for a path, write to disk, and promote the tab.
 	if (isUntitled(path)) {
+		if (options.unasked) return options.unasked("it has no file name yet, and one cannot be asked for here", true), false;
 		const root = snapshot(state).workspace?.root;
 		const suggested = `${displayName(path)}.ssl`;
 		const entered = (await ask(root ? "Save file as (relative to workspace, or absolute path)" : "Save file as (absolute path)", suggested))?.trim();
@@ -1640,8 +1788,8 @@ export async function save(
 		return true;
 	}
 	// A picture, or other bytes: there is no text of it here to save.
-	if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to save here.`), false;
-	if (!(await settleConflict(doc))) return false;
+	if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to save here.`), options.unasked?.("it is not text"), false;
+	if (!(await settleConflict(doc, options.unasked))) return false;
 	if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
 	const curBeforeFormat = snapshot(state);
 	if (options.format !== false && curBeforeFormat.settings.formatOnSave && doc.model.getLanguageId() === "ssl" && curBeforeFormat.lsp.state === "running") {
@@ -1652,7 +1800,16 @@ export async function save(
 	// A table Excel wrote keeps its bare LF inside cells: the model made every line end of it CRLF when it was opened.
 	const text = tableTextToWrite(path, doc.model.getValue(), doc.savedText);
 	// "It was read as text": a file that holds a zero byte the user typed is still theirs to save.
-	const result = await guarded(() => backend.write(path, text, true));
+	let result: { mtime: number };
+	try {
+		result = await backend.write(path, text, true);
+	} catch (e: any) {
+		// Said as a notice, as every failure is, and told to whoever cannot see one.
+		const message = String(e?.message ?? e);
+		notify(message, "error");
+		options.unasked?.(plainFileError(message, snapshot(state).workspace?.root));
+		return false;
+	}
 	if (!result) return false;
 	if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
 	doc.savedText = text;
@@ -1768,6 +1925,51 @@ export async function saveAll(): Promise<Saved> {
 	return true;
 }
 
+/** A file that could not be saved where nothing can be asked, and why, in words that follow its name. */
+export type NotSaved = { path: string; why: string; /** It needs a question, which only the editor can ask. */ asks?: boolean };
+
+/**
+ * Saves every unsaved file without asking anything, and answers with those it could not save and why. For the
+ * card that stands in the app's place when its view has failed (main.tsx): the dialogs and the notices are part
+ * of what the card replaced, so `saveAll` from there said nothing when a save failed, and never came back from a
+ * file that needs a question (one changed on disk, one with no name yet). Here such a file is left as it is and
+ * named, every other file is still tried, and nothing is formatted first: that asks the language server, and this
+ * is the way out when something is already wrong.
+ */
+export async function saveAllUnasked(): Promise<NotSaved[]> {
+	commitPendingEdits();
+	const notSaved: NotSaved[] = [];
+	for (const path of snapshotUnsavedPaths()) {
+		let why = "";
+		let asks = false;
+		let saved = false;
+		try {
+			saved = await save(path, { format: false, unasked: (reason, question) => ((why = reason), (asks = Boolean(question))) });
+		} catch (e: any) {
+			why = String(e?.message ?? e);
+		}
+		if (!saved) notSaved.push({ path, why: why || "it could not be saved", ...(asks ? { asks } : {}) });
+	}
+	return notSaved;
+}
+
+/**
+ * What the card says of files `saveAllUnasked` could not save: a line that counts them, a line for each, and what
+ * to do about those that need a question. A reason that names its file itself (what the file system said of it)
+ * stands alone on its line; any other follows the file's name.
+ */
+export function notSavedText(notSaved: readonly NotSaved[]): string {
+	if (!notSaved.length) return "";
+	const line = (file: NotSaved) => {
+		const name = displayName(file.path);
+		const why = `${file.why.replace(/\.$/, "")}.`;
+		return why.includes(name) ? why : `${name}: ${why}`;
+	};
+	const lines = [notSaved.length === 1 ? "1 file was not saved:" : `${notSaved.length} files were not saved:`, ...notSaved.map(line)];
+	if (notSaved.some((file) => file.asks)) lines.push("“Try again” may bring the editor back, where that can be asked.");
+	return lines.join("\n");
+}
+
 function applyFileToDoc(path: string, doc: Doc, file: { text: string; mtime: number; encoding?: string; binary?: { size: number; image?: string } }) {
 	doc.encoding = file.encoding;
 	doc.binary = file.binary;
@@ -1875,7 +2077,13 @@ export async function fileChangedOnDisk(changed: string) {
 	}
 }
 
-// The desktop window was asked to close with edits that are not on disk.
+// The backend has something to say that no call's answer carries (a save whose copy for local history was not made).
+on("notice", (said) => {
+	if (typeof said?.text === "string" && said.text) notify(said.text, said.kind === "error" ? "error" : "info");
+});
+
+// The desktop window was asked to close with edits that are not on disk, or with a view open that may hold text
+// still being typed: `settleUnsaved` puts that text in its document first, and asks only if something is then unsaved.
 let closePromptOpen = false;
 on("closeRequested", async () => {
 	if (closePromptOpen) return;

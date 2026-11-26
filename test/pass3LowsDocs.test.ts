@@ -435,13 +435,15 @@ describe("6b. the raw YAML box does not write a line that ends the front matter"
 		expect(stopped).toBeGreaterThan(500);
 	});
 
-	test("the box asks before it writes, and says so once (source read: the box is a textarea over an open editor document)", () => {
+	test("the box asks before it writes (source read: the box is a textarea over an open editor document; what it is told is run in test/pass4LowsDocs.test.ts)", () => {
 		const src = readSrc("../src/view/panels/MarkdownInspector.tsx");
-		const apply = src.slice(src.indexOf("const applyYamlInnerEdit = (nextInner: string) => {"), src.indexOf("const focusYamlInput = () => {"));
-		const asked = apply.indexOf("const ends = innerLineEndingFrontMatter(nextInner);");
+		const step = src.slice(src.indexOf('const stepYamlBox = (boxText: string, event: "input" | "leave" = "input") => {'), src.indexOf("const closeYamlBox = "));
+		const asked = step.indexOf("const step = yamlBoxStep(yamlBoxWritten, yamlBoxText, boxText, event);");
 		expect(asked).toBeGreaterThan(-1);
-		expect(asked).toBeLessThan(apply.indexOf("formatFrontMatterInnerReplacement(nextInner, span.eol)"));
-		expect(apply.slice(asked)).toMatch(/if \(ends\) \{\s*if \(!yamlHeld\) \{\s*notify\([^\n]*"error"\);\s*\}\s*holdYaml\(true\);\s*return;/);
+		// Written only where the step says so, and only what it says.
+		expect(step.slice(asked)).toContain("if (step.write !== null && yamlBoxDoc && writeYamlInner(yamlBoxDoc, step.write, ");
+		expect(src.match(/writeYamlInner\(/g)).toHaveLength(2);
+		expect(src).toContain("if (step.write !== null && d) writeYamlInner(d, step.write, written);");
 	});
 });
 

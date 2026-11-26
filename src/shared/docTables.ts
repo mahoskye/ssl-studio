@@ -53,47 +53,70 @@ const shownEntities = (text: string) =>
 		return code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) ? "\ufffd" : String.fromCodePoint(code);
 	});
 
+/** A link by name, which the lexer does not know: `[[Target]]` shows its target, `[[Target|Alias]]` its alias. */
+const NAMED_LINK = /!?\[\[(?:[^[\]|]+\\?\|([^\]]+)|([^\]]+))\]\]/g;
+/** Marked words, which the lexer does not know either: `==words==` shows the words (as markdownHtml.ts reads them). */
+const MARKED = /==([^\n=](?:[^\n]*?[^\n=])?)==/g;
+
+/**
+ * A stretch of plain text as the rendered page shows it: a link by name as its words, marked words without their
+ * `==`. The page makes both of its text only, after the Markdown is read, so this is asked for text only: never
+ * for code. A link by name is taken first, as the page takes it: `==` on either side of one marks nothing.
+ */
+function shownRun(run: string): string {
+	const marks = (text: string) => text.replace(MARKED, "$1");
+	let out = "";
+	let at = 0;
+	for (const link of run.matchAll(NAMED_LINK)) {
+		out += marks(run.slice(at, link.index)) + (link[1] ?? link[2]);
+		at = link.index + link[0].length;
+	}
+	return out + marks(run.slice(at));
+}
+
 /** What the reader sees of a run of inline Markdown, as the renderer's own reading of it (its tokens) says. */
 function shownText(tokens: readonly any[]): string {
 	let out = "";
+	// The text since the last element, which the page shows in one piece: see `shownRun`.
+	let run = "";
+	const close = (next = "") => {
+		out += shownRun(run) + next;
+		run = "";
+	};
 	for (const token of tokens) {
-		// Code is shown as written: its underscores, stars and entities are all characters on the page.
-		if (token.type === "codespan" || token.type === "escape") out += String(token.text ?? "");
+		// A character written with a backslash before it is text like the text around it.
+		if (token.type === "escape") run += String(token.text ?? "");
+		// Code is shown as written: its underscores, stars, entities and brackets are all characters on the page.
+		else if (token.type === "codespan") close(String(token.text ?? ""));
 		// A tag is not seen; a line break parts two words.
-		else if (token.type === "html") out += /^<br\b/i.test(String(token.raw ?? "")) ? " " : "";
-		else if (token.type === "br") out += " ";
+		else if (token.type === "html") close(/^<br\b/i.test(String(token.raw ?? "")) ? " " : "");
+		else if (token.type === "br") close(" ");
 		// Emphasis, a link and an image count as what they hold: the words, the label, the alternative text.
-		else if (Array.isArray(token.tokens) && token.tokens.length > 0) out += shownText(token.tokens);
-		else out += shownEntities(String(token.text ?? token.raw ?? ""));
+		else if (Array.isArray(token.tokens) && token.tokens.length > 0) close(shownText(token.tokens));
+		else run += shownEntities(String(token.text ?? token.raw ?? ""));
 	}
+	close();
 	return out;
 }
 
 /**
- * What a cell shows, without its Markdown: `code`, [links](there), and [[Target|Alias]] count as their visible text.
- * The Markdown is read by the renderer's own lexer and not by removing every `*`, `_`, `~` and backtick: that made
- * `SAMPLE_DUE_DATE_OVERRIDE` four characters shorter than it reads, so a name too long for a short column passed,
- * and left `&amp;` as five characters, so a value that fits was reported.
+ * What a cell shows, without its Markdown: `code`, [links](there), [[Target|Alias]] and ==marked words== count as
+ * their visible text. The Markdown is read by the renderer's own lexer and not by removing every `*`, `_`, `~` and
+ * backtick: that made `SAMPLE_DUE_DATE_OVERRIDE` four characters shorter than it reads, so a name too long for a
+ * short column passed, and left `&amp;` as five characters, so a value that fits was reported. What the lexer does
+ * not know (a link by name, marked words) is taken from the text it found, not from the Markdown before it is
+ * read: taken first, a link by name written as code (`[[Target|Alias]]` between backticks, which shows every
+ * character) was measured as its alias, and `==x==` was measured with its four marks.
  */
-export const cellText = (markdown: string) =>
-	inOneLine(
-		shownText(
-			marked.Lexer.lexInline(
-				markdown
-					.replace(/!?\[\[[^[\]|]+\\?\|([^\]]+)\]\]/g, "$1")
-					.replace(/!?\[\[([^\]]+)\]\]/g, "$1"),
-			),
-		),
-	);
+export const cellText = (markdown: string) => inOneLine(shownText(marked.Lexer.lexInline(markdown)));
 
 const inOneLine = (text: string) => text.replace(/\s+/g, " ").trim();
 
 /**
  * A cell of a table the lexer has read, as it shows: from the tokens the lexer already made of it, so a document
- * of many cells is not read twice. A cell with a wikilink in it is read anew, the link taken as its words first:
- * `[[Target|Alias]]` is this application's, and the lexer does not know it.
+ * of many cells is not read twice.
  */
-const tableCellText = (cell: any) => (Array.isArray(cell?.tokens) && !String(cell.text ?? "").includes("[[") ? inOneLine(shownText(cell.tokens)) : cellText(String(cell?.text ?? "")));
+const tableCellText = (cell: any) => (Array.isArray(cell?.tokens) ? inOneLine(shownText(cell.tokens)) : cellText(String(cell?.text ?? "")));
 
 const graphemes = typeof Intl !== "undefined" && "Segmenter" in Intl ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : null;
 
@@ -112,22 +135,29 @@ export function checkTables(markdown: string): TableFinding[] {
 	const plain = markdown.replace(/\r\n/g, "\n");
 	const findings: TableFinding[] = [];
 	let offset = 0;
+	// Where the top-level block being walked ends: a table inside it (in a quote, in a list) is looked for before that.
+	let blockEnd = plain.length;
 	const walk = (tokens: any[], isTopLevel = false) => {
 		for (const token of tokens) {
 			let tokenStart = -1;
 			if (isTopLevel && typeof token.raw === "string" && token.raw.length > 0) {
 				tokenStart = plain.indexOf(token.raw, offset);
+				blockEnd = tokenStart >= 0 ? tokenStart + token.raw.length : plain.length;
 			}
 			if (token.type === "table") {
 				let at = tokenStart >= 0 ? tokenStart : plain.indexOf(token.raw, offset);
-				if (at >= 0) {
+				// A table in a quote has lost the `> ` of its lines in `token.raw`, and is not in the document as that
+				// text. Looked for anywhere after the last table, it was found in a table further down that reads the
+				// same, and the two were reported on each other's lines. It is its own block's, and looked for there.
+				if (at >= 0 && at + token.raw.length <= blockEnd) {
 					offset = at + token.raw.length;
 				} else {
+					at = -1;
 					// Inside blockquotes/lists, `marked` strips `> ` / leading indent from `token.raw`.
 					const firstLine = String(token.raw ?? "").split("\n")[0]?.trim() ?? "";
 					if (firstLine) {
 						let pos = offset;
-						for (const rawLine of plain.slice(offset).split("\n")) {
+						for (const rawLine of plain.slice(offset, blockEnd).split("\n")) {
 							const stripped = rawLine.replace(/^(?:[ \t]*>[ \t]*)+/, "").trim();
 							if (stripped === firstLine) {
 								at = pos;

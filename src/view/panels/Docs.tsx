@@ -3,7 +3,7 @@
 // plans. Which folders those are comes from .ssl-studio/project.toml.
 import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
-import { createContext, createEffect, createMemo, createSignal, For, Show, useContext } from "solid-js";
+import { createContext, createEffect, createMemo, createSignal, For, onSettled, Show, useContext } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
 import { ask, choose, quickPick, type QuickPickOption } from "../dialogs";
@@ -53,6 +53,7 @@ import {
 	unarchiveTicket,
 	updateCatalogs,
 	updateManifest,
+	whyNotRead,
 } from "../projectDocs";
 import { codeExcludeGlob, searchFor } from "./Search";
 import { manageTemplates, newNoteFromTemplate } from "../templater";
@@ -87,21 +88,44 @@ const DocsPanelContext = createContext<DocsPanelContextValue>({
 	openBulkMenu: async () => {},
 });
 
-const isBulkSelectable = (file: DocFile) => file.exists && !isCatalog(file) && /\.(md|markdown)$/i.test(file.name);
+/**
+ * Whether a document can be one of several changed at once (status, tag, release, governance, archive): a Markdown
+ * document that is there and is not a catalog. The project's own files (README.md, AGENTS.md, STATE.md) are not:
+ * front matter written into a README is hardly ever meant, and "Select all visible" took them with everything
+ * else. They are changed one at a time, from their own row or in the Inspector.
+ */
+export const isBulkSelectable = (file: DocFile) => file.exists && file.group !== "project" && !isCatalog(file) && /\.(md|markdown)$/i.test(file.name);
+
+/**
+ * The documents that can be selected and have a row drawn now, in the order their rows are drawn. `drawnRows` are
+ * the keys of the rows on the page: a document inside a folded list, under a folded ticket or behind "Show the
+ * finished" has none. "Select all visible" took every document the filter let through, drawn or not: with every
+ * list folded it said "26 selected" over an empty panel, and the next bulk change was written to all of them.
+ */
+export function drawnSelectable(selectable: readonly string[], drawnRows: readonly string[]): string[] {
+	const can = new Set(selectable);
+	return [...new Set(drawnRows)].filter((key) => can.has(key));
+}
+
+/** What the bar over a selection says of it: how many documents, and how many of those have no row drawn now. */
+export const selectionSaid = (selected: number, notShown: number) => (notShown ? `${selected} selected, ${notShown} of them not shown` : `${selected} selected`);
+
+/** Said where documents are selected to be changed together: which are left out, and how they are changed. */
+const NOT_IN_BULK = "The project's own files (README.md, AGENTS.md, STATE.md) are never selected: they are changed one at a time.";
 
 /**
  * Changes one document's front matter; true when the document changed, false when it already read that way. A
  * change the writer refuses (null) is raised, for the caller's own notice to name the document: it was once passed
  * over like a value already set, and a selection was told it "already had" a status that one of its documents
- * did not take.
+ * did not take. A document that cannot be read is raised the same way, with why: it was passed over like the
+ * refusal once was, and counted among those that "already had" the value.
  */
-async function editDocFrontMatter(path: string, field: string, transform: (text: string) => string | null): Promise<boolean> {
+export async function editDocFrontMatter(path: string, field: string, transform: (text: string) => string | null): Promise<boolean> {
 	const key = canonical(path);
 	const open = documents.get(key);
-	if (open?.binary) return false;
 	const liveOpen = open && !open.binary && !open.model.isDisposed() ? open : undefined;
-	const cur = liveOpen ? liveOpen.model.getValue() : await backend.read(path).then((r) => (r.binary ? null : r.text), () => null);
-	if (cur === null) return false;
+	const cur = open?.binary ? null : liveOpen ? liveOpen.model.getValue() : await backend.read(path).then((r) => (r.binary ? null : r.text), () => null);
+	if (cur === null) throw new Error(await whyNotRead(path));
 	const next = transform(cur);
 	if (next === null) throw new Error(frontMatterRefusal(cur, field));
 	if (next === cur) return false;
@@ -1805,6 +1829,20 @@ export function Docs() {
 	/** Whether a list has anything to show: while filtering, one that has nothing is left out, heading and all. */
 	const has = (...groups: DocFile["group"][]) => !filtering() || shown().some((d) => groups.includes(d.group));
 	const visibleSelectablePaths = createMemo(() => shown().filter(isBulkSelectable).map((d) => d.path));
+	/** The keys of the rows the panel has drawn, in their order on the page. */
+	const rowsDrawn = (): string[] => (panelEl ? [...panelEl.querySelectorAll<HTMLElement>("[data-row]")].map((el) => el.dataset.row ?? "") : []);
+	// What passes the filter is not what is on the screen: each list folds by its own rule (a group, a ticket, the
+	// finished tickets, the archive), so which rows are drawn is read from the page, and read again when it changes.
+	const [drawnRows, setDrawnRows] = createSignal<readonly string[]>([], { equals: (a, b) => a.length === b.length && a.every((key, i) => key === b[i]) });
+	onSettled(() => {
+		if (!panelEl || typeof MutationObserver === "undefined") return;
+		const read = () => setDrawnRows(rowsDrawn());
+		const observer = new MutationObserver(read);
+		observer.observe(panelEl, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-row"] });
+		read();
+		return () => observer.disconnect();
+	});
+	const drawnSelectablePaths = createMemo(() => drawnSelectable(visibleSelectablePaths(), drawnRows()));
 	const selectedDocs = createMemo(() => {
 		const sel = selectedPaths();
 		if (!sel.size) return [] as DocFile[];
@@ -1829,16 +1867,24 @@ export function Docs() {
 		},
 	);
 	const allVisibleSelected = createMemo(() => {
-		const vis = visibleSelectablePaths();
+		const vis = drawnSelectablePaths();
 		const sel = selectedPaths();
 		return vis.length > 0 && vis.every((p) => sel.has(p));
 	});
-	const bulkSelectAllVisible = () =>
+	/** How many of the selected documents have no row drawn now: selected, and then folded away. The bar says so. */
+	const selectedNotShown = createMemo(() => {
+		const drawn = new Set(drawnRows());
+		return selectedDocs().filter((d) => !drawn.has(d.path)).length;
+	});
+	// "Visible" is what is drawn: the rows on the page at the click, not every document the filter lets through.
+	const bulkSelectAllVisible = () => {
+		const drawn = drawnSelectable(visibleSelectablePaths(), rowsDrawn());
 		setSelectedPaths((prev) => {
 			const next = new Set(prev);
-			for (const p of visibleSelectablePaths()) next.add(p);
+			for (const p of drawn) next.add(p);
 			return next;
 		});
+	};
 	const bulkClearSelection = () => {
 		setSelectedPaths(new Set<string>());
 		anchorPath = null;
@@ -2119,12 +2165,15 @@ export function Docs() {
 					}}
 				>
 					<div style={{ display: "flex", "align-items": "center", "justify-content": "space-between", gap: "var(--space-2)", "flex-wrap": "wrap" }}>
-						<span style={{ "font-weight": "500", color: "var(--fg)" }} title="Hold Ctrl/Cmd+Click to toggle docs, Shift+Click for a range, or Escape to clear">
-							{selectedDocs().length} selected
+						<span
+							style={{ "font-weight": "500", color: "var(--fg)" }}
+							title={`Hold Ctrl/Cmd+Click to toggle docs, Shift+Click for a range, or Escape to clear. ${NOT_IN_BULK}${selectedNotShown() ? " A selected document that is not shown (its list or its ticket is folded) is still changed by the actions below." : ""}`}
+						>
+							{selectionSaid(selectedDocs().length, selectedNotShown())}
 						</span>
 						<div style={{ display: "flex", "align-items": "center", gap: "4px" }}>
-							<Show when={visibleSelectablePaths().length > 0 && !allVisibleSelected()}>
-								<button type="button" class="docs-stale-btn" onClick={bulkSelectAllVisible}>
+							<Show when={drawnSelectablePaths().length > 0 && !allVisibleSelected()}>
+								<button type="button" class="docs-stale-btn" title={`Select every document whose row is shown below: not those inside a folded list or under a folded ticket. ${NOT_IN_BULK}`} onClick={bulkSelectAllVisible}>
 									Select all visible
 								</button>
 							</Show>

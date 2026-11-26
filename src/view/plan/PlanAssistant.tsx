@@ -14,7 +14,7 @@ import { documents, openFile, state } from "../state";
 import { baseName, joinPath } from "../../shared/paths";
 import { buildDriftAgentDraft, buildPlanAgentDraft, buildTestsAgentDraft, decisionsOf, describeSuggestion, planHashMatches, planTargetsOf, testsHashMatches, type Decision } from "./assist";
 import { planTestsOf, type Plan, type PlanNode, type PlanTestInput, type PlanTestPatch } from "./model";
-import { modelCostNote, scriptOf, unbuiltNodes } from "./build";
+import { modelCostNote, unbuiltNodes, unitsToReview } from "./build";
 import { anyChanges, builtOf, chartChanges, journeyDraft, pathSummary, planPaths, type BuiltUnit, type Drift, type PlanPath } from "./built";
 import { CODE_INDICATOR_WORDS, type CodeIndicator } from "./chart";
 import { recheckPlan } from "./check";
@@ -188,7 +188,8 @@ export function PlanAssistant(props: {
 	const discard = async () => {
 		const r = run();
 		if (!r) return;
-		const done = r.units.filter((u) => u.status === "passed" && !r.accepted.includes(scriptOf(u, props.plan))).length;
+		// The units that passed and have not been given to their script: a script can be accepted and still have one waiting.
+		const done = unitsToReview(r, props.plan).length;
 		const spent = `${r.tokens.toLocaleString()} tokens${r.cost ? `, cost ${r.cost.toFixed(2)}` : ""}`;
 		const what = done ? `${done} built ${done === 1 ? "unit" : "units"} not yet accepted (${spent})` : `its progress (${spent})`;
 		if ((await choose(`Discard this build? It throws away ${what}, and that cannot be brought back. Code already accepted stays.`, [DISCARD], { danger: DISCARD })) === DISCARD) discardRun(props.path);

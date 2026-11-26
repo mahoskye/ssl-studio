@@ -2590,6 +2590,8 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		apply((value.trim() || field === "title" ? { ...rest, [field]: value.trim() } : rest) as Plan);
 	};
 	const setTargets = (value: string) => {
+		// As the plan's other fields: the Target scripts field can hand its text over a moment after it is taken away.
+		if (unmounted) return;
 		const p = plan();
 		if (!p) return;
 		const { targets: _old, ...rest } = p;

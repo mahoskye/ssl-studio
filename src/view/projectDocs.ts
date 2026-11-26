@@ -5,8 +5,8 @@
 // be undone, and a file that exists is never written over.
 import DOMPurify from "dompurify";
 import { marked } from "marked";
-import { CATALOG_FILE, catalogBlock, catalogEndMissing, catalogList, catalogStale, hasCatalogPlace, withCatalog, type CatalogItem } from "../shared/catalog";
-import { addCsvColumn, csvCell, csvDelimiterForPath, csvRow, parseCsv } from "../shared/csv";
+import { CATALOG_FILE, catalogBlock, catalogEndMissing, catalogList, catalogStale, catalogUnderOpenFence, hasCatalogPlace, withCatalog, type CatalogItem } from "../shared/catalog";
+import { addCsvColumn, csvCell, csvDelimiterForPath, csvRow, parseCsv, type Table } from "../shared/csv";
 import { localDay } from "../shared/dates";
 import { docChecks } from "../shared/docChecks";
 import {
@@ -49,6 +49,7 @@ import {
 	addToFrontMatterList,
 	bodyOffset,
 	frontMatter,
+	frontMatterRefusal,
 	many,
 	one,
 	quoteYamlScalar,
@@ -69,9 +70,10 @@ import {
 	sqlTablesToMarkdown,
 } from "../shared/sqlSchema";
 import { importSummary, ticketsFromJson, ticketsFromTable, type Imported, type ImportedTicket } from "../shared/ticketImport";
+import { parseTemplateFile } from "../shared/templater";
 import { manifestSummary, mergeManifest } from "../shared/manifest";
 import { buildDocNameIndex, docByName, lookupInIndex, namedLink, namesToFollow, withNames } from "../shared/namedLinks";
-import { baseName, dirName, isInside, joinPath, relativePath, relativeTo, resolvePath } from "../shared/paths";
+import { baseName, dirName, isInside, joinPath, plainFileError, relativePath, relativeTo, resolvePath } from "../shared/paths";
 import { activeEditor } from "./editor/EditorGroup";
 import { activeLiveEditor } from "./editor/liveBridge";
 import {
@@ -172,6 +174,21 @@ async function current(path: string): Promise<string | null> {
 }
 
 /**
+ * Why `current` had no text for a file, as the end of a sentence about it ("Could not update Due-dates.md: ..."):
+ * it is not text, or it could not be read and this is what the reading said. A change asked of such a document
+ * said nothing at all, or counted it among the documents that "already had" the value.
+ */
+export async function whyNotRead(path: string): Promise<string> {
+	const NOT_TEXT = "it is not a text file.";
+	if (documents.get(canonical(path))?.binary) return NOT_TEXT;
+	return backend.read(path).then(
+		(res) => (res.binary ? NOT_TEXT : "it could not be read."),
+		// What the file system said, as a person would say it: "docs/specs/Due-dates.md is not there."
+		(e: any) => `it could not be read. ${plainFileError(String(e?.message ?? e), root())}`,
+	);
+}
+
+/**
  * Writes a file's text: through the editor when it is open there, where the
  * change can be undone. An open file that had nothing unsaved is saved with
  * the change, so what the folder says and what the editor shows stay the
@@ -223,7 +240,14 @@ async function writeCatalog(
 	// In a folder that may do without a catalog, a file of that name with no place for the list is a person's own.
 	if (before !== null && optional && !hasCatalogPlace(before)) return false;
 	if (before !== null && !catalogStale(before, items)) return false;
-	await put(path, withCatalog(before ?? catalogTemplate(area), items), before !== null);
+	const written = withCatalog(before ?? catalogTemplate(area), items);
+	await put(path, written, before !== null);
+	// A list written under a code fence that is never closed is code to whatever shows the catalog, until the fence
+	// is closed: the person is told which line opens it.
+	const openFence = catalogUnderOpenFence(written);
+	if (openFence) {
+		notify(`${relativeTo(root(), path)} has a code fence that is never closed (it opens on line ${openFence}), and the catalog's list is under it: the list is written, and is shown as code until the fence is closed.`);
+	}
 	// With the line that ends the list gone, the old list cannot be told from the person's words under it: all of it
 	// is kept, and the person is told, since a line of the old list may now stand under the new one.
 	if (before !== null && catalogEndMissing(before)) {
@@ -243,20 +267,28 @@ export async function catalogsKeptFor(_paths: readonly string[]) {
 	// Intentionally no-op: treeVersion refresh marks affected catalogs out of date in Docs & Health.
 }
 
-/** Makes a document from its template and opens it as text. A file already there is opened, not replaced. */
-async function start(path: string, text: string, _area?: CatalogArea) {
+/**
+ * Makes a document from its template and opens it as text. A file already there is opened, not replaced. True when
+ * the document was made with that text: a caller that goes on to say what it wrote asks, since a file that could
+ * not be made (one that is there and cannot be read as text, a folder that cannot be written) is said here and
+ * nothing more comes of it.
+ */
+async function start(path: string, text: string, _area?: CatalogArea): Promise<boolean> {
 	if ((await current(path)) !== null) {
 		notify(`${relativeTo(root(), path)} is already there: opened.`);
-		return openFile(path);
+		await openFile(path);
+		return false;
 	}
 	try {
 		await backend.create(path, "file");
 		await backend.write(path, text);
 	} catch (e: any) {
-		return notify(String(e?.message ?? e), "error");
+		notify(String(e?.message ?? e), "error");
+		return false;
 	}
 	setState((s) => { s.treeVersion += 1; });
 	await openFile(path);
+	return true;
 }
 
 /** The ticket the open document is, or is for, as it stands in the editor: a document's front matter, or a plan's own. */
@@ -532,6 +564,7 @@ export async function importTickets() {
 	const counts = { made: 0, updated: 0, same: 0, skipped: read.skipped, pulls: read.pulls };
 	let failed = 0;
 	const unset = new Set<string>();
+	const unclosed = new Set<string>();
 	for (const ticket of read.tickets) {
 		if (!state.workspace || root() !== startRoot) break;
 		const dest = destPath(ticket);
@@ -562,7 +595,12 @@ export async function importTickets() {
 			let now = was;
 			// A field the file lays out over several lines is left as the person wrote it, and named when the import is done.
 			const kept = (field: string, next: string | null) => {
-				if (next === null) unset.add(`${ticket.key} ${field}`);
+				// A file whose front matter opens and is never closed takes no value at all: it is named once, by its
+				// ticket, and not field by field as writing each value over several lines.
+				if (next === null) {
+					if (frontMatter(now).lines) unset.add(`${ticket.key} ${field}`);
+					else unclosed.add(ticket.key);
+				}
 				return next ?? now;
 			};
 			for (const [k, value] of [
@@ -613,6 +651,10 @@ export async function importTickets() {
 	if (unset.size) {
 		const named = [...unset];
 		notify(`Not updated, because the file writes the value over several lines: ${named.slice(0, 6).join(", ")}${named.length > 6 ? ` and ${named.length - 6} more` : ""}. Change ${named.length === 1 ? "it" : "them"} in the text.`, "error");
+	}
+	if (unclosed.size) {
+		const named = [...unclosed];
+		notify(`Not updated, because the file's front matter is not closed (no closing ---): ${named.slice(0, 6).join(", ")}${named.length > 6 ? ` and ${named.length - 6} more` : ""}. Close it in the text.`, "error");
 	}
 	if (counts.made === 1 && read.tickets.length === 1) await openFile(destPath(read.tickets[0]!));
 }
@@ -688,9 +730,7 @@ export async function newKnowledge(
 		const language = guessed ?? (await choose("A snippet of what?", ["SQL", "SSL"]));
 		if (!language) return;
 		const lang = language === "SQL" ? "sql" : "ssl";
-		const header = snippetTemplate({ title, language: lang });
-		const body = code?.hasExcerpt ? `${header.replace(/\n*$/, "\n\n")}${code.text}\n` : header;
-		return start(joinPath(folder, `${slug(title)}.${lang}`), body, "knowledge");
+		return start(joinPath(folder, `${slug(title)}.${lang}`), newSnippetText(title, lang, code?.hasExcerpt ? code.text : null), "knowledge");
 	}
 	if (kind === "reference") return start(joinPath(folder, `${slug(title)}.md`), referenceTemplate({ title }), "knowledge");
 	if (kind === "prompts") return start(joinPath(folder, `${slug(title)}.md`), promptTemplate({ title }), "knowledge");
@@ -872,9 +912,12 @@ export async function setStatus(path: string, status: string) {
 	// Front matter is a Markdown document's: a query or a table kept in the same folder has none to set.
 	if (!isMarkdown(path)) return notify("Only a Markdown document has a status to set.", "error");
 	const before = await current(path);
-	if (before === null) return;
+	// Said, like a refused edit below: the one document of a selection goes through here, and nothing was said of it.
+	if (before === null) return notify(`Could not set the status of ${baseName(path)}: ${await whyNotRead(path)}`, "error");
 	let after = withFrontMatter(before, "status", status);
-	if (after === null) return notify("The status could not be set here: it is written over several lines. Change it in the text.", "error");
+	// The writer gives null for two things, and the notice says which (`frontMatterRefusal`): this one and its like
+	// below said "written over several lines" of a document whose front matter opens and is never closed.
+	if (after === null) return notify(`Could not set the status of ${baseName(path)}: ${frontMatterRefusal(before, "status")}`, "error");
 	// A question that is answered says when, once: the day is part of the answer.
 	const question = docs().some((d) => d.group === "knowledge" && d.kind === "questions" && canonical(d.path) === canonical(path));
 	if (question && toneOf(status) === "done" && !one(frontMatter(after).values.answered)) {
@@ -951,15 +994,15 @@ export async function setStatus(path: string, status: string) {
 			let linked = false;
 			try {
 				const oldText = await current(path);
-				// A side whose field is written over several lines is not edited from here: the notice names the
-				// side that was left, and does not say linked for it.
+				// A side whose field is written over several lines, or whose front matter is never closed, is not edited
+				// from here: the notice names the side that was left and why, and does not say linked for it.
 				const left: string[] = [];
 				if (oldText !== null) {
 					const curBy = many(frontMatter(oldText).values["superseded-by"]);
 					const updatedOld = curBy.length
 						? addToFrontMatterList(oldText, "superseded-by", newStem)
 						: withFrontMatter(oldText, "superseded-by", newStem);
-					if (updatedOld === null) left.push(`superseded-by: in ${baseName(path)}`);
+					if (updatedOld === null) left.push(`${baseName(path)}: ${frontMatterRefusal(oldText, "superseded-by")}`);
 					else if (updatedOld !== oldText) {
 						await put(path, updatedOld, true);
 						linked = true;
@@ -971,14 +1014,14 @@ export async function setStatus(path: string, status: string) {
 					const updatedTarget = curSup.length
 						? addToFrontMatterList(targetText, "supersedes", oldStem)
 						: withFrontMatter(targetText, "supersedes", oldStem);
-					if (updatedTarget === null) left.push(`supersedes: in ${baseName(targetDecision.path)}`);
+					if (updatedTarget === null) left.push(`${baseName(targetDecision.path)}: ${frontMatterRefusal(targetText, "supersedes")}`);
 					else if (updatedTarget !== targetText) {
 						await put(targetDecision.path, updatedTarget, true);
 						linked = true;
 					}
 				}
 				if (linked) setState((s) => { s.treeVersion += 1; });
-				if (left.length) notify(`Could not write ${left.join(" and ")}: ${left.length === 1 ? "it is" : "they are"} written over several lines. Add the link in the text.`, "error");
+				if (left.length) notify(`Could not write the link in ${left.join(" Nor in ")}`, "error");
 				else notify(`Linked ${newStem} as superseding ${oldStem}.`);
 			} catch (e: any) {
 				if (linked) setState((s) => { s.treeVersion += 1; });
@@ -1002,7 +1045,7 @@ export async function setStatus(path: string, status: string) {
 					const oldText = await current(path);
 					if (oldText !== null) {
 						const updatedOld = withFrontMatter(oldText, "superseded-by", newStem);
-						if (updatedOld === null) notify(`Could not write superseded-by: in ${baseName(path)}: it is written over several lines. Add ${newStem} there in the text.`, "error");
+						if (updatedOld === null) notify(`Could not write superseded-by: ${newStem} in ${baseName(path)}: ${frontMatterRefusal(oldText, "superseded-by")}`, "error");
 						else if (updatedOld !== oldText) await put(path, updatedOld, true);
 					}
 				} catch (e: any) {
@@ -2138,6 +2181,11 @@ export async function updateManifest() {
 				[MARK, KEEP],
 			);
 			if (!picked) return;
+			// The question was asked of the manifest as it was read before it, and its answer is for that text. What
+			// is written is made from that text too, so it is written only where the manifest still is that text: a
+			// manifest changed while the question stood open (in the editor, or on disk) was written over with the
+			// rows it had before, and what had been changed in it was gone.
+			if ((await current(path)) !== before) return notify(`${own} was changed while the question was open, so nothing was written to it. Update the file manifest again.`, "error");
 			if (picked === MARK) change = mergeManifest(before, files, { markChangedAfterDone: true });
 		}
 		if (before !== change.text) await put(path, change.text, before !== null);
@@ -2256,9 +2304,10 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 				const before = await current(target.path);
 				if (before === null) return;
 				const next = withFrontMatter(before, "parent", key);
-				// Null says the field is laid out over several lines and was left alone: the link is not said to be made.
+				// Null says the field is laid out over several lines, or the front matter is never closed, and the file was
+				// left alone: the link is not said to be made, and the notice says which of the two it is.
 				if (next === null) {
-					notify(`Could not set parent: automatically in ${baseName(target.path)} — add parent: ${key} directly in its frontmatter.`, "error");
+					notify(`Could not set parent: ${key} in ${baseName(target.path)}: ${frontMatterRefusal(before, "parent")}`, "error");
 					return;
 				}
 				if (next !== before) await put(target.path, next, true);
@@ -2271,7 +2320,7 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 			if (before === null) return;
 			const next = addToFrontMatterList(before, field, otherKey);
 			if (next === null) {
-				notify(`Could not update ${field}: automatically in ${baseName(ticketPath)} — add ${otherKey} directly in YAML.`, "error");
+				notify(`Could not add ${otherKey} to ${field}: in ${baseName(ticketPath)}: ${frontMatterRefusal(before, field)}`, "error");
 				return;
 			}
 			if (next !== before) await put(ticketPath, next, true);
@@ -2286,7 +2335,7 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 			const entry = rel(target.path);
 			const next = addToFrontMatterList(before, field, entry);
 			if (next === null) {
-				notify(`Could not update ${field}: automatically in ${baseName(ticketPath)} — add ${entry} directly in YAML.`, "error");
+				notify(`Could not add ${entry} to ${field}: in ${baseName(ticketPath)}: ${frontMatterRefusal(before, field)}`, "error");
 				return;
 			}
 			if (next !== before) await put(ticketPath, next, true);
@@ -2302,7 +2351,10 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 		const existingSingle = many(fm.values.ticket);
 		const existingMulti = many(fm.values.tickets);
 		let next: string | null = before;
+		// The field the writer was at when it refused, for the notice.
+		let field = "ticket";
 		if (existingMulti.length) {
+			field = "tickets";
 			next = addToFrontMatterList(before, "tickets", key);
 		} else if (existingSingle.length) {
 			const merged = [...new Set([...existingSingle, key])];
@@ -2310,12 +2362,13 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 			let cleared: string | null = before;
 			for (const prev of existingSingle) cleared = cleared === null ? null : removeFromFrontMatterList(cleared, "ticket", prev);
 			next = cleared;
+			if (next !== null) field = "tickets";
 			for (const t of merged) next = next === null ? null : addToFrontMatterList(next, "tickets", t);
 		} else {
 			next = withFrontMatter(before, "ticket", key);
 		}
 		if (next === null) {
-			notify(`Could not update ticket: automatically in ${baseName(target.path)} — add ticket: ${key} directly in its frontmatter.`, "error");
+			notify(`Could not link ${baseName(target.path)} to ${key}: ${frontMatterRefusal(before, field)}`, "error");
 			return;
 		}
 		if (next !== before) await put(target.path, next, true);
@@ -2445,17 +2498,22 @@ export async function linkNonTicketToTicket(docPath: string): Promise<void> {
 	const freshSingle = many(freshFm.values.ticket);
 	const freshMulti = many(freshFm.values.tickets);
 	let next: string | null = fresh;
-	if (freshMulti.length) next = addToFrontMatterList(fresh, "tickets", ticket.ticket);
-	else if (freshSingle.length) {
+	// The field the writer was at when it refused, for the notice.
+	let field = "ticket";
+	if (freshMulti.length) {
+		field = "tickets";
+		next = addToFrontMatterList(fresh, "tickets", ticket.ticket);
+	} else if (freshSingle.length) {
 		const merged = [...new Set([...freshSingle, ticket.ticket])];
 		// One step that cannot be made stops the rest: `ticket:` taken out with `tickets:` not written would lose the link there was.
 		let cleared: string | null = fresh;
 		for (const prev of freshSingle) cleared = cleared === null ? null : removeFromFrontMatterList(cleared, "ticket", prev);
 		next = cleared;
+		if (next !== null) field = "tickets";
 		for (const t of merged) next = next === null ? null : addToFrontMatterList(next, "tickets", t);
 	} else next = withFrontMatter(fresh, "ticket", ticket.ticket);
 	if (next === null) {
-		notify(`Could not update ticket: automatically in ${baseName(docPath)} — add ticket: ${ticket.ticket} directly in its frontmatter.`, "error");
+		notify(`Could not link ${baseName(docPath)} to ${ticket.ticket}: ${frontMatterRefusal(fresh, field)}`, "error");
 		return;
 	}
 	if (next !== fresh) {
@@ -2470,16 +2528,32 @@ export async function linkNonTicketToTicket(docPath: string): Promise<void> {
 }
 
 /**
- * A registry's text with one more row, for a ticket: `name` in its first column, the ticket's key in its ticket
- * column, "found" as its status. With `addTicketColumn`, a registry that has no ticket column is given one first.
+ * The column of a registry that a new row's name goes in: its first that is neither the tickets' nor the status;
+ * -1 when it has no such column. The name went in the first column whatever that was: in a registry that opens
+ * with its ticket column it was written there, where the key belongs, and the new row named no ticket at all.
+ */
+export function registryNameColumn(table: Pick<Table, "header">): number {
+	return table.header.findIndex((h) => !["ticket", "tickets", "status"].includes(h.text.trim().toLowerCase()));
+}
+
+/**
+ * A registry's text with one more row, for a ticket: `name` in its name column (`registryNameColumn`), the ticket's
+ * key in its ticket column, "found" as its status. With `addTicketColumn`, a registry that has no ticket column is
+ * given one first.
  * Both are edits of the text where they land (ADR 0002): the column goes on the end of each row's own line, and
  * the row on the end of the file. The column was once added by printing the whole table again from its cells:
  * every value was requoted, the blank lines went, and in a row with fewer or more cells than the header the new
  * empty cell (or the row's own last one) came to stand under the wrong column. Null when there is no header row.
  */
 export function registryTextWithRow(text: string, path: string, name: string, key: string, addTicketColumn: boolean): string | null {
-	let table = parseCsv(text, { prefer: csvDelimiterForPath(path) });
+	const named = csvDelimiterForPath(path);
+	let table = parseCsv(text, { prefer: named });
 	if (!table.header.length) return null;
+	// A registry of one column has no delimiter in it to read, and the reading then says a comma. Written with that,
+	// a .tsv of one column got its ticket column and its row with commas (`name,ticket`), and was still a file of
+	// one column to everything that reads a .tsv by its tabs. Where the text says nothing the file's name decides:
+	// tabs for a .tsv, and for any other name the comma as before.
+	if (named && table.header.length === 1 && table.delimiter !== named) table = parseCsv(text, { delimiter: named });
 	let next = text;
 	if (addTicketColumn && ticketColumn(table) < 0) {
 		const widened = addCsvColumn(text, table, "ticket");
@@ -2488,9 +2562,10 @@ export function registryTextWithRow(text: string, path: string, name: string, ke
 		table = parseCsv(next, { delimiter: table.delimiter });
 	}
 	const nl = text.includes("\r\n") ? "\r\n" : "\n";
+	const nameAt = registryNameColumn(table);
 	const row = table.header.map((h, idx) => {
 		const col = h.text.trim().toLowerCase();
-		if (idx === 0) return name;
+		if (idx === nameAt) return name;
 		if (col === "ticket" || col === "tickets") return key;
 		if (col === "status") return "found";
 		return "";
@@ -2535,10 +2610,17 @@ export async function addRegistryRowForTicket(key: string, initialItem?: string)
 		if (!state.workspace || root() !== startRoot) return;
 		addTicketCol = true;
 	}
-	const firstCol = table.header[0]!.text.trim() || "item";
-	const name = (await ask(`New ${firstCol} for ${key} in ${reg.name}`, initialItem ?? ""))?.trim();
-	if (!name) return;
-	if (!state.workspace || root() !== startRoot) return;
+	// The name is asked for by the column it goes in. A registry of tickets and nothing else has no such column: its
+	// new row is the ticket's key, and there is nothing to ask.
+	const nameAt = registryNameColumn(table);
+	let name = "";
+	if (nameAt >= 0) {
+		const nameCol = table.header[nameAt]!.text.trim() || "item";
+		const typed = (await ask(`New ${nameCol} for ${key} in ${reg.name}`, initialItem ?? ""))?.trim();
+		if (!typed) return;
+		name = typed;
+		if (!state.workspace || root() !== startRoot) return;
+	}
 	// Re-read current CSV after user prompts so edits made meanwhile are preserved.
 	const freshText = await current(reg.path);
 	if (freshText === null) return;
@@ -2547,7 +2629,7 @@ export async function addRegistryRowForTicket(key: string, initialItem?: string)
 	try {
 		await put(reg.path, nextText, true);
 		setState((s) => { s.treeVersion += 1; });
-		notify(`Added “${name}” to ${reg.name} for ${key}.`);
+		notify(name ? `Added “${name}” to ${reg.name} for ${key}.` : `Added a row for ${key} to ${reg.name}.`);
 		await openFile(reg.path);
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
@@ -3185,6 +3267,41 @@ export function snippetHolding(template: string, code: string): string {
 	return `${opening.join("\n").replace(/\s*$/, "").replace(/\n;$/, ";")}\n\n${code}\n`;
 }
 
+/** Whether a text opens with the comment a template file says what it is by, as the templater reads it (`<!-- template: name="…" folder="…" -->`). */
+const hasTemplateHeader = (text: string) => parseTemplateFile(text, "", "", "").content.length < text.length;
+
+/**
+ * Whether a change to a document's text takes a template's header comment from the top of the file, where the
+ * templater looks for it. A template that loses its header there loses its name, its folder and its file name, and
+ * is listed under "Custom"; a note made from it starts with the comment.
+ */
+export const hidesTemplateHeader = (before: string, after: string) => hasTemplateHeader(before) && !hasTemplateHeader(after);
+
+/**
+ * A document that has no front matter, with a block that holds its title: what the Inspector's YAML button starts
+ * the raw box from. The block goes where a first property goes (`withFrontMatter`): at the top, or, in a template
+ * file, under its header comment, where the template's own text begins. The button wrote the block above that
+ * comment, which hid the header from the templater. Null when the block cannot be put where both readers find
+ * what they look for: front matter that is opened and never closed, or a header the templater reads and the front
+ * matter's reader does not take for one (written over several lines, or under a blank line).
+ */
+export function withTitleFrontMatter(text: string, title: string): string | null {
+	const next = withFrontMatter(text, "title", title);
+	return next === null || hidesTemplateHeader(text, next) ? null : next;
+}
+
+/**
+ * A new snippet's text: the template as it is, to be written, or with the code selected in the editor where the
+ * template's placeholder stands. Started from selected code, the snippet was the whole template with the code
+ * under it: the line that asks what the snippet is for stayed, and an SQL snippet ran the template's `SELECT 1;`
+ * before the code it was made to keep. Saving a reply's code as a snippet had the same and was mended; this is
+ * its twin, and both now ask `snippetHolding`.
+ */
+export function newSnippetText(title: string, language: "sql" | "ssl", selected: string | null): string {
+	const template = snippetTemplate({ title, language });
+	return selected === null ? template : snippetHolding(template, selected);
+}
+
 /** Saves a raw code snippet (e.g. from an Agent reply or Markdown code block) into `docs/knowledge/snippets/`. */
 export async function saveAsSnippet(code: string, langHint?: string): Promise<string | null> {
 	if (!ready()) return null;
@@ -3709,7 +3826,7 @@ export async function linkSchemaDocToSql(mdPath: string): Promise<void> {
 	if (freshCur === null) return;
 	const relSql = relativeTo(startRoot, chosenPath).split("\\").join("/");
 	const next = withFrontMatter(freshCur, "source", relSql);
-	if (next === null) return notify(`Could not set source: in ${baseName(mdPath)}: it is written over several lines. Change it in the text.`, "error");
+	if (next === null) return notify(`Could not set source: in ${baseName(mdPath)}: ${frontMatterRefusal(freshCur, "source")}`, "error");
 	if (next === freshCur) return;
 	try {
 		await put(mdPath, next, true);
@@ -5206,8 +5323,9 @@ export async function closeoutTicket(ticketPath: string, key: string): Promise<v
 			const bullet = `- ${today()} — ${summaryLine}`;
 			if (existingState === null) {
 				const fresh = `${stateTemplate(state.project!.name, today()).trimEnd()}\n\n## Completed\n\n${bullet}\n`;
-				await start(statePath, fresh);
-				stateUpdated = true;
+				// Only a record that was made is one. The close-out said "(recorded in STATE.md)" when the file could not
+				// be made (one of that name that cannot be read as text is there), under the notice that said so.
+				stateUpdated = await start(statePath, fresh);
 			} else {
 				const eol = existingState.includes("\r\n") ? "\r\n" : "\n";
 				const headingRe = /^(##\s+(?:Completed|Recent(?:ly)?\s+(?:completed|done|milestones)|Done|History)[^\r\n]*\r?\n+)/im;
@@ -5266,8 +5384,11 @@ export async function closeoutTicket(ticketPath: string, key: string): Promise<v
 				: readmeUpdated
 					? " (updated README.md)"
 					: "";
+	// A record that was asked for and not made is said here too, where the close-out is summed up: why is in the
+	// notice raised when it failed.
+	const unrecorded = picked !== DONE_ONLY && !stateUpdated ? ` ${STATE_FILE} was not written.` : "";
 	notify(
-		`Closed out ${key}${detail}.`,
+		`Closed out ${key}${detail}.${unrecorded}`,
 		"info",
 		hasStale ? { label: "Update catalogs", run: () => void updateCatalogs() } : undefined,
 	);

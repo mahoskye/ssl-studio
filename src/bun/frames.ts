@@ -7,20 +7,27 @@ export function frame(body: string): string {
 	return `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
 }
 
+const LENGTH_NAME = "content-length:";
+
+/**
+ * The length a block of headers gives the body after it, or null where it gives none that can be trusted: no
+ * `Content-Length` line in it, one whose value is not a plain number or is more than a message may be, or two
+ * that disagree. A value that could not be read used to be passed over as if its line were not there, so a block
+ * saying `-5` and then `7`, or `5, 7` and then `7`, was read as seven bytes. Two lines that agree are one length.
+ */
 function parseContentLength(header: string): number | null {
 	let length: number | null = null;
 	for (const line of header.split("\r\n")) {
-		const match = /^content-length:[ \t]*(\d+)[ \t]*$/i.exec(line);
-		if (!match) continue;
-		const value = Number(match[1]);
-		if (!Number.isSafeInteger(value) || value < 0 || value > MAX_MESSAGE_BYTES) return null;
+		if (line.slice(0, LENGTH_NAME.length).toLowerCase() !== LENGTH_NAME) continue;
+		const digits = /^[ \t]*(\d+)[ \t]*$/.exec(line.slice(LENGTH_NAME.length));
+		if (!digits) return null;
+		const value = Number(digits[1]);
+		if (!Number.isSafeInteger(value) || value > MAX_MESSAGE_BYTES) return null;
 		if (length !== null && length !== value) return null;
 		length = value;
 	}
 	return length;
 }
-
-const LENGTH_NAME = "content-length:";
 
 /**
  * Where the next `Content-Length:` header starts at or after `from`, in any case, or -1. Right after a hyphen it
@@ -62,9 +69,15 @@ export function createFrameReader(onMessage: (body: string) => void) {
 	 * there is nothing to read until more arrives. Dropping only through the end of the bad headers is not enough:
 	 * the body they announced is still to come, it ends without a line break, and the next frame's header then
 	 * reads as `{...}Content-Length: 8`, which is no header either. Every message after one bad header was lost.
+	 *
+	 * `refusedEnd` is where the headers just refused end. A `Content-Length` line of their own is no place a frame
+	 * starts: of two lines that disagree (`Content-Length: 5`, then `Content-Length: 7`) the second was taken for
+	 * the next frame's, and seven bytes were read as a message by a length the line before it contradicts. One
+	 * that begins in the middle of a line still is such a place: bytes that were no frame, and then a frame's own.
 	 */
-	const resync = (from: number): boolean => {
-		const next = nextLengthHeader(buffer, from);
+	const resync = (from: number, refusedEnd = 0): boolean => {
+		let next = nextLengthHeader(buffer, from);
+		while (next >= 0 && next < refusedEnd && buffer[next - 2] === 0x0d && buffer[next - 1] === 0x0a) next = nextLengthHeader(buffer, next + 1);
 		if (next >= 0) {
 			advance(next);
 			return true;
@@ -92,8 +105,9 @@ export function createFrameReader(onMessage: (body: string) => void) {
 			}
 			const length = parseContentLength(buffer.subarray(0, headerEnd).toString("latin1"));
 			if (length === null) {
-				// Not headers we understand, or a length too large to hold: read on from the next place a frame can start.
-				if (!resync(1)) return;
+				// Not headers we understand, a length too large to hold, or two lengths: read on from the next place a
+				// frame can start, which is none of these headers' own lines.
+				if (!resync(1, headerEnd)) return;
 				continue;
 			}
 			const start = headerEnd + 4;

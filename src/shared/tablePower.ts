@@ -4,7 +4,8 @@
 // matching, measured virtual-window math, auto-fit row sampling, and unified
 // URL / ticket / schema / inline-issue classification. No DOM, Solid, or Monaco.
 import { compareCellText } from "./csv";
-import { isInside, relativeTo } from "./paths";
+import { isInside, plainFileError, relativeTo } from "./paths";
+import { codeCheckSummary } from "./registryCheck";
 import { keyOf } from "./registryTickets";
 
 // --- Multi-column sorting ----------------------------------------------------
@@ -310,6 +311,24 @@ export function serializeTableViewStateStore(store: TableViewStateStore): string
 	return JSON.stringify(store);
 }
 
+// --- The Largest of Many -----------------------------------------------------
+
+/**
+ * The largest of what `of` gives for the items, and `least` when there are none. A loop, where
+ * `Math.max(...items.map(of))` was written: a spread hands every item to the call as an argument of its own, and
+ * an engine has room for only so many (V8 for about 125,000, JavaScriptCore for under a million). A paste of
+ * 130,000 rows landed, and "Maximum call stack size exceeded" was thrown before its notice was said. Nothing here
+ * spreads rows, cells or seeds into a call.
+ */
+export function greatest<T>(items: Iterable<T>, of: (item: T) => number, least = -Infinity): number {
+	let most = least;
+	for (const item of items) {
+		const n = of(item);
+		if (n > most) most = n;
+	}
+	return most;
+}
+
 // --- Excel Drag-Fill Smart Series Generator ----------------------------------
 
 const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -415,6 +434,54 @@ function writtenDates(seeds: readonly string[], dayFirst: boolean | undefined): 
 	return { days, format };
 }
 
+/**
+ * A day of a month as a day index. The month is counted from year 0 (`year * 12 + month - 1`), so that a step in
+ * months is a plain sum; day 0 is the last day of the month before.
+ */
+function dayInMonth(month: number, day: number): number {
+	const dt = new Date(0);
+	// Set as a whole date, not through `Date.UTC`: that takes the years 0 to 99 for 1900 to 1999.
+	dt.setUTCFullYear(0, month, day);
+	return Math.round(dt.getTime() / MS_PER_DAY);
+}
+
+/**
+ * The `count` days that follow a series of seed days (that come before it, for `reverse`), or null when the seeds
+ * have no one step.
+ *
+ * Seeds that are whole months apart go on by months, as in Excel and Sheets: all on the same day of the month
+ * (`01-15`, `02-15` -> `03-15`; a month too short for the day gives its last day, and the day is back in the
+ * month after), or all on the last day of their month (`01-31`, `02-28` -> `03-31`, `04-30`). Twelve months are a
+ * year: `2025-06-01`, `2026-06-01` -> `2027-06-01`. The step used to be the number of days between the first two
+ * seeds whatever they were, so a monthly series drifted (`01-01`, `02-01` -> `03-04`, `04-04`, `05-05`) and a
+ * yearly one lost a day at each leap year. Seeds that are not whole months apart keep a constant step in days
+ * (`11-01`, `11-08` -> `11-15`).
+ */
+function daysAfter(days: readonly number[], count: number, reverse: boolean): number[] | null {
+	const at = days.map((d) => {
+		const dt = new Date(d * MS_PER_DAY);
+		return { month: dt.getUTCFullYear() * 12 + dt.getUTCMonth(), day: dt.getUTCDate() };
+	});
+	const months = at[1]!.month - at[0]!.month;
+	if (months !== 0 && at.every((a, i) => i === 0 || a.month - at[i - 1]!.month === months)) {
+		const lastOf = (month: number) => new Date(dayInMonth(month + 1, 0) * MS_PER_DAY).getUTCDate();
+		const sameDay = at.every((a) => a.day === at[0]!.day);
+		if (sameDay || at.every((a) => a.day === lastOf(a.month))) {
+			const anchor = (reverse ? at[0]! : at[at.length - 1]!).month;
+			const delta = reverse ? -months : months;
+			return Array.from({ length: count }, (_, i) => {
+				const month = anchor + delta * (i + 1);
+				return dayInMonth(month, sameDay ? Math.min(at[0]!.day, lastOf(month)) : lastOf(month));
+			});
+		}
+	}
+	const step = days[1]! - days[0]!;
+	if (!days.every((d, i) => i === 0 || d - days[i - 1]! === step)) return null;
+	const anchor = reverse ? days[0]! : days[days.length - 1]!;
+	const delta = reverse ? -step : step;
+	return Array.from({ length: count }, (_, i) => anchor + delta * (i + 1));
+}
+
 function formatPaddedInt(n: number, padWidth: number): string {
 	if (padWidth <= 1) return String(n);
 	if (n < 0) return `-${String(Math.abs(n)).padStart(padWidth, "0")}`;
@@ -447,6 +514,8 @@ function parsePrefixedNumber(raw: string): { prefix: string; num: number; padWid
  * - ISO `YYYY-MM-DD` dates (`2026-11-23` -> `2026-11-24, 2026-11-25`; weekly `2026-11-01, 2026-11-08` -> `2026-11-15`)
  * - Dates written with slashes, or with dashes and the year last, day by day in the way they are written
  *   (`2026/11/30` -> `2026/12/01`; `28/02/2026` -> `01/03/2026`); `options.dayFirst` reads `01/02/2026`
+ * - Two or more dates of either kind that are whole months apart go on by months, not by the days between them
+ *   (`2026-01-01, 2026-02-01` -> `2026-03-01`; `2026-01-31, 2026-02-28` -> `2026-03-31`): `daysAfter`
  * - Plain text repeats cleanly (`in progress` -> `in progress`)
  * - `options.literal = true` (Alt-drag) copies seeds cyclically without incrementing.
  *
@@ -525,30 +594,16 @@ export function generateFillSeries(
 	// Multiple seeds (length >= 2)
 	const trimmedSeeds = seedValues.map((s) => s.trim());
 
-	// 1. All ISO dates with constant day delta
+	// 1. All ISO dates, a constant number of months or of days apart
 	const days = trimmedSeeds.map(parseIsoDay);
 	if (days.every((d): d is number => d !== null)) {
-		const step = days[1]! - days[0]!;
-		const constant = days.every((d, i) => i === 0 || d - days[i - 1]! === step);
-		if (constant) {
-			const anchor = reverse ? days[0]! : days[days.length - 1]!;
-			const delta = reverse ? -step : step;
-			return Array.from({ length: count }, (_, i) => formatIsoDay(anchor + delta * (i + 1)));
-		}
-		return repeatSeeds();
+		return daysAfter(days, count, reverse)?.map(formatIsoDay) ?? repeatSeeds();
 	}
 
-	// 2. All dates written another way, the same way, with constant day delta
+	// 2. All dates written another way, the same way, a constant number of months or of days apart
 	const written = writtenDates(trimmedSeeds, options?.dayFirst);
 	if (written) {
-		const step = written.days[1]! - written.days[0]!;
-		const constant = written.days.every((d, i) => i === 0 || d - written.days[i - 1]! === step);
-		if (constant) {
-			const anchor = reverse ? written.days[0]! : written.days[written.days.length - 1]!;
-			const delta = reverse ? -step : step;
-			return Array.from({ length: count }, (_, i) => written.format(anchor + delta * (i + 1)));
-		}
-		return repeatSeeds();
+		return daysAfter(written.days, count, reverse)?.map(written.format) ?? repeatSeeds();
 	}
 
 	// 3. All pure integers or decimals with constant arithmetic step
@@ -561,9 +616,9 @@ export function generateFillSeries(
 				const allInts = trimmedSeeds.every((s) => PURE_INT_RE.test(s));
 				const padWidth =
 					allInts && trimmedSeeds.every((s) => !s.startsWith("-") && s.length > 1 && s.startsWith("0"))
-						? Math.max(...trimmedSeeds.map((s) => s.length))
+						? greatest(trimmedSeeds, (s) => s.length)
 						: 0;
-				const maxDec = allInts ? 0 : Math.max(...trimmedSeeds.map(decimalPlaces));
+				const maxDec = allInts ? 0 : greatest(trimmedSeeds, decimalPlaces);
 				const anchor = reverse ? nums[0]! : nums[nums.length - 1]!;
 				const delta = reverse ? -step : step;
 				if (padWidth > 0) return downToZero(anchor, delta).map((n) => formatPaddedInt(n, padWidth));
@@ -586,7 +641,7 @@ export function generateFillSeries(
 			const step = parsedPrefs[1]!.num - parsedPrefs[0]!.num;
 			const constant = parsedPrefs.every((p, i) => i === 0 || p.num - parsedPrefs[i - 1]!.num === step);
 			if (constant) {
-				const padWidth = Math.max(...parsedPrefs.map((p) => p.padWidth));
+				const padWidth = greatest(parsedPrefs, (p) => p.padWidth);
 				const anchor = reverse ? parsedPrefs[0]!.num : parsedPrefs[parsedPrefs.length - 1]!.num;
 				const delta = reverse ? -step : step;
 				return downToZero(anchor, delta).map((n) => `${prefix}${formatPaddedInt(n, padWidth)}`);
@@ -605,7 +660,7 @@ export function generateFillSeries(
  * cleanly escaping literal pipes (`|`) and converting embedded newlines to `<br>`.
  */
 export function cellsToMarkdownTable(headers: readonly string[], rows: readonly (readonly string[])[]): string {
-	const colCount = Math.max(headers.length, ...rows.map((r) => r.length), 0);
+	const colCount = greatest(rows, (r) => r.length, headers.length);
 	if (colCount === 0) return "";
 	const esc = (raw: string) =>
 		raw
@@ -1112,6 +1167,86 @@ export function cellEditGuard() {
 	};
 }
 
+// --- An Open Cell Editor Is on the Page ---------------------------------------
+
+/**
+ * What is to be done for the row of an open cell editor that is not among the rows shown: the row is shown, or
+ * the editor is closed. "close" where nothing can show it (there is no such row, or nothing says why it is not
+ * shown). Otherwise the row is kept among the rows the filters let through (`pin`, as a row being worked on is),
+ * and its group is opened (`openGroup`: the group's key, or null when it is not in a closed group).
+ *
+ * The table was "editing" with no editor on the page: a row inserted while the rows are grouped is a blank row,
+ * which belongs to the group of rows with nothing in the grouping column, and that group was closed; so was the
+ * group that Tab moved a row into when it wrote the grouping column's cell. While it was so, the arrows, F2,
+ * typing and paste did nothing, and nothing showed why: Escape was the only way out.
+ */
+export function editorRowReveal(
+	row: number,
+	s: {
+		/** How many rows the table has. */
+		rowCount: number;
+		/** The row is among those the filters let through. */
+		passes: boolean;
+		/** The key of the row's group where the rows are grouped, else null. */
+		groupKey: string | null;
+		/** The keys of the groups that are closed. */
+		collapsed: ReadonlySet<string>;
+	},
+): "close" | { pin: boolean; openGroup: string | null } {
+	if (!Number.isInteger(row) || row < 0 || row >= s.rowCount) return "close";
+	const openGroup = s.groupKey !== null && s.collapsed.has(s.groupKey) ? s.groupKey : null;
+	if (s.passes && openGroup === null) return "close";
+	return { pin: !s.passes, openGroup };
+}
+
+// --- The Suggestions Under an Open Cell: Which One Is Marked -------------------
+
+/** The suggestion that Enter or Tab would take (-1: none), and where the pointer was last seen over the list. */
+export type SuggestionMark = { index: number; pointerAt: string | null };
+
+export type SuggestionEvent =
+	/** The list is shown for a cell, or its suggestions are made anew because the text in the cell changed. */
+	| { kind: "shown" }
+	/** The pointer is reported over suggestion `index` (entering it or moving on it), at this place on the screen. */
+	| { kind: "pointer"; index: number; screenX: number; screenY: number }
+	/** The pointer is reported outside the list. */
+	| { kind: "left" }
+	/** An arrow key, with `count` suggestions in the list. */
+	| { kind: "arrow"; key: "ArrowDown" | "ArrowUp"; count: number };
+
+export const NO_SUGGESTION: SuggestionMark = { index: -1, pointerAt: null };
+
+/**
+ * Which suggestion is marked after an event. A suggestion is marked only when the user chose it: with the arrow
+ * keys, or with a pointer that MOVED onto it. A web view also reports the pointer over whatever is drawn under it
+ * while it rests: the list opens under the pointer, or is drawn anew after a letter is typed, and the suggestion
+ * that lands there is "entered". That marked it, and Enter or Tab then wrote it into the cell instead of what was
+ * typed (`y`, Enter: the cell got another row's whole value).
+ *
+ * So the first report after the list is shown, drawn anew or scrolled by an arrow key only says where the pointer
+ * is; a later report from another place is a move, and marks. The place is forgotten whenever the list changes
+ * under the pointer or the pointer leaves it, because moves outside the list are not seen: a pointer that went
+ * elsewhere and rests there would otherwise count as moved when a suggestion is next drawn under it. A real move
+ * is never one report, so it still marks at once. The row menu keeps the same rule (`createPointerTracker`).
+ */
+export function stepSuggestionMark(mark: SuggestionMark, event: SuggestionEvent): SuggestionMark {
+	if (event.kind === "shown") return NO_SUGGESTION;
+	if (event.kind === "left") return { index: mark.index, pointerAt: null };
+	if (event.kind === "arrow") {
+		if (event.count <= 0) return { index: -1, pointerAt: null };
+		const index = event.key === "ArrowDown" ? (mark.index + 1) % event.count : mark.index <= 0 ? event.count - 1 : mark.index - 1;
+		return { index, pointerAt: null };
+	}
+	const at = `${event.screenX},${event.screenY}`;
+	const moved = mark.pointerAt !== null && mark.pointerAt !== at;
+	return { index: moved ? event.index : mark.index, pointerAt: at };
+}
+
+/** What Enter, Tab or Ctrl+Enter writes: the marked suggestion while the list is open and one is marked, else what was typed. */
+export function suggestionTaken<T>(mark: Pick<SuggestionMark, "index">, options: readonly T[], open: boolean): T | undefined {
+	return open && mark.index >= 0 ? options[mark.index] : undefined;
+}
+
 // --- Pasting, Filling & Checking: What Is Written and What Is Said ------------
 
 /**
@@ -1145,6 +1280,145 @@ export function fillNotice(changed: number, leftAlone: number, literal: boolean)
 }
 
 /**
+ * What is said when an edit is not made because it would change what the file is read with: it would leave the
+ * file's first record with one cell, which names no delimiter (`csvTextKeepingDelimiter`). `delimiter` is the one
+ * the table is read with.
+ */
+export function firstRowRefusal(delimiter: string): string {
+	const name = delimiter === "\t" ? "tab" : delimiter === ";" ? "semicolon" : delimiter === "|" ? "pipe" : "comma";
+	return `Not done: the file's first row would be left with one cell, and the file would then be read as comma-separated, not ${name}-separated. To do this, convert the file's delimiter to commas first.`;
+}
+
+// --- A Column's Values in Code: Scans That Read Every File, and Scans That Did Not ---
+
+/**
+ * What a check of a column's values has found, by each value's key. `counts`: how often a value is in the files,
+ * from a scan that read every one of them; 0 there means the value is not in the code. `unfinished`: what was found
+ * of a value before its scan ran out of time, which is at least that many and, at 0, nothing known. A value is in
+ * one of the two, never both.
+ */
+export type CodeCheckTally = { counts: Map<string, number>; unfinished: Map<string, number> };
+
+/**
+ * Looks for each value in the project's files, one scan after another, and files what each scan came to in
+ * `tally`. Returns how many values were filed.
+ *
+ * One after another, because the backend is one thread: six scans at once each took six times as long, so that in
+ * a workspace where one scan takes a second every one of them passed its time budget and came back with what it
+ * had found so far, often nothing. And with the scan's own word on whether it finished (`searchScan`), because
+ * the bare list of hits says nothing of it: a value that IS in the code was shown as "not in code".
+ *
+ * A scan that ran out of time though it ran alone is filed under `unfinished`. When any scan of the run did read
+ * every file, a value of which nothing was found is looked for once more at the end: the first scan of a
+ * workspace reads its files cold, and something else may have been scanning at the same moment.
+ */
+export async function scanValuesInTurn(
+	terms: readonly string[],
+	keyOf: (term: string) => string,
+	scan: (term: string) => Promise<{ hits: readonly unknown[]; timedOut: boolean }>,
+	tally: CodeCheckTally,
+	stopped: () => boolean = () => false,
+	progress: (done: number) => void = () => {},
+): Promise<number> {
+	let done = 0;
+	let finished = 0;
+	const again: string[] = [];
+	const look = async (term: string, first: boolean): Promise<boolean> => {
+		if (stopped()) return false;
+		const { hits, timedOut } = await scan(term);
+		if (stopped()) return false;
+		const key = keyOf(term);
+		if (timedOut) {
+			tally.counts.delete(key);
+			tally.unfinished.set(key, hits.length);
+			if (first && hits.length === 0) again.push(term);
+		} else {
+			tally.unfinished.delete(key);
+			tally.counts.set(key, hits.length);
+			finished++;
+		}
+		if (first) progress(++done);
+		return true;
+	};
+	for (const term of terms) if (!(await look(term, true))) return done;
+	if (finished > 0) for (const term of again) if (!(await look(term, false))) return done;
+	return done;
+}
+
+/**
+ * How one checked value reads in its cell, or null for a value that was not checked. "missing" only when a scan
+ * read every file and did not find it. A value whose scan ran out of time is "found", at least so many times, when
+ * the scan had found it by then, and "unknown" when it had not: that is not a count of 0.
+ */
+export function checkedUse(
+	key: string,
+	check: { counts: ReadonlyMap<string, number>; unfinished: ReadonlyMap<string, number> },
+	limit: number,
+): null | { state: "missing" } | { state: "unknown" } | { state: "found"; count: number; text: string; atLeast: boolean } {
+	const partial = check.unfinished.get(key);
+	if (partial !== undefined) return partial > 0 ? { state: "found", count: partial, text: `${partial}+`, atLeast: true } : { state: "unknown" };
+	const count = check.counts.get(key);
+	if (count === undefined) return null;
+	if (count === 0) return { state: "missing" };
+	return count >= limit ? { state: "found", count, text: `${limit}+`, atLeast: true } : { state: "found", count, text: String(count), atLeast: false };
+}
+
+/** How many checked values are in the code, are not, and could not be said of (`checkedUse`). */
+export function codeCheckTotals(check: { counts: ReadonlyMap<string, number>; unfinished: ReadonlyMap<string, number> }): { found: number; missing: number; unknown: number } {
+	let found = 0;
+	let missing = 0;
+	let unknown = 0;
+	for (const count of check.counts.values()) count === 0 ? missing++ : found++;
+	for (const partial of check.unfinished.values()) partial === 0 ? unknown++ : found++;
+	return { found, missing, unknown };
+}
+
+/**
+ * What a check came to, in a sentence or two. The values whose scan ran out of time before anything was found
+ * are said apart from those not found: they were counted among the "not found in code".
+ */
+export function codeCheckSaid(
+	columnName: string,
+	check: { counts: ReadonlyMap<string, number>; unfinished: ReadonlyMap<string, number> },
+	cancelled = false,
+): string {
+	const { unknown } = codeCheckTotals(check);
+	const known = new Map(check.counts);
+	for (const [key, partial] of check.unfinished) if (partial > 0) known.set(key, partial);
+	if (!unknown) return codeCheckSummary(columnName, known, cancelled);
+	const col = columnName.trim() || "column";
+	const ranOut = "the search ran out of time before it had read every file";
+	if (!known.size) return `${cancelled ? `Stopped checking “${col}”` : `Could not check “${col}”`}: ${ranOut}.`;
+	return `${codeCheckSummary(columnName, known, cancelled)} ${unknown} ${unknown === 1 ? "value was" : "values were"} not checked: ${ranOut}.`;
+}
+
+/**
+ * What stopped a check that was running, other than its own Cancel: its column is no longer in the table (deleted
+ * here, or taken out of the text in another view); the table went away (its tab was closed or left, or the text
+ * view was put in its place); the table was given another file or project folder to show; another check was
+ * started.
+ */
+export type CodeCheckStop = "column" | "closed" | "file" | "replaced";
+
+/**
+ * What is said, once, when a check is stopped by something other than its own Cancel. The progress went from the
+ * bar and nothing said that the check had not finished. (What it had found by then is not kept, as it is after a
+ * Cancel: a stop of this kind leaves nothing to show it on, or another check's result in its place.)
+ */
+export function codeCheckStopped(columnName: string, why: CodeCheckStop): string {
+	const col = columnName.trim() || "column";
+	const reason =
+		why === "column"
+			? "the column is no longer in the table"
+			: why === "closed"
+				? "the table is no longer shown"
+				: why === "file"
+					? "the table shows another file or folder now"
+					: "another check was started";
+	return `Stopped checking “${col}”: ${reason}.`;
+}
+
+/**
  * Follows one column while columns are deleted or put in another order. A check of a column's values in code
  * runs for a while, and its result was given the place the column had when the check began: with a column to its
  * left deleted meanwhile, the result landed on the column next to it.
@@ -1163,16 +1437,91 @@ export function trackedColumn(column: number) {
 	};
 }
 
+/**
+ * Where each column goes when a column is deleted (`deleted`) or the columns are put in another order (`order`,
+ * where `order[newPlace] = oldPlace`), and where it goes back to when that change is undone. `made` is also what
+ * a redo does. A check that is running follows its column through all three (`trackedColumn`): it was stopped,
+ * without a word, by the undo of a change to a column it was not reading.
+ *
+ * Undoing a delete puts the deleted column back, but no check was following it by then: a check of that column
+ * was stopped when the column went.
+ */
+export function columnMoves(change: { deleted: number } | { order: readonly number[] }): {
+	made: (column: number) => number;
+	undone: (column: number) => number;
+} {
+	if ("deleted" in change) {
+		const gone = change.deleted;
+		return {
+			made: (column) => (column === gone ? -1 : column > gone ? column - 1 : column),
+			undone: (column) => (column >= gone ? column + 1 : column),
+		};
+	}
+	const order = change.order;
+	return {
+		made: (column) => order.indexOf(column),
+		undone: (column) => order[column] ?? -1,
+	};
+}
+
 // --- Keys and Focus When the Active Cell's Row Is Not Drawn -------------------
+
+/** The fields of a key press that say what it types; a plain object does for a test. */
+export type TypedKey = {
+	key: string;
+	ctrlKey?: boolean;
+	metaKey?: boolean;
+	altKey?: boolean;
+	getModifierState?: (key: string) => boolean;
+};
+
+/**
+ * Whose keyboard a key press comes from, for what its modifiers mean: Option types a character on a Mac, and
+ * Windows sends AltGr as Ctrl+Alt. The same press is a shortcut on the other two.
+ */
+export type KeyOs = "mac" | "windows" | "other";
+
+/**
+ * The character a key press types, or null when it types none: a named key (Enter, an arrow, a dead key), or a
+ * shortcut. Typing on a selected cell starts an edit with that character, and "typing" was every key of one
+ * character pressed with neither Ctrl nor Alt. But a keyboard layout puts characters behind those two keys:
+ *
+ * - AltGr, the third level of most European layouts (`@ { [ ] } \ | €` on a German one). Windows has no AltGr of
+ *   its own and sends Ctrl+Alt for it, so its press says `ctrlKey` and `altKey`, with or without the AltGraph
+ *   state beside them. Elsewhere the press says the AltGraph state and neither key.
+ * - Option on a Mac, which is `altKey`: Option+L is `@` on a German keyboard, Option+5 `[`, and every letter has
+ *   a character there. The press's `key` is the character made.
+ *
+ * So none of these characters could begin a cell. What is still no typing: anything with Cmd or the Windows key;
+ * Ctrl without Alt (Ctrl+C); Alt without Ctrl where it is not a Mac's Option and the layout's third level is not
+ * on (Alt+letter opens a menu); Ctrl+Alt where it is not AltGr (on a Mac, and where the press does not say the
+ * AltGraph state and does not come from Windows); and Ctrl+Alt with a plain letter or digit even where it is,
+ * which is a shortcut on a key that has nothing on its third level (Ctrl+Alt+S), not a character a layout keeps
+ * there.
+ */
+export function typedCharacter(e: TypedKey, os: KeyOs = "other"): string | null {
+	const key = e.key;
+	const first = key.codePointAt(0);
+	// One character, and not a control character: a named key is a word ("Enter", "Dead"), never one character.
+	if (first === undefined || key.length !== (first > 0xffff ? 2 : 1) || first < 0x20 || first === 0x7f) return null;
+	if (e.metaKey) return null;
+	const ctrl = Boolean(e.ctrlKey);
+	const alt = Boolean(e.altKey);
+	const thirdLevel = Boolean(e.getModifierState?.("AltGraph"));
+	if (ctrl && alt) return os !== "mac" && (os === "windows" || thirdLevel) && !/^[a-z0-9]$/i.test(key) ? key : null;
+	if (ctrl) return null;
+	if (alt) return os === "mac" || thirdLevel ? key : null;
+	return key;
+}
 
 /**
  * Whether a key is one the table answers on a cell (the keys of the view's `onCellKey`; keep the two together):
- * typing, Enter and F2, Delete and Backspace, the arrows with or without Shift, Alt+arrows, Page Up and Down,
- * Home and End, and the menu key. A key pressed while the table itself has the focus is asked this, and one that
- * passes goes to the active cell; any other (a modifier alone, Ctrl+C, Escape, Tab, F8) is left to whoever else
- * answers it.
+ * typing (`typedCharacter`), Enter and F2, Delete and Backspace, the arrows with or without Shift, Alt+arrows,
+ * Page Up and Down, Home and End, and the menu key. A key pressed while the table itself has the focus is asked
+ * this, and one that passes goes to the active cell; any other (a modifier alone, Ctrl+C, Escape, Tab, F8) is left
+ * to whoever else answers it.
  */
-export function keyActsOnCell(e: { key: string; ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean; shiftKey?: boolean }): boolean {
+export function keyActsOnCell(e: TypedKey & { shiftKey?: boolean }, os: KeyOs = "other"): boolean {
 	const ctrl = Boolean(e.ctrlKey || e.metaKey);
 	const alt = Boolean(e.altKey);
 	const shift = Boolean(e.shiftKey);
@@ -1182,7 +1531,7 @@ export function keyActsOnCell(e: { key: string; ctrlKey?: boolean; metaKey?: boo
 	if (key === "ArrowLeft" || key === "ArrowRight" || key === "ArrowUp" || key === "ArrowDown") return !ctrl && !(alt && shift);
 	if (key === "PageUp" || key === "PageDown" || key === "Delete" || key === "Backspace") return !ctrl && !alt;
 	if (key === "Home" || key === "End") return !alt;
-	return key.length === 1 && !ctrl && !alt;
+	return typedCharacter(e, os) !== null;
 }
 
 /**
@@ -1219,4 +1568,81 @@ export function cellBeforeInTabOrder(visRow: number, visCol: number, colCount: n
 	if (visCol > 0) return { visRow, visCol: visCol - 1 };
 	if (visRow > 0 && colCount > 0) return { visRow: visRow - 1, visCol: colCount - 1 };
 	return { visRow, visCol };
+}
+
+// --- Files That Are There and Could Not Be Read (Schema Sync, ER Diagram) ----
+
+/** A file that is there and could not be read: the name it is shown by, and why, as the reader said it. */
+export type UnreadFile = { file: string; why: string };
+
+/**
+ * A file's text, or why there is none to work from: the reader's refusal in plain words (`plainFileError`), or
+ * that the file is not text. A read that failed used to be taken for a file with nothing in it, or for no file:
+ * since the backend reads no text over 20 MB, a schema script larger than that fell out of a sync or a diagram
+ * without a word. `file` is the name the file is shown by, `root` the folder a path in a refusal is named from.
+ */
+export async function textOrWhy(
+	read: () => Promise<{ text: string; binary?: unknown }>,
+	file: string,
+	root?: string | null,
+): Promise<{ text: string } | { why: string }> {
+	try {
+		const got = await read();
+		return got.binary ? { why: `${file} is not text.` } : { text: got.text };
+	} catch (e: any) {
+		return { why: plainFileError(String(e?.message ?? e), root) };
+	}
+}
+
+/**
+ * The files that could not be read, each with why, as sentences for a notice. A refusal that names the file itself
+ * ("schema/big.sql is 21.0 MB: too large to open here (the most is 20.0 MB).") is said as it is; any other reason
+ * is put after the file's name. Three files are said and the rest counted.
+ */
+export function unreadFilesSaid(unread: readonly UnreadFile[]): string {
+	const sentence = ({ file, why }: UnreadFile) => {
+		const reason = why.trim();
+		if (!reason) return `${file} could not be read.`;
+		if (reason.replace(/\\/g, "/").startsWith(file.replace(/\\/g, "/"))) return /[.!?]$/.test(reason) ? reason : `${reason}.`;
+		return `${file} could not be read (${reason.replace(/\.$/, "")}).`;
+	};
+	const said = unread.slice(0, 3).map(sentence).join(" ");
+	const more = unread.length - 3;
+	return more > 0 ? `${said} ${more} more ${more === 1 ? "file" : "files"} could not be read either.` : said;
+}
+
+/**
+ * Whether a registry row's note says the row came from one of these files: "From schema/tables.sql", as a sync
+ * from the schema writes it, the file's name alone or with something written after it. The files are named as the
+ * notes name them, from the workspace's root with forward slashes; the case of the letters is not held to.
+ */
+export function noteNamesFile(note: string, files: readonly string[]): boolean {
+	const asNamed = (path: string) => path.trim().replace(/\\/g, "/").toLowerCase();
+	const source = asNamed(/^\s*From\s+(.*)/i.exec(note)?.[1] ?? "");
+	return files.some((file) => source === asNamed(file) || source.startsWith(`${asNamed(file)} `));
+}
+
+/**
+ * The rows of a database registry that a sync from the schema SQL files offers to mark as gone: rows an earlier
+ * sync wrote (the note begins "From"), not marked gone yet, whose object is in none of the files that were read
+ * (`sqlNames`: every object found, in lower case, with and without its schema).
+ *
+ * A row whose note names a file that is there but could not be read (`unreadFiles`) is not among them. Such a
+ * file was passed over without a word, and every row that had come from it was offered as gone, though nothing
+ * was known of the file but that it was too large to open.
+ */
+export function registryRowsGone<R extends { name: string; note: string; status: string }>(
+	rows: readonly R[],
+	sqlNames: ReadonlySet<string>,
+	unreadFiles: readonly string[],
+): R[] {
+	return rows.filter(
+		(r) =>
+			r.name &&
+			/^From\s+/i.test(r.note) &&
+			r.status !== "gone" &&
+			!noteNamesFile(r.note, unreadFiles) &&
+			!sqlNames.has(r.name.toLowerCase()) &&
+			!sqlNames.has(r.name.split(".").pop()!.toLowerCase()),
+	);
 }

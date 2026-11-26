@@ -57,11 +57,26 @@ async function readLines(uri: string, start: number, end: number): Promise<strin
 	return text === null ? null : text.split(/\r?\n/).slice(start, end + 1).join("\n");
 }
 
+/**
+ * The survey as the agent is given it, with the words whose text search ran out of time before it had read every
+ * file and found nothing by then. The agent is told to check the chart against what already exists, "so nothing
+ * is built twice": a word left out of the survey reads to it as a word that is nowhere, and with every search cut
+ * short the survey said "Nothing in the workspace matched." of a workspace that had not been read. `nothing` is
+ * whether the survey found nothing at all.
+ */
+export function surveySaid(text: string, nothing: boolean, unsearched: readonly string[]): string {
+	if (!unsearched.length) return text;
+	const note = `NOT SEARCHED TO THE END (the search ran out of time before it had read every file, so these words may be in the workspace though none is listed): ${unsearched.join(", ")}`;
+	return nothing ? note : `${text}\n${note}`;
+}
+
 /** Survey before you build: the agent cannot look, so SSL Studio does. */
 export async function survey(plan: Plan): Promise<string> {
 	const root = snapshot(state).workspace?.root;
 	if (!root) return "Nothing in the workspace matched.";
 	const found: Survey = { calls: [], targets: [], symbols: [], hits: [], callGraph: [] };
+	/** The words whose text search was cut short with nothing found (`surveySaid`). */
+	const unsearched: string[] = [];
 	for (const word of nounsOf(plan)) {
 		if (snapshot(state).workspace?.root !== root) return "";
 		const symbols = await session.workspaceSymbols(word).catch(() => []);
@@ -71,11 +86,15 @@ export async function survey(plan: Plan): Promise<string> {
 			if (!isAllowedContextPath(fRel)) continue;
 			if (PROCEDURES.has(s.kind) && !found.symbols.some((f) => f.name === s.name)) found.symbols.push({ name: s.name, file: fRel });
 		}
-		const hits = await backend.search(word, { caseSensitive: false }).catch(() => []);
+		// Asked for with whether the scan read every file. One word at a time, as before: the backend is one thread.
+		// A search that fails or gives no answer is, as before, one that found nothing.
+		const scan = await backend.searchScan(word, { caseSensitive: false }).catch(() => null);
 		if (snapshot(state).workspace?.root !== root) return "";
-		for (const h of hits.filter((x) => !/\.(plan\.json|spec\.md|tidy\.md)$/i.test(x.path) && isAllowedContextPath(rel(x.path, root))).slice(0, 3)) {
+		const shown = (scan?.hits ?? []).filter((x) => !/\.(plan\.json|spec\.md|tidy\.md)$/i.test(x.path) && isAllowedContextPath(rel(x.path, root))).slice(0, 3);
+		for (const h of shown) {
 			found.hits.push({ word, file: rel(h.path, root), line: h.line, text: h.text.trim().slice(0, 120) });
 		}
+		if (scan?.timedOut && !shown.length) unsearched.push(word);
 	}
 	found.symbols = found.symbols.slice(0, 30);
 	found.hits = found.hits.slice(0, 20);
@@ -116,7 +135,8 @@ export async function survey(plan: Plan): Promise<string> {
 		if (snapshot(state).workspace?.root !== root) return "";
 		found.targets.push({ path: target, outline: lines.join("\n") });
 	}
-	return formatSurvey(found);
+	const nothing = !found.calls.length && !found.targets.length && !found.symbols.length && !found.hits.length && !found.callGraph.length;
+	return surveySaid(formatSurvey(found), nothing, unsearched);
 }
 
 const MAX_CONTEXT_CHARS = 8000;

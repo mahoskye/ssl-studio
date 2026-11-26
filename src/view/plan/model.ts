@@ -319,10 +319,11 @@ export function removeNode(plan: Plan, id: string): Edit {
 		edges.push({ ...restIn, to: outs[0]!.to } as PlanEdge);
 	}
 	// Keep any business test cases attached to the removed node as plan-level tests (ADR 0009: nothing lost silently).
-	const existingTests = planTestsOf(plan);
+	// Every other entry stays as it was read (`testEntries`).
+	const existingTests = testEntries(plan);
 	const nextTests = existingTests.length
 		? existingTests.map((t) => {
-				if (t.node !== id) return t;
+				if (!isTestCase(t) || t.node !== id) return t;
 				const { node: _dropped, ...rest } = t;
 				return rest as PlanTestCase;
 			})
@@ -333,21 +334,32 @@ export function removeNode(plan: Plan, id: string): Edit {
 	};
 }
 
+const isTestCase = (t: unknown): t is PlanTestCase => isObject(t) && typeof t.id === "string" && typeof t.title === "string";
+
 /** Valid plain-English business test cases saved in this plan. */
 export function planTestsOf(plan: Plan): PlanTestCase[] {
 	if (!Array.isArray(plan.tests)) return [];
-	return plan.tests.filter((t): t is PlanTestCase => isObject(t) && typeof t.id === "string" && typeof t.title === "string");
+	return plan.tests.filter(isTestCase);
 }
 
-function nextTestId(tests: PlanTestCase[]): string {
-	const used = tests.map((t) => /^t(\d+)$/.exec(t.id)?.[1]).filter(Boolean).map(Number);
+/**
+ * Everything under "tests" as it was read: the cases, and the entries this version cannot make sense of (one with
+ * no id it can use, or no title). Adding, editing or removing a case used to write back the cases alone, so the
+ * first edit of any one of them took every other entry out of the plan's text. An edit changes the case it is of,
+ * and leaves the rest of the list as it was read, as it does every other field this version does not know.
+ */
+const testEntries = (plan: Plan): PlanTestCase[] => (Array.isArray(plan.tests) ? plan.tests : []);
+
+/** An id no entry has, one this version cannot read included: a case must not come to share its id with one. */
+function nextTestId(tests: readonly unknown[]): string {
+	const used = tests.map((t) => (isObject(t) && typeof t.id === "string" ? /^t(\d+)$/.exec(t.id)?.[1] : undefined)).filter(Boolean).map(Number);
 	return `t${Math.max(0, ...used) + 1}`;
 }
 
 export function addPlanTest(plan: Plan, input: PlanTestInput): Plan {
 	const title = input.title.trim();
 	if (!title) return plan;
-	const current = planTestsOf(plan);
+	const current = testEntries(plan);
 	const journey = typeof input.journey === "number" && Number.isInteger(input.journey) && input.journey > 0 ? input.journey : undefined;
 	const entry: PlanTestCase = {
 		id: nextTestId(current),
@@ -362,10 +374,10 @@ export function addPlanTest(plan: Plan, input: PlanTestInput): Plan {
 }
 
 export function updatePlanTest(plan: Plan, id: string, patch: PlanTestPatch): Plan {
-	const current = planTestsOf(plan);
-	if (!current.some((t) => t.id === id)) return plan;
+	const current = testEntries(plan);
+	if (!current.some((t) => isTestCase(t) && t.id === id)) return plan;
 	const next = current.map((t) => {
-		if (t.id !== id) return t;
+		if (!isTestCase(t) || t.id !== id) return t;
 		const title = patch.title !== undefined ? patch.title.trim() || t.title : t.title;
 		const node = patch.node !== undefined ? patch.node.trim() : t.node;
 		const journey =
@@ -394,8 +406,8 @@ export function updatePlanTest(plan: Plan, id: string, patch: PlanTestPatch): Pl
 }
 
 export function removePlanTest(plan: Plan, id: string): Plan {
-	const current = planTestsOf(plan);
-	const next = current.filter((t) => t.id !== id);
+	const current = testEntries(plan);
+	const next = current.filter((t) => !isTestCase(t) || t.id !== id);
 	if (next.length === current.length) return plan;
 	if (!next.length) {
 		const { tests: _empty, ...rest } = plan;

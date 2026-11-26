@@ -83,6 +83,14 @@ export type Click = { detail: number; at: number; x: number; y: number };
 /** How soon after a click, in milliseconds, and how near it, in pixels, a click is its second when the count does not say. */
 const SECOND_CLICK_MS = 400;
 const SECOND_CLICK_PX = 5;
+/**
+ * The same when the count does say. The count is the window system's, of the two presses it paired, and the first
+ * of that pair need not be the click remembered here: so the remembered click is held to the widest pair a system
+ * makes. A double-click can be set slow for a hand that needs it, to five seconds on Windows, and the second tap
+ * of a finger may land some tens of pixels from the first, where a mouse is given four or five.
+ */
+const COUNTED_CLICK_MS = 5000;
+const COUNTED_CLICK_PX = 40;
 
 /**
  * Whether a click is the second click of a double-click that began on a node: `onNode` is the click before it,
@@ -93,13 +101,51 @@ const SECOND_CLICK_PX = 5;
  * A click on a node may lay the picture out again, so the second click of a double-click lands wherever the
  * node's place has come to be taken: on another node, or on none. Taken as a click of its own it focused that
  * other node, and the double-click opened nothing unless the layout happened not to move. The second click
- * therefore belongs to the node the first one was on, wherever it lands. The first is not held back to wait for
- * it: a click shows its focus at once.
+ * therefore belongs to the node the first one was on, whatever it lands on. The first is not held back to wait
+ * for it: a click shows its focus at once.
+ *
+ * The count alone used to be enough, with no bound on when or where the click before had been: a click counted 2
+ * was taken for the second click of a node clicked twenty seconds earlier at the other side of the picture, and
+ * opened it. However the count comes, a click far from the one before, or long after it, is not its second.
  */
 export function secondClick(click: Click, onNode: Click | null): boolean {
 	if (!onNode) return false;
-	if (click.detail === 2) return true;
-	return click.detail < 2 && click.at - onNode.at <= SECOND_CLICK_MS && Math.hypot(click.x - onNode.x, click.y - onNode.y) <= SECOND_CLICK_PX;
+	const after = click.at - onNode.at;
+	const apart = Math.hypot(click.x - onNode.x, click.y - onNode.y);
+	if (click.detail === 2) return after <= COUNTED_CLICK_MS && apart <= COUNTED_CLICK_PX;
+	return click.detail < 2 && after <= SECOND_CLICK_MS && apart <= SECOND_CLICK_PX;
+}
+
+/** How far, in pixels, a press may move the picture and still be a click on what it is let go over. */
+export const PAN_PX = 3;
+
+/** What a click on the picture is: the end of a press that moved it, the second click of a double-click on `node`, or a click of its own. */
+export type Heard<T> = { is: "pan" } | { is: "second"; node: T } | { is: "own" };
+
+/**
+ * The clicks on a picture's nodes, kept from one click to the next so that a double-click opens its own node
+ * (`secondClick`). `heard` is given every click on the picture before any node hears it, with how far the pointer
+ * moved the picture between the press and its release, and says what the click is. A click of its own goes on to
+ * what it is on, and `onNode` is told when that is a node.
+ *
+ * A click is remembered until the next one is heard and no longer, whatever the next one is. A press that moved
+ * the picture is not a click, and it used to leave the click before it remembered: the press after it, which the
+ * window system counts as the second of that pair, then opened the node that had been clicked some time before.
+ * Such a press is not the first click of anything either, so the one after it is a click of its own.
+ */
+export function nodeClicks<T>() {
+	let last: (Click & { node: T }) | null = null;
+	return {
+		heard(click: Click, moved: number): Heard<T> {
+			const first = last;
+			last = null;
+			if (moved > PAN_PX) return { is: "pan" };
+			return first && secondClick(click, first) ? { is: "second", node: first.node } : { is: "own" };
+		},
+		onNode(click: Click, node: T) {
+			last = { ...click, node };
+		},
+	};
 }
 
 /** Pans, as little as it takes, so a rectangle of the content is in sight. A rectangle larger than the view shows its start. */

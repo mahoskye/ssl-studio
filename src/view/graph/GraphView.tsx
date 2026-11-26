@@ -8,6 +8,7 @@
 import { docs } from "../project";
 import { codeMatchesRef, docsGoverningFile, scriptsForTicket } from "../../shared/workContext";
 import { referencedSchemaTables } from "../../shared/schemaIndex";
+import { searchableFileText } from "../lsp/facts";
 import { registryTitle, toneOf } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
 import "./graphExtra.css";
@@ -23,7 +24,7 @@ import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { regionColor } from "../editor/regions";
 import { canonical, documents, notify, openFile, openToSide, restartLsp, setState, state } from "../state";
-import { canvasMeasure, clearLabels, clearOf, fitShare, fitView, legibleScale, mapArea, outOfSight, nearest, recall, remember, reveal, secondClick, smoothEdgePath, smoothEdgePoint, wheelZoom, zoomAt, type Click, type Point } from "./canvas";
+import { canvasMeasure, clearLabels, clearOf, fitShare, fitView, legibleScale, mapArea, nodeClicks, outOfSight, nearest, recall, remember, reveal, smoothEdgePath, smoothEdgePoint, wheelZoom, zoomAt, type Click, type Point } from "./canvas";
 import { loadGraph } from "./load";
 import { Minimap, type MapBox } from "./Minimap";
 import { Finder } from "./Finder";
@@ -32,7 +33,7 @@ import { savePicture } from "./picture";
 import { registerGraphBridge } from "./graphBridge";
 import { session } from "../lsp/session";
 import { aroundFocus, callList, choices, computeImpactAnalysis, formatImpactMarkdown, sameStep, dirId, keptFolds, withoutUnresolved, fold, gather, isFolderEnd, FOLD_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, ticketSubgraphFilter, topLabel, UNRESOLVED, visible, type Direction, type DrawnEdge, type Filter, type FocusLink, type Graph, type ImpactDocSummary, type ImpactNode, type ImpactReport, type ListedProc, relationOf, type Relation } from "./model";
-import { asksFirst, openedFoldedNote, openingFolds, pictureSize, unfoldQuestion } from "./unfold";
+import { asksFirst, chosenKey, layoutGate, openedFoldedNote, openingFolds, openingSize, pictureSize, shownWords, sizeOf, unfoldQuestion, type Chosen, type PictureSize } from "./unfold";
 import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
 import { submenuOrInline, type RowMenuEntry } from "../../shared/contextMenu";
 
@@ -210,6 +211,21 @@ export function GraphView() {
 	let foldedFor = "";
 	/** The largest picture, in nodes, that was said yes to when asked: an unfolding within it is not asked about again. */
 	let agreedNodes = 0;
+	/** What is chosen of the picture, as it is put back after a no (goBack): with the list or the graph, and whether a ticket narrows it. */
+	type Picked = Chosen & { mode: Mode; ticketOnly: boolean };
+	const picked = (): Picked => ({ mode: mode(), filter: filter(), scripts: folded(), folders: foldedDirs(), unresolved: unresolved(), ticket: ticketSubgraphOnly() ? ticketHighlightKey() : null, ticketOnly: ticketSubgraphOnly() });
+	/** The check every picture passes before it is laid out, whichever way it was reached (layoutGate). */
+	const gate = layoutGate<Picked>();
+	/** Counts the answers to its question: the layout is looked at again after each. */
+	const [answered, setAnswered] = createSignal(0);
+	/** What the picture on screen was laid out from. */
+	let onScreen: readonly unknown[] | null = null;
+	/** The choice gone back to after a no: its picture is left on screen if it is still there (see the layout). */
+	let keepFor: string | null = null;
+	/** The view is closed: an answer that comes after that is to nothing. */
+	let closed = false;
+	/** A picture was held back while the call graph was not the view on screen, and nothing asked: it is looked at again when the graph is shown. */
+	let heldUnseen = false;
 	/** The node the pointer is on, the node the keys last moved to, and the line the pointer is on. */
 	const [pointed, setPointed] = createSignal<string | null>(null);
 	const [walked, setWalked] = createSignal<string | null>(null);
@@ -280,6 +296,17 @@ export function GraphView() {
 			};
 		},
 	);
+	// The graph is kept laid out while another view is shown, and its picture can change there (the ticket it is
+	// narrowed to). One that became too large is held back without a question, which would come up over the other
+	// view; the layout looks at it again, and asks, when this view is shown.
+	createEffect(
+		() => isGraphView(),
+		(active) => {
+			if (!active || !heldUnseen) return;
+			heldUnseen = false;
+			setAnswered((n) => n + 1);
+		},
+	);
 
 	const readScriptText = async (filePath: string): Promise<string> => {
 		const openText = documents.get(canonical(filePath))?.model.getValue();
@@ -297,7 +324,7 @@ export function GraphView() {
 		if (!allDocs.some((d) => d.exists && d.group === "schema")) return [];
 		const text = await readScriptText(filePath);
 		if (!text) return [];
-		const matched = referencedSchemaTables(text, allDocs, 16);
+		const matched = referencedSchemaTables(await searchableFileText(text, filePath), allDocs, 16);
 		if (matched.length) {
 			setSchemaTablesByScript((prev) => {
 				const next = new Map(prev);
@@ -323,7 +350,8 @@ export function GraphView() {
 					if (run !== schemaScanSeq) return;
 					const text = await readScriptText(s.path);
 					if (!text) continue;
-					const matched = referencedSchemaTables(text, allDocs, 12);
+					const matched = referencedSchemaTables(await searchableFileText(text, s.path), allDocs, 12);
+					if (run !== schemaScanSeq) return;
 					if (matched.length) map.set(s.path, matched);
 				}
 				if (run === schemaScanSeq) setSchemaTablesByScript(map);
@@ -577,15 +605,14 @@ export function GraphView() {
 			for (const filePath of scanFiles) {
 				if (run !== impactRunSeq) return;
 				const openText = documents.get(canonical(filePath))?.model.getValue();
-				if (openText !== undefined) {
-					chunks.push(openText);
-					continue;
-				}
-				const disk = await backend.read(filePath).then(
-					(f) => f.text,
-					() => "",
-				);
-				if (disk) chunks.push(disk);
+				const text =
+					openText ??
+					(await backend.read(filePath).then(
+						(f) => f.text,
+						() => "",
+					));
+				// A table named only in a comment is not one the script uses.
+				if (text) chunks.push(await searchableFileText(text, filePath));
 			}
 			if (run !== impactRunSeq) return;
 			const tables = referencedSchemaTables(chunks.join("\n"), allDocs, 16).map((d) => ({
@@ -692,6 +719,7 @@ export function GraphView() {
 	let refreshSeq = 0;
 	let refreshAbort: AbortController | null = null;
 	onCleanup(() => {
+		closed = true;
 		refreshSeq++;
 		refreshAbort?.abort();
 		refreshAbort = null;
@@ -721,7 +749,6 @@ export function GraphView() {
 			if (run !== refreshSeq || controller.signal.aborted || (state.workspace?.root ?? "") !== startRoot) return;
 			// The first picture of a large workspace is of its scripts: every one folded.
 			if (foldedFor !== startRoot) {
-				agreedNodes = 0;
 				// What was folded here last time, if anything was kept; otherwise the opening picture: of a large
 				// workspace its scripts, and of many scripts its folders, a picture that fits a screen, to unfold from.
 				// Folds kept that would draw too much to lay out unasked are not taken up, and that is said.
@@ -729,6 +756,10 @@ export function GraphView() {
 				setFolded(new Set(opening.scripts));
 				setFoldedDirs(new Set(opening.folders));
 				if (opening.refused) notify(openedFoldedNote(opening.refused));
+				// Nothing of this workspace has been laid out or said yes to. The picture it opens with is not asked
+				// about, however large: there is nothing less to draw, so its size is where what is agreed to starts.
+				gate.opens();
+				agreedNodes = openingSize(read, opening, folderOf, unresolved()).nodes;
 			}
 			foldedFor = startRoot;
 			setGraph(read);
@@ -831,11 +862,47 @@ export function GraphView() {
 	const fitKey = () => JSON.stringify([filter(), ticketSubgraphOnly(), ticketSubgraphOnly() ? ticketHighlightKey() : null]);
 
 	createEffect(
-		() => [graph(), drawn(), mode(), gathered(), govScriptState().map, fitKey(), folding(), state.workspace?.root, state.settings.limits.bytes] as const,
+		() => [graph(), drawn(), mode(), gathered(), govScriptState().map, fitKey(), folding(), state.workspace?.root, state.settings.limits.bytes, answered()] as const,
 		([g, keep, as, gathering, govMap, layoutKey, canFold, root, byteLimit]) => {
+			// Said once, for the run that follows a no (askLarger).
+			const kept = keepFor;
+			keepFor = null;
+			// What is chosen while the list is shown is where a no to its picture goes back to.
+			if (g && keep && as !== "graph") gate.rests(untrack(picked));
 			// The list needs no layout, and a large one takes a while.
 			if (!g || !keep || as !== "graph") {
 				++layoutRun;
+				return () => {
+					++layoutRun;
+				};
+			}
+			// The one check before a layout, whichever way the picture was reached (layoutGate, unfold.ts): the layout
+			// runs on the window's own thread, and a picture too large to lay out in a moment is asked about first.
+			// Held back, it is not laid out at all, and what is on screen stays until the question is answered.
+			const now = untrack(picked);
+			const choice = chosenKey(now);
+			const large = sizeOf(keep.nodes);
+			const verdict = gate.next(choice, now, large.nodes, agreedNodes);
+			if (verdict !== "draw") {
+				++layoutRun;
+				// Asked once this run is over, and over this view only. With another view on screen the question is
+				// not put: the picture stays held back, and is looked at again when this view is shown.
+				if (verdict === "ask" && untrack(isGraphView)) queueMicrotask(() => askLarger(large, now));
+				else if (verdict === "ask") (gate.unasked(), (heldUnseen = true));
+				return () => {
+					++layoutRun;
+				};
+			}
+			heldUnseen = false;
+			// What is laid out is not asked about again, and nothing smaller is: calls read anew can make the picture
+			// of one choice larger than any that was said yes to, and folding a script of it would then be asked about.
+			agreedNodes = Math.max(agreedNodes, large.nodes);
+			const from = [g, gathering, govMap, layoutKey, canFold, root, byteLimit, choice, large.nodes, keep.edges.length] as const;
+			// After a no, what was chosen before is chosen again. Its picture is still on screen when nothing else has
+			// changed, and is left there, where it was moved to: laid out again, it would stop the window for as long
+			// as it did the first time. What asked for the other picture may have asked for a new fit as well.
+			if (kept === choice && onScreen?.every((value, i) => value === from[i])) {
+				fittedFor = layoutKey;
 				return () => {
 					++layoutRun;
 				};
@@ -1058,6 +1125,7 @@ export function GraphView() {
 						if (box && curSize.width >= 10 && curSize.height >= 10) setView((v) => reveal(v, box, curSize));
 					}
 					showNext = null;
+					onScreen = from;
 					if (hadFocus) queueMicrotask(() => nodeEls.get(cursor() ?? "")?.focus());
 				} catch (e: any) {
 					if (run !== layoutRun) return;
@@ -1093,6 +1161,37 @@ export function GraphView() {
 			if (answer !== "Unfold") return false;
 			agreedNodes = size.nodes;
 			return true;
+		});
+	};
+	/** Puts back what was chosen before a picture that was asked about and not wanted: the bar says what it said, of the picture that is still there. */
+	const goBack = (to: Picked) => {
+		setFilter(to.filter);
+		setFolded(to.scripts);
+		setFoldedDirs(to.folders);
+		if (unresolved() !== to.unresolved) {
+			setUnresolved(to.unresolved);
+			remember(UNRESOLVED_KEY, to.unresolved ? "shown" : "hidden");
+		}
+		// A ticket that is only lit does not decide what is drawn, and is not put back: it may have been changed since.
+		if (to.ticketOnly) setTicketHighlightKeySignal(to.ticket);
+		setTicketSubgraphOnlySignal(to.ticketOnly);
+		if (mode() !== to.mode) choose(to.mode);
+	};
+	/**
+	 * The question put before a picture the layout held back (layoutGate): one reached some other way than by the
+	 * three unfoldings, which ask before they change anything (unfoldAsk). Yes lets it through. No puts back what was
+	 * chosen before it; with nothing chosen before, the list is shown, which needs no layout.
+	 */
+	const askLarger = (size: PictureSize, now: Picked) => {
+		if (closed) return;
+		void chooseAnswer(unfoldQuestion(shownWords(gate.asked(), now), size), ["Show"]).then((answer) => {
+			const taken = gate.answer(answer === "Show");
+			// The view was closed, or another workspace opened, while it was asked: the picture asked about is gone.
+			if (closed || !taken) return;
+			if ("agreed" in taken) agreedNodes = Math.max(agreedNodes, taken.agreed);
+			else if (taken.back) (keepFor = chosenKey(taken.back)), goBack(taken.back);
+			else choose("list");
+			setAnswered((n) => n + 1);
 		});
 	};
 	/** Folds a script to one node, or unfolds it; the keyboard stays with it. `asked` when a large unfolding has been said yes to. */
@@ -1741,8 +1840,8 @@ export function GraphView() {
 	let dragging: { x: number; y: number } | null = null;
 	/** How far the pointer has moved the picture since it was pressed. */
 	let panned = 0;
-	/** The last click, if it was on a node, and the node: the click that makes it a double-click opens this node. */
-	let clicked: (Click & { box: Box }) | null = null;
+	/** The last click, if it was on a node, and the node: the click that makes it a double-click opens this node (nodeClicks). */
+	const clicks = nodeClicks<Box>();
 	const clickAt = (e: MouseEvent): Click => ({ detail: e.detail, at: e.timeStamp, x: e.clientX, y: e.clientY });
 	/** Too narrow for every button of the bar: the zoom buttons go to the menu. */
 	const [narrow, setNarrow] = createSignal(false);
@@ -1970,15 +2069,17 @@ export function GraphView() {
 							el.addEventListener(
 								"click",
 								(e) => {
-									// The picture was moved by what the pointer was on: letting go of it there is not a click on it.
-									if (panned > 3) return e.stopPropagation(), void (panned = 0);
-									// The second click of a double-click is the first one's node's, wherever it lands (secondClick):
-									// heard here, before any node hears it, since the node now under the pointer may be another.
-									const first = clicked;
-									clicked = null;
-									if (!first || !secondClick(clickAt(e), first)) return;
+									// What the click is, heard here before any node hears it (nodeClicks). A click of its own goes on
+									// to what it is on.
+									const heard = clicks.heard(clickAt(e), panned);
+									if (heard.is === "own") return;
 									e.stopPropagation();
-									if (first.box.kind !== "fold" && first.box.kind !== "dir") open(first.box);
+									// The picture was moved by what the pointer was on: letting go of it there is not a click on it,
+									// nor the first click of a double-click, and the click before it is no longer remembered.
+									if (heard.is === "pan") return void (panned = 0);
+									// The second click of a double-click is the first one's node's, whatever it lands on (secondClick):
+									// the first click may have laid the picture out again, and the node now under the pointer be another.
+									if (heard.node.kind !== "fold" && heard.node.kind !== "dir") open(heard.node);
 								},
 								true,
 							);
@@ -2209,7 +2310,7 @@ export function GraphView() {
 												onFocus={() => setCurrent(b.id)}
 												onMouseEnter={() => setPointed(b.id)}
 												onMouseLeave={() => setPointed(null)}
-												onClick={(e) => (e.stopPropagation(), (clicked = { ...clickAt(e), box: b }), far() ? comeIn(b) : b.kind === "dir" ? toggleDir(b.folder) : b.kind === "fold" ? toggleFold(b.path) : focus(b.id))}
+												onClick={(e) => (e.stopPropagation(), clicks.onNode(clickAt(e), b), far() ? comeIn(b) : b.kind === "dir" ? toggleDir(b.folder) : b.kind === "fold" ? toggleFold(b.path) : focus(b.id))}
 												onContextMenu={(e) => {
 													if (b.kind === "dir" || !b.path || b.path === "(unresolved)") return;
 													e.preventDefault();

@@ -395,7 +395,7 @@ describe("Blocks — a change that cannot be made says why (finding 3)", () => {
 		expect(move).toContain("cardMove(parent, n, direction)");
 		expect(move).toContain("swapLines(model.getLinesContent(), step.a, step.b)");
 		// The cursor is put on the moved block after the replace and its range format, before the tree is read again.
-		const [format, select, reread] = [move.indexOf("await formatLines(swapped.start, swapped.end);"), move.indexOf("select({ start: line, end: line + height });"), move.indexOf("editedHere();")];
+		const [format, select, reread] = [move.indexOf("await formatLines(swapped.start, swapped.end, raw);"), move.indexOf("select({ start: line, end: line + height });"), move.indexOf("editedHere();")];
 		expect(format).toBeGreaterThan(0);
 		expect(select).toBeGreaterThan(format);
 		expect(reread).toBeGreaterThan(select);
@@ -562,7 +562,8 @@ describe("Search panel — a list that falls short is said to, and is not replac
 	test("Search.tsx is wired to it (source only: the panel needs a DOM to run)", () => {
 		const src = readSrc("src/view/panels/Search.tsx");
 		const run = between(src, "const run = async (overrides: RunOverrides = {}) => {", "// A search asked for from elsewhere is put in the box and run");
-		expect(run).toContain("const { hits: diskHits, timedOut: ranOutOfTime } = await backend.searchScan(effectiveQuery, backendOptions);");
+		expect(run).toContain("const scan = await backend.searchScan(effectiveQuery, index ? { ...backendOptions, paths: [] } : backendOptions, batch);");
+		expect(run).toContain("ranOutOfTime = scan.timedOut;");
 		expect(run).not.toContain("backend.search(");
 		expect(run).toContain("setTimedOut(ranOutOfTime);");
 		// A new search, a failed one and a change of workspace all forget the last one's time-out.

@@ -316,7 +316,7 @@ describe("Round 7B src/view/templater.ts invariants (P0-2, P1-6, P1-7, P1-8, P2-
 		expect(body).toContain("formatTemplateHeaderAttr(");
 		expect(body).not.toContain('fileName="${copyBuiltin.fileName}"');
 		expect(body).not.toContain('name="${name}"');
-		expect((body.match(/await backend\.create\(/g) ?? []).length).toBe(2);
+		expect((body.match(/await createWithText\(backend, dest, /g) ?? []).length).toBe(2);
 		expect((body.match(/catch \(e: any\) \{\s*\n\s*notify\([^)]+"error"\)/g) ?? []).length).toBeGreaterThanOrEqual(3);
 		expect(body).toContain("const startRoot = root");
 		expect(body).toContain("state.workspace?.root !== startRoot");

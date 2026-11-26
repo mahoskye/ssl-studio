@@ -31,6 +31,62 @@ export type BundleLspOptions = {
 	fetchTo?: (url: string, path: string) => Promise<void>;
 };
 
+/** A file written beside where it goes, and a copy of what was there, kept until all of them are in place. */
+const staged = (path: string) => `${path}.new`;
+const kept = (path: string) => `${path}.old`;
+
+/** What putting files in place does to the disk: given, so that the order of it can be tested without one. */
+export type PlaceOps = {
+	exists: (path: string) => boolean;
+	copy: (from: string, to: string) => void;
+	/** Moves a file to where another may be, in its place. */
+	move: (from: string, to: string) => Promise<void>;
+	remove: (path: string) => void;
+};
+
+/**
+ * Puts staged files in place in the order given, which is the binary first: all of them, or none. The licence
+ * files used to go first. On Windows a binary that is running (an open SSL Studio) cannot be replaced, so the
+ * move of the binary failed with the new licence files already beside the old binary, and the notices described
+ * a version that was not there. Now the binary that cannot be replaced fails before anything has changed. A file
+ * that cannot be moved after others were is rarer, and those are put back from a copy taken of each before its
+ * move. Where that fails too, the error names the files left new: what was there is beside each, as `.old`.
+ */
+export async function putInPlace(paths: string[], ops: PlaceOps): Promise<void> {
+	const moved: { path: string; had: boolean }[] = [];
+	const stuck: string[] = [];
+	try {
+		for (const path of paths) {
+			const had = ops.exists(path);
+			try {
+				if (had) ops.copy(path, kept(path));
+				await ops.move(staged(path), path);
+			} catch (err: any) {
+				for (const before of moved.reverse()) {
+					try {
+						if (before.had) await ops.move(kept(before.path), before.path);
+						else ops.remove(before.path);
+					} catch {
+						stuck.push(before.path);
+					}
+				}
+				const state = stuck.length ? `Already in place and not put back: ${stuck.join(", ")} (what was there before is beside each, as .old).` : "The folder is as it was.";
+				throw new Error(`Could not put ${path} in place: ${String(err?.message ?? err)}. ${state}`, { cause: err });
+			}
+			moved.push({ path, had });
+		}
+	} finally {
+		for (const path of paths) {
+			if (stuck.includes(path)) continue;
+			try {
+				ops.remove(kept(path));
+			} catch {
+				// Best-effort cleanup of the copies.
+			}
+		}
+	}
+}
+
 export async function bundleLsp(opts: BundleLspOptions = {}): Promise<{ target: string; action: "downloaded" | "cached" | "copied" }> {
 	const vendor = opts.vendorDir ?? join(import.meta.dir, "../vendor");
 	const platformName = opts.platform ?? process.platform;
@@ -48,13 +104,15 @@ export async function bundleLsp(opts: BundleLspOptions = {}): Promise<{ target: 
 		return platformName === "win32" || platformName === "darwin" ? ra.toLowerCase() === rb.toLowerCase() : ra === rb;
 	};
 	// The binary and its two licence files are written beside where they go and put in place when all of them are
-	// there, the binary last. A download used to put the binary in place first: when a licence file then failed to
-	// arrive, vendor/ was left with a binary that could not be started and had no licence beside it. Beside the old
-	// one and renamed over it also because a server that is running (an open SSL Studio) keeps its own copy, where
-	// writing into the file in use fails.
-	const staged = (path: string) => `${path}.new`;
-	const putInPlace = async (paths: string[]) => {
-		for (const path of paths) await renameReplacing(staged(path), path, { win32: platformName === "win32" });
+	// there, the binary first (`putInPlace`). A download used to write the binary where it goes before the licence
+	// files had come: when one then failed to arrive, vendor/ was left with a binary that could not be started and
+	// had no licence beside it. Beside the old one and renamed over it also because a server that is running (an
+	// open SSL Studio) keeps its own copy, where writing into the file in use fails.
+	const place: PlaceOps = {
+		exists: existsSync,
+		copy: copyFileSync,
+		move: (from, to) => renameReplacing(from, to, { win32: platformName === "win32" }),
+		remove: (path) => rmSync(path, { force: true }),
 	};
 	const discardStaged = () => {
 		for (const path of [target, licensePath, noticesPath]) {
@@ -89,7 +147,7 @@ export async function bundleLsp(opts: BundleLspOptions = {}): Promise<{ target: 
 				if (!existsSync(staged(path)) || !statSync(staged(path)).size) throw new Error(`Nothing arrived for ${path}.`);
 			}
 			chmodSync(staged(target), 0o755);
-			await putInPlace([licensePath, noticesPath, target]);
+			await putInPlace([target, licensePath, noticesPath], place);
 		} catch (err) {
 			discardStaged();
 			throw err;
@@ -139,9 +197,10 @@ export async function bundleLsp(opts: BundleLspOptions = {}): Promise<{ target: 
 			if (!sameResolvedPath(source, target)) {
 				copyFileSync(source, staged(target));
 				chmodSync(staged(target), 0o755);
-				arriving.push(target);
+				// Before its licence files: the one of the three that may not be replaceable.
+				arriving.unshift(target);
 			}
-			await putInPlace(arriving);
+			await putInPlace(arriving, place);
 		} catch (err) {
 			discardStaged();
 			throw err;

@@ -85,15 +85,49 @@ const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  * A value between double quotes, as JSON writes a string, with the two separator characters JSON leaves as they
  * are (U+2028, U+2029) written as escapes. They end a line for a regular expression's dot and for older YAML
  * readers: left bare in a value, the line no longer read as `key: value` and the key was gone on the next read.
+ * So are the other characters JSON leaves and a YAML reader does not take as they are, between quotes or not:
+ * U+0085 is a line end to YAML 1.1 (it came back as a space), the rest of that range and DEL are refused.
  */
-const jsonQuoted = (value: string) => JSON.stringify(value).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+const jsonQuoted = (value: string) =>
+	JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029\ufeff\ufffe\uffff]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+
+/** Where a bare value stops being its own words for YAML: a mark it opens with, a colon that ends a key, a comment, a quote, a line end. */
+const YAML_MARKED = /^[#[\]{},!&*?|>'\"%@`-]|:\s|:$|\s#|[\r\n"\u2028\u2029]/;
 
 /** Quotes a YAML scalar value when it contains characters that would corrupt unquoted YAML (`#`, `: `, `[...]`, quotes, leading/trailing spaces, a line or paragraph separator). */
 export function quoteYamlScalar(value: string): string {
 	const v = value.trim();
 	if (!v) return '""';
-	if (/^[#[\]{},!&*?|>'\"%@`-]|:\s|:$|\s#|[\r\n"\u2028\u2029]/.test(v)) return jsonQuoted(v);
+	if (YAML_MARKED.test(v)) return jsonQuoted(v);
 	return v;
+}
+
+/**
+ * What a YAML reader takes for something other than text where it stands bare, whole: the words for true, false
+ * and nothing (YAML 1.1's too: yes, no, on, off, y, n, in any capitals), the two marks 1.1 gives a meaning of
+ * their own, and a number or a date. A number is taken widely, as anything that opens with a digit and holds only
+ * what a number or a date is spelled with (1.2's `1e3` and `0o17`, 1.1's `1_000`, `0b1`, `017` and `2026-11-25`):
+ * readers differ in how much of that they take (one reads `1-2` as 1), and quotes cost such a value nothing.
+ */
+const YAML_TYPED = /^(?:~|null|true|false|yes|no|on|off|y|n|=|<<|[-+]?(?:0b[01_]+|0o[0-7_]+|0x[0-9a-f_]+|\.?[0-9][0-9_.e+-]*|\.inf)|\.nan)$/i;
+/**
+ * What ends or splits a bare value in a list on one line (`[a, b]`), or anywhere for a reader stricter than this
+ * file's; a tab or a control character, which no reader takes bare; and three dots, which end a document.
+ */
+const YAML_TEXT_MARKED = /[:#[\]{}"',\u0000-\u001f\u007f-\u009f\ufeff\ufffe\uffff]|^\.\.\./;
+
+/**
+ * A value that is text (a ticket's key, a title, a name), as it is written after `key: ` or as an item of a list
+ * on one line, so that it reads back as the same text: by this file's reader and by a YAML reader. Bare where
+ * that is safe, between double quotes otherwise. It quotes all that `quoteYamlScalar` does, by asking it, so the
+ * two cannot come apart again: the templates had a rule of their own, which left `@x`, `*x`, `- x` and their like
+ * bare (an error or nothing to a YAML reader), and `NO`, `NULL`, `12`, `1E3` (false, nothing and numbers).
+ */
+export function quoteYamlText(value: string): string {
+	const v = value.trim();
+	const written = quoteYamlScalar(v);
+	if (written !== v) return written;
+	return YAML_TEXT_MARKED.test(v) || YAML_TYPED.test(v) ? jsonQuoted(v) : v;
 }
 
 function leadingTemplateLines(lines: readonly string[]): number {
@@ -717,6 +751,61 @@ export function innerLineEndingFrontMatter(inner: string): { line: number; text:
 	const lines = inner.split(/\r?\n/);
 	const at = lines.findIndex((line) => /^(---|\.\.\.)\s*$/.test(line));
 	return at < 0 ? null : { line: at + 1, text: lines[at]!.trim() };
+}
+
+/** What the raw YAML box does with its text at one moment (`yamlBoxStep`). */
+export type YamlBoxStep = {
+	/** The text to write between the document's two fences, or null: the document is left as it is. */
+	write: string | null;
+	/** Whether the box now has text that the document does not: held back, to be written or said later. */
+	held: boolean;
+	/** What is said under the box, for as long as it holds a line that cannot be written; null when it holds none. */
+	say: string | null;
+	/** What is said once, as a notice, when text the box held is gone unwritten; null otherwise. */
+	lost: string | null;
+};
+
+/** One or two dashes or dots alone on a line: what three of them, the line that ends a front matter, are typed through. */
+const ON_THE_WAY_TO_A_FENCE = /^(?:-{1,2}|\.{1,2})\s*$/;
+
+/** The line of `after` in which the change from `before` ends: where the caret stands once it is typed, pasted or deleted. */
+function lineTyped(before: string, after: string): string {
+	const shorter = Math.min(before.length, after.length);
+	let same = 0;
+	while (same < shorter && before[same] === after[same]) same++;
+	let tail = 0;
+	while (tail < shorter - same && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
+	const caret = after.length - tail;
+	const from = caret > 0 ? after.lastIndexOf("\n", caret - 1) + 1 : 0;
+	const to = after.indexOf("\n", caret);
+	return after.slice(from, to < 0 ? after.length : to);
+}
+
+/**
+ * What the raw YAML box writes, holds and says. `written` is what the document has of the box (the text it last
+ * wrote, or showed when it opened), `after` the text the box has now: after an input that took it there from
+ * `before`, when the box is left with it ("leave": focus goes elsewhere, a save or a change of tab asks for what
+ * is pending), and when that text goes ("close": Escape, the YAML button, another file, or the document's own
+ * front matter shown in the box again after an undo).
+ *
+ * A line of three dashes or dots (`innerLineEndingFrontMatter`) cannot be written: it would end the front matter
+ * where it stands. While the box holds one, nothing in the box is written, the box says so, and when its text
+ * goes it is said that it was not written. The check was once made on each input alone: typed as three keys, `-`
+ * and `--` were each written before `---` was refused, so the document kept a stray `--` line while the notice
+ * said nothing had been written. So the line being typed is not written while it is only one or two dashes or
+ * dots: it may be on its way to three. That is no error, and nothing is said. The whole box is written with the
+ * next key that makes the line something else (`- item`), or leaves it (Enter, an edit of another line), and when
+ * the box is left or closed: a line of one dash is a line like any other then.
+ */
+export function yamlBoxStep(written: string, before: string, after: string, event: "input" | "leave" | "close" = "input"): YamlBoxStep {
+	const ends = innerLineEndingFrontMatter(after);
+	if (ends) {
+		if (event === "close") return { write: null, held: false, say: null, lost: `Line ${ends.line} of the raw YAML was still ${ends.text}: what was typed in the box while that line stood was not written.` };
+		return { write: null, held: true, say: `Line ${ends.line} is ${ends.text}, which would end the front matter there. The box is not written to the document until that line is changed.`, lost: null };
+	}
+	if (after === written) return { write: null, held: false, say: null, lost: null };
+	if (event === "input" && ON_THE_WAY_TO_A_FENCE.test(lineTyped(before, after))) return { write: null, held: true, say: null, lost: null };
+	return { write: after, held: false, say: null, lost: null };
 }
 
 /**

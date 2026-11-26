@@ -213,6 +213,17 @@ export function isExplicitUnchanged(replyText: string): boolean {
 	return /^[ \t]*(?:[*_`]*unchanged[*_`]*)[\t .!]*$/im.test(prose.join("\n"));
 }
 
+/**
+ * The callers as the agent is given them. "(none found in the workspace)" is said only when the text search for
+ * the script's name read every file: one that ran out of time has found nothing because it did not look, and the
+ * agent took a script with callers for one nobody calls. With lines found, the same is said after them.
+ */
+export function callersSaid(lines: readonly string[], name: string, timedOut: boolean): string {
+	const cutShort = `(the text search for "${name}" ran out of time before it had read every file: there may be ${lines.length ? "more callers than are listed" : "callers, though none is listed"})`;
+	if (!lines.length) return timedOut ? cutShort : "(none found in the workspace)";
+	return timedOut ? `${lines.join("\n")}\n${cutShort}` : lines.join("\n");
+}
+
 /** Call sites in other files, from the language server's references, plus a text search for the script's name. */
 async function callers(path: string, model: monaco.editor.ITextModel, root: string): Promise<string> {
 	const selfKey = canonical(path);
@@ -237,9 +248,12 @@ async function callers(path: string, model: monaco.editor.ITextModel, root: stri
 			lines.push(`${p.name} ← ${rel(file, root)}:${r.range.start.line + 1}: ${target?.getLineContent(r.range.start.line + 1).trim() ?? ""}`);
 		}
 	}
-	for (const hit of (await backend.search(base(path), { caseSensitive: false }).catch(() => [])).filter((h) => isAllowedCaller(h.path)).slice(0, 60))
+	// Asked for with whether the scan read every file (`callersSaid`). A search that fails or gives no answer is, as
+	// before, one that found nothing.
+	const scan = await backend.searchScan(base(path), { caseSensitive: false }).catch(() => null);
+	for (const hit of (scan?.hits ?? []).filter((h) => isAllowedCaller(h.path)).slice(0, 60))
 		lines.push(`text "${base(path)}" ← ${rel(hit.path, root)}:${hit.line}: ${hit.text.trim()}`);
-	return lines.length ? lines.join("\n") : "(none found in the workspace)";
+	return callersSaid(lines, base(path), Boolean(scan?.timedOut));
 }
 
 function prompt(step: (typeof STEPS)[number], index: number, path: string, root: string, text: string, note: string | null, found?: string, workContext?: string) {
@@ -324,10 +338,22 @@ async function checks(before: string, after: string, commentsOnly: boolean): Pro
 	return evaluateTidyChecks(a, b, before, after, commentsOnly);
 }
 
+/**
+ * Whether two texts are the same note. Line ends and the blank end of the file are left out of it: a review shows
+ * the proposed side with the note's own line ends, and a note is saved with one line end after its last line.
+ */
+export function sameNote(a: string, b: string): boolean {
+	const lines = (text: string) => text.replace(/\r\n?/g, "\n").replace(/\s*$/, "");
+	return lines(a) === lines(b);
+}
+
+/** The note with a step's entry after it: what is saved with an accepted step, and what is shown for one that changes no code. */
+const noteWithEntry = (note: string, heading: string, entry: string) => `${note.replace(/\s*$/, "")}\n\n## ${heading} (${localDay()})\n\n${entry.trim()}\n`;
+
 async function appendToNote(path: string, heading: string, entry: string, root: string | undefined = state.workspace?.root) {
 	const target = notePath(path, root);
 	const note = (await readNote(path, root)) ?? `# Tidy notes: ${rel(path, root)}\n`;
-	await writeNoteFile(target, `${note.replace(/\s*$/, "")}\n\n## ${heading} (${localDay()})\n\n${entry.trim()}\n`);
+	await writeNoteFile(target, noteWithEntry(note, heading, entry));
 }
 
 /** Runs one step. Whatever goes wrong, the step ends in a state it can be run again from. */
@@ -362,6 +388,30 @@ export async function runStep(index: number) {
 		mark("review");
 		await present(index, proposal);
 	};
+	/**
+	 * Puts a new text of the context note up for review: the one way anything the agent wrote gets into the note
+	 * without a change to the code beside it. `from` is the note as the step read it. What is accepted is written
+	 * only over that: a note that has changed since (another step's entry, the user's own lines) was written over
+	 * whole. And a text that is the note as it stands is not written at all.
+	 */
+	const proposeNote = (title: string, from: string, proposed: string, effect: string, states: { accepted: StepState; rejected: StepState }) =>
+		propose({
+			title,
+			path: targetNote,
+			original: from,
+			proposed,
+			language: "markdown",
+			effect,
+			onAccept: async (final) => {
+				if (!stillSameWorkspace()) throw new Error("The workspace changed while this tidy step was running.");
+				const now = (await readNote(path, pinnedRoot)) ?? "";
+				if (sameNote(now, final)) return mark("unchanged");
+				if (!sameNote(now, from)) throw new Error(`${rel(targetNote, pinnedRoot)} was changed after this tidy step read it. Reject and run the step again so that change is not written over.`);
+				await writeNoteFile(targetNote, final.replace(/\s*$/, "") + "\n");
+				mark(states.accepted);
+			},
+			onReject: () => mark(states.rejected),
+		});
 	await safely(
 		`Tidy step ${index + 1} (${step.title}) did not finish`,
 		async () => {
@@ -381,30 +431,34 @@ export async function runStep(index: number) {
 
 			if (step.kind === "note" || step.kind === "report") {
 				const current = note ?? "";
+				// A reply with nothing in it is not a note: it was put up as one, to be saved over the note that is there.
+				if (!markdown.trim()) return mark("failed", "The reply was empty: there is nothing to put in the note. Try again.");
 				const proposed = step.kind === "note" ? markdown : `${current.replace(/\s*$/, "")}\n\n## Verify (${localDay()})\n\n${markdown}\n`;
-				return propose({
-					title: `Tidy ${index + 1}/6 ${step.title}`,
-					path: targetNote,
-					original: current,
-					proposed,
-					language: "markdown",
-					effect: `Accepting saves the right side as the context note, ${rel(targetNote, pinnedRoot)}.`,
-					onAccept: async (final) => {
-						if (!stillSameWorkspace()) throw new Error("The workspace changed while this tidy step was running.");
-						await writeNoteFile(targetNote, final.replace(/\s*$/, "") + "\n");
-						mark("accepted");
-					},
-					onReject: () => mark("rejected"),
-				});
+				// The note as it stands, sent back: it was put up for a review with nothing in it to see, and saved again.
+				if (sameNote(current, proposed)) {
+					mark("unchanged");
+					addEntry({ role: "note", text: `${step.title}: the note is as it was. There is nothing to review, and nothing was written.` });
+					return;
+				}
+				return proposeNote(`Tidy ${index + 1}/6 ${step.title}`, current, proposed, `Accepting saves the right side as the context note, ${rel(targetNote, pinnedRoot)}.`, { accepted: "accepted", rejected: "rejected" });
 			}
 
 			const code = pickPrimarySslBlock(fenced(reply.text, "ssl"), text);
 			if (!code) {
 				if (isExplicitUnchanged(reply.text)) {
-					mark("unchanged");
-					if (markdown) await appendToNote(path, `Step ${index + 1}: ${step.title}`, markdown, pinnedRoot);
 					addEntry({ role: "note", text: `${step.title}: no changes proposed (UNCHANGED).` });
-					return;
+					if (!markdown.trim()) return mark("unchanged");
+					// The step's entry for the note is the agent's words as much as its code is. It was added to the note's
+					// file as it came, unseen, while the agent is told that what it returns is saved after a review: it is
+					// shown first, like everything else a step writes. The code is unchanged whatever becomes of the entry.
+					const current = note ?? `# Tidy notes: ${rel(path, pinnedRoot)}\n`;
+					return proposeNote(
+						`Tidy ${index + 1}/6 ${step.title}: note`,
+						note ?? "",
+						noteWithEntry(current, `Step ${index + 1}: ${step.title}`, markdown),
+						`${rel(path, pinnedRoot)} stays as it is. Accepting saves the right side as the context note, ${rel(targetNote, pinnedRoot)}.`,
+						{ accepted: "unchanged", rejected: "unchanged" },
+					);
 				}
 				mark("failed", "The reply contained neither an ```ssl block nor UNCHANGED. Review the conversation and try again.");
 				addEntry({ role: "note", text: `${step.title}: reply did not contain an \`\`\`ssl block or UNCHANGED.` });

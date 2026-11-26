@@ -10,7 +10,7 @@
 import { createEffect, createMemo, createSignal, createUniqueId, flush, For, onCleanup, onSettled, Show, untrack } from "solid-js";
 import { Portal, type JSX } from "@solidjs/web";
 import {
-	addCsvColumn,
+	addCsvColumnEdits,
 	appendRowEdit,
 	cellChangeEdit,
 	cellsToClipboardText,
@@ -21,17 +21,18 @@ import {
 	csvDelimiterForPath,
 	csvDelimiterOf,
 	csvDuplicateKeys,
+	csvEditsKeepingDelimiter,
 	csvRow,
-	deleteCsvColumn,
-	deleteCsvRows,
+	deleteCsvColumnEdits,
+	deleteCsvRowsEdits,
 	insertRowEdit,
 	moveCsvRowEdit,
 	parseClipboardGrid,
 	parseCsv,
 	rawRowText,
 	readingAfterConvert,
-	renameCsvColumn,
-	reorderCsvColumns,
+	renameCsvColumnEdits,
+	reorderCsvColumnsEdits,
 	rowSpan,
 	sortCsvRowsEdit,
 	tableToTsv,
@@ -68,7 +69,6 @@ import {
 } from "../../shared/csvFormat";
 import {
 	codeCheckSearchOptions,
-	codeCheckSummary,
 	columnCheckTargets,
 	defaultCheckColumn,
 	defaultExcludePattern,
@@ -82,7 +82,7 @@ import { keyOf, keysIn, ticketColumn } from "../../shared/registryTickets";
 import { findSchemaDocForIdentifier } from "../../shared/schemaIndex";
 import { SEARCH_LIMIT, type SearchOptions } from "../../shared/searchPattern";
 import { extractSqlObjects } from "../../shared/sqlSchema";
-import { backend } from "../backend";
+import { backend, fileExists } from "../backend";
 const copyText = (text: string, label: string) => import("../commands").then((m) => m.copyText(text, label));
 import { ask, choose, quickPick, type QuickPickOption } from "../dialogs";
 import { Icon } from "../Icon";
@@ -93,42 +93,62 @@ import {
 	cellBeforeInTabOrder,
 	cellEditGuard,
 	cellsToMarkdownTable,
+	checkedUse,
+	codeCheckSaid,
+	codeCheckStopped,
+	codeCheckTotals,
+	columnMoves,
 	compareRowsBySorts,
 	compileCellMatcher,
 	computeVirtualWindow,
 	DEFAULT_ROW_HEIGHT,
+	editorRowReveal,
 	extractFirstHttpUrl,
 	fillNotice,
 	findUnknownTicketTokens,
+	firstRowRefusal,
 	focusAfterRowsDrawn,
 	generateFillSeries,
 	getTableViewState,
+	greatest,
 	isCellInFindSelection,
 	isDedicatedTicketColumn,
 	isSchemaTableColumn,
 	keyActsOnCell,
 	nextTableIssueIndex,
+	noteNamesFile,
 	parseTableViewStateStore,
 	pasteFit,
 	pasteNotice,
 	pasteStart,
 	pruneSortSpecs,
+	registryRowsGone,
 	remapSortSpecs,
 	replaceCellMatches,
 	sampleRowsForAutoFit,
+	scanValuesInTurn,
 	serializeTableViewStateStore,
 	setColumnSortDirection,
 	splitCellUrls,
+	stepSuggestionMark,
+	suggestionTaken,
 	summarizeTableIssues,
 	tableViewFileKey,
 	tableViewStateStorageKey,
+	textOrWhy,
 	toggleSortSpec,
 	tokenizeCellLinks,
 	trackedColumn,
+	type SuggestionEvent,
+	typedCharacter,
+	unreadFilesSaid,
 	upsertTableViewState,
 	type CellFindOptions,
+	type CodeCheckStop,
+	type KeyOs,
 	type SortSpec,
 	type TableIssue,
+	type UnreadFile,
 } from "../../shared/tablePower";
 import { chooseFromMenu, rowMenuOpen, type RowMenuEntry } from "../panels/RowMenu";
 import { searchFor } from "../panels/Search";
@@ -142,6 +162,15 @@ import "./tableViewExtra.css";
 
 /** Maximum distinct values rendered in a column filter checklist before asking the user to narrow via search. */
 const FILTER_VALUES_CAP = 250;
+
+/**
+ * Whose keyboard the keys come from (`typedCharacter`): Option with a key types a character on a Mac, and AltGr
+ * with a key arrives as Ctrl+Alt on Windows. Elsewhere Alt with a key, and Ctrl+Alt with one, is a shortcut.
+ */
+const keyOs: KeyOs = (() => {
+	const platform = typeof navigator === "undefined" ? "" : (navigator.platform ?? "");
+	return /Mac|iPhone|iPad/.test(platform) ? "mac" : /Win/.test(platform) ? "windows" : "other";
+})();
 
 /** Minimum column width (px) when manually dragging a resize handle. */
 const MIN_COL_WIDTH = 56;
@@ -239,7 +268,10 @@ type CodeCheckResult = {
 	splitLists: boolean;
 	caseSensitive: boolean;
 	options: SearchOptions;
+	/** How often each value is in the files, from a scan that read every one of them. */
 	counts: Map<string, number>;
+	/** What was found of a value before its scan ran out of time: at least that many, and at 0 nothing known. */
+	unfinished: Map<string, number>;
 };
 
 type ColDrag = {
@@ -490,6 +522,12 @@ export function TableView(props: { path: string; group?: number }) {
 		groupByCol: number | null;
 	};
 	const colSnapshots = new Map<string, ColumnUiSnapshot>();
+	/**
+	 * Where each column goes across a change of the columns (a delete, a new order), by the change's direction
+	 * (`colSnapshotTransitionKey`): a check that is running follows its column through an undo or a redo of the
+	 * change (`columnMoves`).
+	 */
+	const columnsAcross = new Map<string, (column: number) => number>();
 	let lastAltVersion = model?.getAlternativeVersionId() ?? 0;
 	const captureColUi = (): ColumnUiSnapshot => ({
 		colFilters: new Map(colFilters()),
@@ -501,12 +539,10 @@ export function TableView(props: { path: string; group?: number }) {
 		codeCheck: codeCheck() ? { ...codeCheck()! } : null,
 		groupByCol: groupByCol(),
 	});
+	// A check that is running is not stopped here. The undo or redo of a column change stopped it without a word,
+	// whichever column it was reading; it follows its column instead (`columnsAcross`), and is stopped, and said to
+	// be, only when that column itself goes (`moveCheckedColumn`).
 	const restoreColUi = (snap: ColumnUiSnapshot) => {
-		if (checking()) {
-			userCancelledRunId = 0;
-			checkRunId++;
-			setChecking(null);
-		}
 		setColFilters(new Map(snap.colFilters));
 		setOrder(snap.order.map((s) => ({ ...s })));
 		setFrozenCols([...snap.frozenCols]);
@@ -545,6 +581,8 @@ export function TableView(props: { path: string; group?: number }) {
 			clearFindSelectionScope();
 			clearRowHeights();
 		}
+		const columnsMoved = columnsAcross.get(colSnapshotTransitionKey(prevAlt, curAlt));
+		if (columnsMoved) moveCheckedColumn(columnsMoved);
 		const count = parseCurrentCsv(next).rows.length;
 		if (count !== prevCount) clearRowHeights();
 		const cur = current();
@@ -553,6 +591,27 @@ export function TableView(props: { path: string; group?: number }) {
 	onCleanup(() => listener?.dispose());
 
 	const table = createMemo(() => parseCurrentCsv(text()));
+	/**
+	 * The edits to make of the text, or null (with a notice) when they are not to be made. Every writer in this view
+	 * asks here before it writes: whatever record is first in the file afterwards must still say what the table was
+	 * read with (`csvEditsKeepingDelimiter`). `Smith, John` typed into the first row of a semicolon-separated table
+	 * with no header row made the file a comma-separated one, and so did a sort, a move or a delete that put a row
+	 * holding a bare comma first.
+	 */
+	const keptEdits = (edits: readonly OffsetTextEdit[]): readonly OffsetTextEdit[] | null => {
+		if (!model) return null;
+		const raw = model.getValue();
+		const readWith = parseCurrentCsv(raw).delimiter;
+		const kept = csvEditsKeepingDelimiter(raw, edits, readWith, csvDelimiterForPath(props.path));
+		if (!kept) sayNotDone(readWith);
+		return kept;
+	};
+	/**
+	 * Why the edit was not made, with the way to make it possible at hand: a note that offers something to do stays
+	 * long enough to be read. It may outlast this view, and then offers nothing.
+	 */
+	const sayNotDone = (readWith: CsvDelimiter) =>
+		notify(firstRowRefusal(readWith), "info", { label: "Convert…", run: () => void (disposed || convertDelimiterInteractive()) });
 	const csvConfig = createMemo(() => effectiveCsvTableConfig(state.settings.csvTable));
 	const headerName = (col: number) => table().header[col]?.text.trim() ?? "";
 	const columnRule = (col: number) => ruleForColumn(csvConfig(), headerName(col));
@@ -724,10 +783,16 @@ export function TableView(props: { path: string; group?: number }) {
 	let userCancelledRunId = 0;
 	/** The column of the check that is running, followed through columns deleted or put in another order meanwhile. */
 	let checkedColumn: ReturnType<typeof trackedColumn> | null = null;
+	/** The run of the check that was last begun, and its column's name. It is running while its run is `checkRunId`. */
+	let begunCheck: { runId: number; columnName: string } | null = null;
 	let disposed = false;
 	onCleanup(() => {
+		const running = begunCheck && begunCheck.runId === checkRunId ? begunCheck : null;
 		disposed = true;
 		checkRunId++;
+		// Leaving the table for another tab, or for its text, takes this view away and its check with it. Said once
+		// the view is gone, since nothing may be written while it is being taken down.
+		if (running) queueMicrotask(() => notify(codeCheckStopped(running.columnName, "closed")));
 	});
 
 	const cancelCodeCheck = () => {
@@ -737,10 +802,27 @@ export function TableView(props: { path: string; group?: number }) {
 		setChecking(null);
 	};
 
-	const clearCodeCheck = () => {
+	/**
+	 * Stops the check that is running, for a reason that is not its own Cancel, and says so once: its progress went
+	 * from the bar, and nothing said that the check had not finished. Nothing is stopped or said when no check is
+	 * running, or when the one that was has been cancelled or stopped already.
+	 */
+	const stopCodeCheck = (why: CodeCheckStop) => {
+		const running = begunCheck;
+		if (!running || running.runId !== checkRunId) return;
 		userCancelledRunId = 0;
 		checkRunId++;
+		checkedColumn = null;
 		setChecking(null);
+		notify(codeCheckStopped(running.columnName, why));
+	};
+
+	/**
+	 * Takes the result that is shown away. A check that is running is not stopped: it is a check of its own column,
+	 * and its result is shown when it ends. It was stopped, without a word, whenever a result was cleared: by the
+	 * delete of the column an earlier result was on, though the check was reading another.
+	 */
+	const clearCodeCheck = () => {
 		setCodeCheck(null);
 		setOnlyMissing(false);
 	};
@@ -767,6 +849,8 @@ export function TableView(props: { path: string; group?: number }) {
 	createEffect(
 		() => [props.path, state.workspace?.root, viewStateStorageKey(), viewStateFileKey()] as const,
 		([, , storageKey, fileKey]) => {
+			// A check of the file or the folder that was shown before is of no use to this one.
+			stopCodeCheck("file");
 			clearCodeCheck();
 			setSelectedRows(new Set<number>());
 			setLastClickedRow(null);
@@ -918,6 +1002,19 @@ export function TableView(props: { path: string; group?: number }) {
 	const [editDirty, setEditDirty] = createSignal(false);
 	const [pickerOpen, setPickerOpen] = createSignal(false);
 	const [pickerIdx, setPickerIdx] = createSignal(-1);
+	/**
+	 * Where the pointer was last seen over the list of suggestions. With `pickerIdx` it is the list's mark, and
+	 * every change of either goes through `stepSuggestionMark`: a suggestion that is merely drawn under a resting
+	 * pointer is not marked, and Enter or Tab writes what was typed.
+	 */
+	let pickerPointerAt: string | null = null;
+	const stepPicker = (event: SuggestionEvent) => {
+		setPickerIdx((index) => {
+			const next = stepSuggestionMark({ index, pointerAt: pickerPointerAt }, event);
+			pickerPointerAt = next.pointerAt;
+			return next.index;
+		});
+	};
 	const [pickerAnchor, setPickerAnchor] = createSignal<DOMRect | null>(null);
 	let activeInputEl: HTMLInputElement | undefined;
 	let commitActiveEdit: ((val: string, move: CommitMove) => void) | null = null;
@@ -926,12 +1023,16 @@ export function TableView(props: { path: string; group?: number }) {
 	// changes are asked about (state.ts). What is typed is in the editor's input until Enter, Tab or a blur: Ctrl+S
 	// wrote the file without it, and Ctrl+W closed the tab with no question, since nothing was unsaved yet.
 	onCleanup(
-		holdsPendingEdit(() => {
-			const commit = commitActiveEdit;
-			if (!untrack(editing) || !commit) return;
-			const el = activeInputEl?.isConnected ? activeInputEl : rootEl?.querySelector<HTMLTextAreaElement>("textarea.table-cell-multiline");
-			if (el) commit(el.value, "stay");
-		}),
+		holdsPendingEdit(
+			() => {
+				const commit = commitActiveEdit;
+				if (!untrack(editing) || !commit) return;
+				const el = activeInputEl?.isConnected ? activeInputEl : rootEl?.querySelector<HTMLTextAreaElement>("textarea.table-cell-multiline");
+				if (el) commit(el.value, "stay");
+			},
+			// Only an open cell holds text: a table that is merely shown does not keep the window from closing at once.
+			() => Boolean(untrack(editing)),
+		),
 	);
 
 	createEffect(
@@ -940,7 +1041,7 @@ export function TableView(props: { path: string; group?: number }) {
 			if (!ed) {
 				setPickerOpen(false);
 				setPickerAnchor(null);
-				setPickerIdx(-1);
+				stepPicker({ kind: "shown" });
 				activeInputEl = undefined;
 				commitActiveEdit = null;
 				return;
@@ -950,7 +1051,7 @@ export function TableView(props: { path: string; group?: number }) {
 			const isMultiline = Boolean(ed.forceMultiline) || (ed.seed === undefined && !ed.ghost && /[\r\n]/.test(existingVal));
 			setEditDraft(initVal);
 			setEditDirty(ed.seed !== undefined);
-			setPickerIdx(-1);
+			stepPicker({ kind: "shown" });
 			if (isMultiline) activeInputEl = undefined;
 			setPickerOpen(!isMultiline);
 		},
@@ -1025,6 +1126,9 @@ export function TableView(props: { path: string; group?: number }) {
 			if (chk && chk.column >= count) {
 				clearCodeCheck();
 			}
+			// The check that is running, when its own column is past the last one left. A check of a column that is
+			// still there goes on: it was stopped, unsaid, with the result of another column.
+			moveCheckedColumn((column) => (column < count ? column : -1));
 		},
 	);
 
@@ -1158,11 +1262,12 @@ export function TableView(props: { path: string; group?: number }) {
 		return terms.some((t) => chk.counts.get(termLookupKey(t, chk.caseSensitive)) === 0);
 	};
 
-	const missingCount = createMemo(() => {
+	/** The checked values that are in the code, that are not, and those whose scan ran out of time before it found any. */
+	const checkTotals = createMemo(() => {
 		const chk = codeCheck();
-		if (!chk) return 0;
-		return [...chk.counts.values()].filter((n) => n === 0).length;
+		return chk ? codeCheckTotals(chk) : { found: 0, missing: 0, unknown: 0 };
 	});
+	const missingCount = () => checkTotals().missing;
 
 	const runCodeCheck = async (spec: CodeCheckSpec, mergeExisting = false, targetRow?: number) => {
 		if (!state.workspace?.root) {
@@ -1199,8 +1304,12 @@ export function TableView(props: { path: string; group?: number }) {
 		}
 
 		const options = codeCheckSearchOptions(spec, defaultExclude());
+		// A check that is still running is given up for this one, and said to be: its progress was written over by
+		// this one's, as if it had finished.
+		stopCodeCheck("replaced");
 		const runId = ++checkRunId;
 		userCancelledRunId = 0;
+		begunCheck = { runId, columnName: colName };
 		const existing = codeCheck();
 		const canMerge =
 			mergeExisting &&
@@ -1212,37 +1321,24 @@ export function TableView(props: { path: string; group?: number }) {
 			(existing.options.include ?? "") === (options.include ?? "") &&
 			(existing.options.exclude ?? "") === (options.exclude ?? "");
 		const counts = canMerge ? new Map(existing.counts) : new Map<string, number>();
+		const unfinished = canMerge ? new Map(existing.unfinished) : new Map<string, number>();
 		// The result goes to the column where it is when the check ends, not where it was when the check began:
 		// with a column to its left deleted meanwhile, the counts were shown on the column that took its place.
 		const target = trackedColumn(spec.column);
 		checkedColumn = target;
 
 		setChecking({ done: 0, total: terms.length, columnName: colName });
-		let cancelled = false;
-		let completed = 0;
-		const CONCURRENCY = 6;
 		try {
-			let nextIdx = 0;
-			const worker = async () => {
-				while (!cancelled) {
-					const idx = nextIdx++;
-					if (idx >= terms.length) return;
-					if (disposed || runId !== checkRunId) {
-						cancelled = true;
-						return;
-					}
-					const term = terms[idx]!;
-					const hits = await backend.search(term, options);
-					if (disposed || runId !== checkRunId) {
-						cancelled = true;
-						return;
-					}
-					counts.set(termLookupKey(term, spec.caseSensitive), hits.length);
-					completed++;
-					setChecking({ done: completed, total: terms.length, columnName: colName });
-				}
-			};
-			await Promise.all(Array.from({ length: Math.min(CONCURRENCY, terms.length) }, () => worker()));
+			// One scan after another, each asked whether it read every file (`scanValuesInTurn`): six ran at once on the
+			// backend's one thread, ran out of time together, and their empty lists were shown as "not in code".
+			const completed = await scanValuesInTurn(
+				terms,
+				(term) => termLookupKey(term, spec.caseSensitive),
+				(term) => backend.searchScan(term, options),
+				{ counts, unfinished },
+				() => disposed || runId !== checkRunId,
+				(done) => setChecking({ done, total: terms.length, columnName: colName }),
+			);
 			const isCurrentRun = !disposed && runId === checkRunId;
 			const isUserCancelled = !disposed && userCancelledRunId === runId;
 			if (isUserCancelled) userCancelledRunId = 0;
@@ -1254,12 +1350,12 @@ export function TableView(props: { path: string; group?: number }) {
 					caseSensitive: spec.caseSensitive,
 					options,
 					counts,
+					unfinished,
 				});
 				if (![...counts.values()].some((n) => n === 0)) setOnlyMissing(false);
-				notify(codeCheckSummary(colName, counts, !isCurrentRun));
+				notify(codeCheckSaid(colName, { counts, unfinished }, !isCurrentRun));
 			}
 		} catch (e: any) {
-			cancelled = true;
 			if (runId === checkRunId) {
 				checkRunId++;
 				if (!disposed) {
@@ -1269,22 +1365,23 @@ export function TableView(props: { path: string; group?: number }) {
 			}
 		} finally {
 			if (checkedColumn === target) checkedColumn = null;
+			// The run is over, however it ended: nothing that happens from here on stops it.
+			if (begunCheck?.runId === runId) begunCheck = null;
 			if (!disposed && runId === checkRunId) setChecking(null);
 		}
 	};
 
 	/**
 	 * Tells the check that is running where its column went: `remap` gives a column's new place, or -1 for one that
-	 * was deleted. A check of a deleted column is stopped; there is nothing left for its result to be shown on.
+	 * was deleted. A check of a deleted column is stopped, and said to be (`stopCodeCheck`); there is nothing left
+	 * for its result to be shown on.
 	 */
 	const moveCheckedColumn = (remap: (column: number) => number) => {
 		if (!checkedColumn) return;
 		checkedColumn.moved(remap);
 		if (checkedColumn.at() >= 0) return;
 		checkedColumn = null;
-		userCancelledRunId = 0;
-		checkRunId++;
-		setChecking(null);
+		stopCodeCheck("column");
 	};
 
 	const findValueInCode = (value: string) => {
@@ -1534,26 +1631,34 @@ export function TableView(props: { path: string; group?: number }) {
 	};
 
 	/** Renders a checked cell's value alongside its targeted code-hit badge(s). */
-	const renderCheckBadge = (term: string, count: number | undefined, opts: SearchOptions, tabIndex = -1) => {
-		if (count === undefined) return null;
-		if (count === 0) {
+	const renderCheckBadge = (term: string, chk: CodeCheckResult, tabIndex = -1) => {
+		const use = checkedUse(termLookupKey(term, chk.caseSensitive), chk, SEARCH_LIMIT);
+		if (!use) return null;
+		if (use.state === "missing") {
 			return (
 				<span class="doc-status tone-off table-use" title="Not found in the searched code files">
 					not in code
 				</span>
 			);
 		}
-		const countText = count >= SEARCH_LIMIT ? `${SEARCH_LIMIT}+` : String(count);
+		// A scan that ran out of time before it found the value says nothing of it: neither a count nor "not in code".
+		const ranOut = "the search ran out of time before it had read every file";
+		const title =
+			use.state === "unknown"
+				? `Not checked: ${ranOut}. Click to search for it.`
+				: use.atLeast && use.count < SEARCH_LIMIT
+					? `Found at least ${use.count} ${use.count === 1 ? "time" : "times"}: ${ranOut}. Click to view in Search.`
+					: `Found ${use.text} ${use.count === 1 ? "time" : "times"} in the searched code files. Click to view in Search.`;
 		return (
 			<button
 				type="button"
 				tabindex={tabIndex}
 				class="link table-use"
-				title={`Found ${countText} ${count === 1 ? "time" : "times"} in the searched code files. Click to view in Search.`}
-				onClick={(e) => (e.stopPropagation(), searchFor(term, opts))}
+				title={title}
+				onClick={(e) => (e.stopPropagation(), searchFor(term, chk.options))}
 				onDblClick={(e) => e.stopPropagation()}
 			>
-				{countText}×
+				{use.state === "unknown" ? "not checked" : `${use.text}×`}
 			</button>
 		);
 	};
@@ -2439,7 +2544,10 @@ export function TableView(props: { path: string; group?: number }) {
 			}
 		}
 		if (!cellEdits.length) return 0;
-		const ops = coalesceZeroWidthEdits(cellEdits)
+		// A fill, a clear, a replace or a typed value over the first row of a table with no header row (`keptEdits`).
+		const kept = keptEdits(coalesceZeroWidthEdits(cellEdits));
+		if (!kept) return 0;
+		const ops = [...kept]
 			.sort((a, b) => b.start - a.start || b.end - a.end)
 			.map((ed) => {
 				const from = model.getPositionAt(ed.start);
@@ -2905,7 +3013,11 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!cells) return;
 		// Nothing is written when the table would show nothing different: a cell that a short row does not have,
 		// emptied or committed as it is, padded the row and left the file changed (`cellChangeEdit`).
-		const edit = cellChangeEdit(cells, column, value, table().delimiter);
+		const written = cellChangeEdit(cells, column, value, table().delimiter);
+		if (!written) return;
+		// A cell of the first row of a table with no header row is a cell of the file's first record: a value that
+		// holds another delimiter is quoted there, as a column's name is (`keptEdits`).
+		const edit = keptEdits([written])?.[0];
 		if (!edit) return;
 		const from = model.getPositionAt(edit.start);
 		const to = model.getPositionAt(edit.end);
@@ -3046,10 +3158,17 @@ export function TableView(props: { path: string; group?: number }) {
 		}
 
 		const values = table().header.map((_, i) => (i === column ? value : ""));
-		const edit = appendRowEdit(model.getValue(), values, table().delimiter, model.getEOL());
-		const pos = model.getPositionAt(edit.offset);
+		const appended = appendRowEdit(model.getValue(), values, table().delimiter, model.getEOL());
+		// The first row added to an empty file is its first record (`keptEdits`).
+		const edit = keptEdits([{ start: appended.offset, end: appended.offset, text: appended.text }])?.[0];
+		if (!edit) {
+			setEditing(null);
+			return;
+		}
+		const from = model.getPositionAt(edit.start);
+		const to = model.getPositionAt(edit.end);
 		model.pushStackElement();
-		model.pushEditOperations([], [{ range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: pos.lineNumber, endColumn: pos.column }, text: edit.text }], () => null);
+		model.pushEditOperations([], [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: edit.text }], () => null);
 		model.pushStackElement();
 
 		const newRow = parseCurrentCsv(model.getValue()).rows.length - 1;
@@ -3108,8 +3227,13 @@ export function TableView(props: { path: string; group?: number }) {
 		if (fromRow < 0 || fromRow >= count || toRow < 0 || toRow >= count || fromRow === toRow) return;
 		const raw = model.getValue();
 		const fresh = parseCurrentCsv(raw);
-		const edit = moveCsvRowEdit(raw, fresh, fromRow, toRow);
-		if (!edit || raw.slice(edit.start, edit.end) === edit.text) return;
+		const moved = moveCsvRowEdit(raw, fresh, fromRow, toRow);
+		if (!moved || raw.slice(moved.start, moved.end) === moved.text) return;
+		// A row moved to the top of a table with no header row becomes the file's first record, and so does the row
+		// below one moved away from there (`keptEdits`). Asked before anything is remapped: a move that is not made
+		// leaves the selection where it is.
+		const edit = keptEdits([moved])?.[0];
+		if (!edit) return;
 
 		setSelectedRows((prev) => {
 			if (!prev.size) return prev;
@@ -3228,12 +3352,16 @@ export function TableView(props: { path: string; group?: number }) {
 	const insertRowAt = (row: number, position: "above" | "below") => {
 		if (!model || !table().header.length) return;
 		const line = table().header.length > 1 ? csvRow(table().header.map(() => ""), table().delimiter) : '""';
-		const edit = insertRowEdit(model.getValue(), table(), row, position, line, model.getEOL());
+		const inserted = insertRowEdit(model.getValue(), table(), row, position, line, model.getEOL());
+		if (!inserted) return;
+		// A row inserted above the first one of a table with no header row is the file's first record (`keptEdits`).
+		const edit = keptEdits([{ start: inserted.offset, end: inserted.offset, text: inserted.text }])?.[0];
 		if (!edit) return;
 		const targetRow = position === "above" ? row : row + 1;
-		const pos = model.getPositionAt(edit.offset);
+		const from = model.getPositionAt(edit.start);
+		const to = model.getPositionAt(edit.end);
 		model.pushStackElement();
-		model.pushEditOperations([], [{ range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: pos.lineNumber, endColumn: pos.column }, text: edit.text }], () => null);
+		model.pushEditOperations([], [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: edit.text }], () => null);
 		model.pushStackElement();
 		setSelectedRows((prev) => (prev.size ? remapRowSetOnInsert(prev, targetRow) : prev));
 		setLastClickedRow((prev) => remapRowIndexOnInsert(prev, targetRow));
@@ -3249,12 +3377,15 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!model) return;
 		const raw = rawRowText(model.getValue(), table(), row);
 		if (raw === null) return;
-		const edit = insertRowEdit(model.getValue(), table(), row, "below", raw, model.getEOL());
+		const inserted = insertRowEdit(model.getValue(), table(), row, "below", raw, model.getEOL());
+		if (!inserted) return;
+		const edit = keptEdits([{ start: inserted.offset, end: inserted.offset, text: inserted.text }])?.[0];
 		if (!edit) return;
 		const targetRow = row + 1;
-		const pos = model.getPositionAt(edit.offset);
+		const from = model.getPositionAt(edit.start);
+		const to = model.getPositionAt(edit.end);
 		model.pushStackElement();
-		model.pushEditOperations([], [{ range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: pos.lineNumber, endColumn: pos.column }, text: edit.text }], () => null);
+		model.pushEditOperations([], [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: edit.text }], () => null);
 		model.pushStackElement();
 		setSelectedRows((prev) => (prev.size ? remapRowSetOnInsert(prev, targetRow) : prev));
 		setLastClickedRow((prev) => remapRowIndexOnInsert(prev, targetRow));
@@ -3270,8 +3401,12 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!model) return;
 		const span = rowSpan(model.getValue(), table(), row);
 		if (!span) return;
-		const from = model.getPositionAt(span.start);
-		const to = model.getPositionAt(span.end);
+		// With the first row of a table with no header row deleted, the row below it is the file's first record: it is
+		// written as one, or the delete is not made (`keptEdits`). Asked before anything is remapped.
+		const edit = keptEdits([{ start: span.start, end: span.end, text: "" }])?.[0];
+		if (!edit) return;
+		const from = model.getPositionAt(edit.start);
+		const to = model.getPositionAt(edit.end);
 		setSelectedRows((prev) => (prev.size ? remapRowSetOnDelete(prev, row) : prev));
 		setLastClickedRow((prev) => remapRowIndexOnDelete(prev, row));
 		setCellAnchor((prev) => {
@@ -3282,7 +3417,7 @@ export function TableView(props: { path: string; group?: number }) {
 		clearFindSelectionScope();
 		clearRowHeights();
 		model.pushStackElement();
-		model.pushEditOperations([], [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: "" }], () => null);
+		model.pushEditOperations([], [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: edit.text }], () => null);
 		model.pushStackElement();
 		const remaining = parseCurrentCsv(model.getValue()).rows.length;
 		const nextRow: number | null = remaining > 0 ? Math.min(row, remaining - 1) : null;
@@ -3297,11 +3432,37 @@ export function TableView(props: { path: string; group?: number }) {
 		});
 	};
 
+	/**
+	 * Writes the whole text anew, as one undoable step. For the one change that means to: a change of the file's
+	 * delimiter, which is in every record. Every other change is the edits of the places it touches (`applyTextEdits`).
+	 */
 	const applyFullText = (nextText: string, message?: string) => {
 		if (!model) return;
 		const fullRange = model.getFullModelRange();
 		model.pushStackElement();
 		model.pushEditOperations([], [{ range: fullRange, text: nextText }], () => null);
+		model.pushStackElement();
+		if (message) notify(message);
+		queueMicrotask(() => rootEl?.focus());
+	};
+
+	/**
+	 * Applies edits of the text (none overlapping, each a place in the text as it is) as one undoable step. Nothing
+	 * outside them is written (ADR 0002). A column renamed, added, deleted or moved, and the selected rows deleted,
+	 * were each written as the whole document, from a text worked out for it: a rename of one header cell wrote
+	 * every row of the file.
+	 */
+	const applyTextEdits = (edits: readonly OffsetTextEdit[], message?: string) => {
+		if (!model) return;
+		const ops = [...edits]
+			.sort((a, b) => b.start - a.start || b.end - a.end)
+			.map((ed) => {
+				const from = model.getPositionAt(ed.start);
+				const to = model.getPositionAt(ed.end);
+				return { range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: ed.text };
+			});
+		model.pushStackElement();
+		model.pushEditOperations([], ops, () => null);
 		model.pushStackElement();
 		if (message) notify(message);
 		queueMicrotask(() => rootEl?.focus());
@@ -3330,19 +3491,24 @@ export function TableView(props: { path: string; group?: number }) {
 		const t = parseCurrentCsv(model.getValue());
 		const targetRows = visibleSelectedRows().filter((r) => r >= 0 && r < t.rows.length).sort((a, b) => b - a);
 		if (!targetRows.length) return;
-		const ops: { range: { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number }; text: string }[] = [];
+		const cellEdits: OffsetTextEdit[] = [];
 		for (const r of targetRows) {
 			const edit = cellChangeEdit(t.rows[r]!, colIdx, value, t.delimiter);
-			if (!edit) continue;
+			if (edit) cellEdits.push(edit);
+		}
+		if (!cellEdits.length) return;
+		// The first row of a table with no header row may be one of the rows (`keptEdits`).
+		const kept = keptEdits(cellEdits);
+		if (!kept) return;
+		const ops = kept.map((edit) => {
 			const from = model.getPositionAt(edit.start);
 			const to = model.getPositionAt(edit.end);
-			ops.push({ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: edit.text });
-		}
-		if (!ops.length) return;
+			return { range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: edit.text };
+		});
 		model.pushStackElement();
 		model.pushEditOperations([], ops, () => null);
 		model.pushStackElement();
-		notify(`Updated ${ops.length} ${ops.length === 1 ? "row" : "rows"} (Ctrl+Z to undo).`);
+		notify(`Updated ${cellEdits.length} ${cellEdits.length === 1 ? "row" : "rows"} (Ctrl+Z to undo).`);
 	};
 
 	const bulkDeleteSelected = async () => {
@@ -3353,8 +3519,13 @@ export function TableView(props: { path: string; group?: number }) {
 		const raw = model.getValue();
 		const fresh = parseCurrentCsv(raw);
 		const targetRows = visibleSelectedRows().filter((r) => r >= 0 && r < fresh.rows.length);
-		const nextText = deleteCsvRows(raw, fresh, targetRows);
-		if (nextText === null) return;
+		// Those rows' lines, and no other part of the text.
+		const deleted = deleteCsvRowsEdits(raw, fresh, targetRows);
+		if (deleted === null) return;
+		// With the first row of a table with no header row among those deleted, another row is the file's first
+		// record (`keptEdits`). Asked before the selection is cleared: rows that are not deleted stay selected.
+		const edits = keptEdits(deleted);
+		if (edits === null) return;
 		setSelectedRows(new Set<number>());
 		setLastClickedRow(null);
 		setCellAnchor(null);
@@ -3362,7 +3533,7 @@ export function TableView(props: { path: string; group?: number }) {
 		setPinnedRow(null);
 		clearFindSelectionScope();
 		clearRowHeights();
-		applyFullText(nextText, `Deleted ${targetRows.length} ${targetRows.length === 1 ? "row" : "rows"} (Ctrl+Z to undo).`);
+		applyTextEdits(edits, `Deleted ${targetRows.length} ${targetRows.length === 1 ? "row" : "rows"} (Ctrl+Z to undo).`);
 	};
 
 	const statusCol = createMemo(() => {
@@ -3526,8 +3697,11 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!name) return;
 		const defVal = await ask(`Default value for existing rows in “${name}” (leave blank for empty)`, "");
 		if (defVal === null) return;
-		const next = addCsvColumn(model.getValue(), table(), name, defVal);
-		if (next) applyFullText(next, `Added column “${name}” (Ctrl+Z to undo).`);
+		// One cell put into each record, and nothing that is there written anew.
+		const raw = model.getValue();
+		const added = addCsvColumnEdits(raw, parseCurrentCsv(raw), name, defVal);
+		const edits = added ? keptEdits(added) : null;
+		if (edits) applyTextEdits(edits, `Added column “${name}” (Ctrl+Z to undo).`);
 	};
 
 	const renameColumnInteractive = async (col: number) => {
@@ -3535,8 +3709,10 @@ export function TableView(props: { path: string; group?: number }) {
 		const oldName = headerName(col);
 		const nextName = (await ask(`Rename column “${oldName || `Column ${col + 1}`}” to`, oldName))?.trim();
 		if (!nextName || nextName === oldName) return;
-		const next = renameCsvColumn(model.getValue(), table(), col, nextName);
-		if (next) applyFullText(next, `Renamed column to “${nextName}”.`);
+		// The one cell of the header.
+		const renamed = renameCsvColumnEdits(parseCurrentCsv(model.getValue()), col, nextName);
+		const edits = renamed ? keptEdits(renamed) : null;
+		if (edits) applyTextEdits(edits, `Renamed column to “${nextName}”.`);
 	};
 
 	const deleteColumnInteractive = async (col: number) => {
@@ -3545,8 +3721,14 @@ export function TableView(props: { path: string; group?: number }) {
 		if ((await choose(`Delete column “${name}” and all of its values?`, ["Delete column"], { danger: "Delete column" })) !== "Delete column") return;
 		const raw = model.getValue();
 		const fresh = parseCurrentCsv(raw);
-		const next = deleteCsvColumn(raw, fresh, col);
-		if (!next) return;
+		// That cell and one delimiter out of each record that has it, and no other part of the text.
+		const without = deleteCsvColumnEdits(raw, fresh, col);
+		if (!without) return;
+		// A first record left with one cell says nothing of what separates the file's values: a table separated by
+		// semicolons, pipes or tabs was read as comma-separated once it was down to one column, and a cell holding a
+		// bare comma fell into two. Such a delete is not made (`keptEdits`); asked before any column is remapped.
+		const edits = keptEdits(without);
+		if (!edits) return;
 		const beforeAlt = model.getAlternativeVersionId();
 		const beforeSnap = captureColUi();
 		const shift = (idx: number) => (idx === col ? -1 : idx > col ? idx - 1 : idx);
@@ -3566,6 +3748,8 @@ export function TableView(props: { path: string; group?: number }) {
 				nextChk = { ...curChk, column: mapped };
 				setCodeCheck(nextChk);
 			} else {
+				// The result that was on the deleted column goes with it. A check that is running goes on, unless this
+				// is the column it is reading (`moveCheckedColumn`, next).
 				nextChk = null;
 				clearCodeCheck();
 			}
@@ -3595,7 +3779,7 @@ export function TableView(props: { path: string; group?: number }) {
 		clearFindSelectionScope();
 		clearRowHeights();
 		closeFilterMenu(false);
-		applyFullText(next, `Deleted column “${name}” (Ctrl+Z to undo).`);
+		applyTextEdits(edits, `Deleted column “${name}” (Ctrl+Z to undo).`);
 		const afterAlt = model.getAlternativeVersionId();
 		if (afterAlt !== beforeAlt) {
 			const afterSnap: ColumnUiSnapshot = {
@@ -3610,6 +3794,10 @@ export function TableView(props: { path: string; group?: number }) {
 			};
 			colSnapshots.set(colSnapshotTransitionKey(afterAlt, beforeAlt), beforeSnap);
 			colSnapshots.set(colSnapshotTransitionKey(beforeAlt, afterAlt), afterSnap);
+			// A check that is running follows its column when this delete is undone, and when it is made again.
+			const moves = columnMoves({ deleted: col });
+			columnsAcross.set(colSnapshotTransitionKey(afterAlt, beforeAlt), moves.undone);
+			columnsAcross.set(colSnapshotTransitionKey(beforeAlt, afterAlt), moves.made);
 		}
 	};
 
@@ -3632,12 +3820,17 @@ export function TableView(props: { path: string; group?: number }) {
 			.map((x) => x.idx);
 		// One edit, from the first row that changes place to the last. Blank lines among the rows are no rows:
 		// they stay on the lines they are on, and the rows change places around them.
-		const edit = sortCsvRowsEdit(raw, t, sortedIndices);
-		setOrder([]);
-		if (!edit) {
+		const sorted = sortCsvRowsEdit(raw, t, sortedIndices);
+		if (!sorted) {
+			setOrder([]);
 			notify("Rows are already in that order.");
 			return;
 		}
+		// The row the sort puts first in a table with no header row becomes the file's first record (`keptEdits`).
+		// A sort that is not written stays as the view's sort: nothing is cleared.
+		const edit = keptEdits([sorted])?.[0];
+		if (!edit) return;
+		setOrder([]);
 		// Clear row-index-based selection so checked checkboxes never point at shifted rows.
 		setSelectedRows(new Set<number>());
 		setLastClickedRow(null);
@@ -3690,7 +3883,9 @@ export function TableView(props: { path: string; group?: number }) {
 		const isAbs = entered.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(entered);
 		const baseDir = inWorkspace && root ? root : curDir;
 		const dest = isAbs ? entered : resolvePath(baseDir, entered);
-		const exists = await backend.read(dest).then(() => true, () => false);
+		// Asked whether the file is there, not read: a text too large to open is refused by the read (the backend reads
+		// none over 20 MB), was taken for no file, and was written over with the export without the question.
+		const exists = await fileExists(dest);
 		if (exists) {
 			const ok = await choose(`Overwrite existing file “${relativeTo(root, dest)}”?`, ["Overwrite"], { danger: "Overwrite" });
 			if (ok !== "Overwrite") return;
@@ -3744,6 +3939,9 @@ export function TableView(props: { path: string; group?: number }) {
 		const after = readingAfterConvert(next, props.path, target);
 		const beforeAlt = model.getAlternativeVersionId();
 		setDelimiterOverride(after);
+		// The one writer that does not ask `keptEdits`: it is the one that means to change what the file is read with.
+		// And the one that writes the whole text: the delimiter is in every record. What is not a delimiter is
+		// written as it was (`convertCsvDelimiter`).
 		applyFullText(next, `Converted file delimiter to ${delimiterLabel(target)} (Ctrl+Z to undo).`);
 		const afterAlt = model.getAlternativeVersionId();
 		if (afterAlt !== beforeAlt && after !== before) {
@@ -3824,10 +4022,16 @@ export function TableView(props: { path: string; group?: number }) {
 			const allSqlNames = new Set<string>();
 			const discovered: { name: string; kind: string; source: string }[] = [];
 			const seenNew = new Set<string>();
+			// The files that are there and could not be read (too large to open, or not text), by the name the notes
+			// give a file. They were passed over in silence, as if they held nothing.
+			const unread: UnreadFile[] = [];
 			for (const file of sqlFiles) {
-				const res = await backend.read(file).catch(() => null);
-				if (!res || res.binary) continue;
 				const relFile = relativeTo(root, file).split("\\").join("/");
+				const res = await textOrWhy(() => backend.read(file), relFile, root);
+				if ("why" in res) {
+					unread.push({ file: relFile, why: res.why });
+					continue;
+				}
 				for (const obj of extractSqlObjects(res.text, { includeAlter: true })) {
 					const fullKey = obj.name.toLowerCase();
 					const bareKey = obj.bareName.toLowerCase();
@@ -3839,22 +4043,24 @@ export function TableView(props: { path: string; group?: number }) {
 					discovered.push({ name: obj.name, kind: obj.kind, source: `From ${relFile}` });
 				}
 			}
-			// Detect previously synced objects that no longer appear in any schema SQL file (skipping rows already marked "gone").
-			const dropped = t.rows
-				.map((r, rowIdx) => ({
+			const unreadFiles = unread.map((u) => u.file);
+			// Said once, whatever the sync goes on to find or ask. A file that could not be read is not a file that is
+			// gone: every row that had come from one was offered as "Mark as gone".
+			if (unread.length) {
+				notify(`${unreadFilesSaid(unread)} Rows from ${unread.length === 1 ? "that file" : "those files"} were left as they were.`, "error");
+			}
+			// Detect previously synced objects that no longer appear in any schema SQL file (skipping rows already marked
+			// "gone", and rows from a file that could not be read: `registryRowsGone`).
+			const dropped = registryRowsGone(
+				t.rows.map((r, rowIdx) => ({
 					rowIdx,
 					name: (r[nameCol]?.text ?? "").trim(),
 					note: noteCol >= 0 ? (r[noteCol]?.text ?? "") : "",
 					status: statusIdx >= 0 ? (r[statusIdx]?.text ?? "").trim().toLowerCase() : "",
-				}))
-				.filter(
-					(r) =>
-						r.name &&
-						/^From\s+/i.test(r.note) &&
-						r.status !== "gone" &&
-						!allSqlNames.has(r.name.toLowerCase()) &&
-						!allSqlNames.has(r.name.split(".").pop()!.toLowerCase()),
-				);
+				})),
+				allSqlNames,
+				unreadFiles,
+			);
 			const droppedPreview = `${dropped.slice(0, 5).map((d) => d.name).join(", ")}${dropped.length > 5 ? ", …" : ""}`;
 			const droppedMsg = dropped.length
 				? ` (${dropped.length} listed ${dropped.length === 1 ? "object is" : "objects are"} no longer in schema SQL: ${dropped.slice(0, 3).map((d) => d.name).join(", ")}${dropped.length > 3 ? ", …" : ""})`
@@ -3917,7 +4123,8 @@ export function TableView(props: { path: string; group?: number }) {
 				for (const r of freshTable.rows) {
 					const name = (r[freshNameCol]?.text ?? "").trim().toLowerCase();
 					const note = freshNoteCol >= 0 ? (r[freshNoteCol]?.text ?? "") : "";
-					if (!name || !/^From\s+/i.test(note) || !droppedNameSet.has(name)) continue;
+					// A row of the same name that came from a file that could not be read is not one of those asked about.
+					if (!name || !/^From\s+/i.test(note) || !droppedNameSet.has(name) || noteNamesFile(note, unreadFiles)) continue;
 					const existingCell = r[freshStatusIdx];
 					if (existingCell && existingCell.text.trim().toLowerCase() === "gone") continue;
 					const last = r[r.length - 1]!;
@@ -3956,7 +4163,10 @@ export function TableView(props: { path: string; group?: number }) {
 			}
 
 			if (!rawEdits.length) return;
-			const ops = coalesceZeroWidthEdits(rawEdits)
+			// Rows appended to a registry that is still empty hold its first record (`keptEdits`).
+			const kept = keptEdits(coalesceZeroWidthEdits(rawEdits));
+			if (!kept) return;
+			const ops = [...kept]
 				.sort((a, b) => b.start - a.start || b.end - a.end)
 				.map((ed) => {
 					const from = model.getPositionAt(ed.start);
@@ -4041,7 +4251,7 @@ export function TableView(props: { path: string; group?: number }) {
 					if (targetCol === undefined) break;
 					if (!cells[targetCol] && pasteRow[cOff] !== "") tailVals.set(targetCol, pasteRow[cOff]!);
 				}
-				const maxColNeeded = Math.max(-1, ...tailVals.keys());
+				const maxColNeeded = greatest(tailVals.keys(), (c) => c, -1);
 				const finalCellCount = tailVals.size && maxColNeeded >= cells.length ? maxColNeeded + 1 : cells.length;
 				for (let cOff = 0; cOff < pasteRow.length; cOff++) {
 					const targetCol = cols[startVisCol + cOff];
@@ -4086,21 +4296,26 @@ export function TableView(props: { path: string; group?: number }) {
 				nl;
 			cellEdits.push({ start: curText.length, end: curText.length, text: block });
 		}
-		const ops = coalesceZeroWidthEdits(cellEdits)
+		if (!cellEdits.length) return;
+		// A block pasted over the first row of a table with no header row writes cells of the file's first record
+		// (`keptEdits`).
+		const kept = keptEdits(coalesceZeroWidthEdits(cellEdits));
+		if (!kept) return;
+		const ops = [...kept]
 			.sort((a, b) => b.start - a.start || b.end - a.end)
 			.map((ed) => {
 				const from = model.getPositionAt(ed.start);
 				const to = model.getPositionAt(ed.end);
 				return { range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: ed.text };
 			});
-		if (!ops.length) return;
 		model.pushStackElement();
 		model.pushEditOperations([], ops, () => null);
 		model.pushStackElement();
 		if (appended.length === 1) pinRowIfFiltered(t.rows.length);
 		// A paste adds rows, never columns: what was copied past the last column shown is left out, and said to be.
-		// The notice gave the size of what was copied as the size of what was pasted.
-		const fit = pasteFit(Math.max(...grid.map((r) => r.length)), startVisCol, cols.length);
+		// The notice gave the size of what was copied as the size of what was pasted. The widest row is found by a
+		// loop (`greatest`): with the rows spread into `Math.max`, a paste of 130,000 rows landed and then threw here.
+		const fit = pasteFit(greatest(grid, (r) => r.length), startVisCol, cols.length);
 		notify(pasteNotice(grid.length, fit.cols, fit.leftOut));
 	};
 
@@ -4222,6 +4437,46 @@ export function TableView(props: { path: string; group?: number }) {
 			});
 		}
 	};
+
+	// An open cell editor is on the page, whatever opened it and whatever happened since: its row is among the rows
+	// shown, or it is made to be (`editorRowReveal`), or the editor is closed. A row inserted while the rows are
+	// grouped is blank, so it belongs to the group of rows with nothing in the grouping column; with that group
+	// closed the table was "editing" a cell that was nowhere, and the arrows, F2, typing and paste did nothing until
+	// Escape was pressed. Tab from the grouping column's cell did the same when the value written moved the row into
+	// a closed group. Asked here for every editor and every change of the rows, not by each thing that opens one.
+	createEffect(
+		() => {
+			const ed = editing();
+			if (!ed || ed.ghost || rowVisIndexMap().has(ed.row)) return null;
+			const gCol = groupByCol();
+			const row = ed.row;
+			return {
+				row,
+				reveal: editorRowReveal(row, {
+					rowCount: table().rows.length,
+					passes: rows().some((r) => r.index === row),
+					groupKey: gCol === null ? null : (table().rows[row]?.[gCol]?.text ?? "").trim().toLowerCase(),
+					collapsed: collapsedGroups(),
+				}),
+			};
+		},
+		(hidden) => {
+			if (!hidden) return;
+			if (hidden.reveal === "close") {
+				setEditing(null);
+				return;
+			}
+			if (hidden.reveal.pin) setPinnedRow(hidden.row);
+			const group = hidden.reveal.openGroup;
+			if (group !== null) {
+				setCollapsedGroups((prev) => {
+					const next = new Set(prev);
+					next.delete(group);
+					return next;
+				});
+			}
+		},
+	);
 
 	const revealMatch = (match: { row: number; visRow: number; column: number }) => {
 		expandGroupForRow(match.row);
@@ -4901,11 +5156,17 @@ export function TableView(props: { path: string; group?: number }) {
 	const applyColumnOrderToFile = () => {
 		if (!model) return;
 		const applied = fullColumns();
-		const nextText = reorderCsvColumns(model.getValue(), table(), applied);
-		if (!nextText) {
+		// In each record, the cells from the first that changes place to the last; a record whose cells there are
+		// written alike, or that is too short to have them, is not written at all.
+		const raw = model.getValue();
+		const reordered = reorderCsvColumnsEdits(raw, parseCurrentCsv(raw), applied);
+		if (!reordered) {
 			setColOrder([]);
 			return;
 		}
+		// The first record's cells change places (`keptEdits`). An order that is not written stays as the view's order.
+		const edits = keptEdits(reordered);
+		if (edits === null) return;
 		closeFilterMenu(false);
 		setEditing(null);
 		clearFindSelectionScope();
@@ -4913,10 +5174,9 @@ export function TableView(props: { path: string; group?: number }) {
 		const beforeAlt = model.getAlternativeVersionId();
 		const beforeSnap = captureColUi();
 
-		const fullRange = model.getFullModelRange();
-		model.pushStackElement();
-		model.pushEditOperations([], [{ range: fullRange, text: nextText }], () => null);
-		model.pushStackElement();
+		// No edit at all where every moved cell is written like the one it changes places with: the order is the
+		// file's already, and only the view's own order is left to put back.
+		if (edits.length) applyTextEdits(edits);
 
 		// Remap active filters, sort, frozen/hidden columns, widths, selection, and code-check annotations to the new indices.
 		const nextFilters = new Map<number, ColumnFilter>();
@@ -4991,6 +5251,10 @@ export function TableView(props: { path: string; group?: number }) {
 			};
 			colSnapshots.set(colSnapshotTransitionKey(afterAlt, beforeAlt), beforeSnap);
 			colSnapshots.set(colSnapshotTransitionKey(beforeAlt, afterAlt), afterSnap);
+			// A check that is running follows its column when this order is undone, and when it is made again.
+			const moves = columnMoves({ order: applied });
+			columnsAcross.set(colSnapshotTransitionKey(afterAlt, beforeAlt), moves.undone);
+			columnsAcross.set(colSnapshotTransitionKey(beforeAlt, afterAlt), moves.made);
 		}
 		notify("Saved column order to file (Ctrl+Z to undo).");
 		queueMicrotask(() => rootEl?.focus());
@@ -5225,10 +5489,13 @@ export function TableView(props: { path: string; group?: number }) {
 			else focusCell(row, lastCol, { keepAnchor: e.shiftKey });
 			return;
 		}
-		if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+		// Typing starts an edit with the character typed, AltGr and Option characters with the rest (`typedCharacter`):
+		// `@ { [ \ | €` on a German keyboard are typed with Ctrl+Alt down as Windows reports AltGr, and did nothing.
+		const typed = typedCharacter(e, keyOs);
+		if (typed !== null) {
 			e.preventDefault();
 			if (!isCellInRange(row, column)) setCellAnchor(null);
-			setEditing({ ghost: false, row, column, seed: e.key });
+			setEditing({ ghost: false, row, column, seed: typed });
 		}
 	};
 
@@ -5239,7 +5506,7 @@ export function TableView(props: { path: string; group?: number }) {
 	 */
 	const keyToActiveCell = (e: KeyboardEvent): boolean => {
 		const ac = activeCell();
-		if (!ac || ac.ghost || editing() || modalOpen() || !keyActsOnCell(e)) return false;
+		if (!ac || ac.ghost || editing() || modalOpen() || !keyActsOnCell(e, keyOs)) return false;
 		const visIdx = visEntryIdxForRow(ac.row);
 		if (visIdx < 0) return false;
 		ensureVisRowInWindow(visIdx);
@@ -5295,9 +5562,11 @@ export function TableView(props: { path: string; group?: number }) {
 			focusGhostCell(cols[cols.length - 1] ?? column);
 			return;
 		}
-		if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+		// The blank last row answers typing as a cell does (`typedCharacter`).
+		const typed = typedCharacter(e, keyOs);
+		if (typed !== null) {
 			e.preventDefault();
-			setEditing({ ghost: true, column, seed: e.key });
+			setEditing({ ghost: true, column, seed: typed });
 		}
 	};
 
@@ -5973,9 +6242,19 @@ export function TableView(props: { path: string; group?: number }) {
 							<Show
 								when={missingCount() > 0}
 								fallback={
-									<span class="doc-status tone-done table-check-ok" title={`All ${chk().counts.size} checked values in “${chk().columnName}” were found in code`}>
-										{chk().columnName}: {chk().counts.size} in code
-									</span>
+									// With values whose scan did not finish, "all were found" is not said: only how many were.
+									<Show when={checkTotals().found > 0 || checkTotals().unknown === 0}>
+										<span
+											class="doc-status tone-done table-check-ok"
+											title={
+												checkTotals().unknown > 0
+													? `${checkTotals().found} checked ${checkTotals().found === 1 ? "value" : "values"} in “${chk().columnName}” ${checkTotals().found === 1 ? "was" : "were"} found in code`
+													: `All ${checkTotals().found} checked values in “${chk().columnName}” were found in code`
+											}
+										>
+											{chk().columnName}: {checkTotals().found} in code
+										</span>
+									</Show>
 								}
 							>
 								<button
@@ -5987,6 +6266,14 @@ export function TableView(props: { path: string; group?: number }) {
 								>
 									{chk().columnName}: not in code {missingCount()}
 								</button>
+							</Show>
+							<Show when={checkTotals().unknown > 0}>
+								<span
+									class="doc-status tone-warn table-check-ok"
+									title={`The search ran out of time before it had read every file, and had not found ${checkTotals().unknown === 1 ? "this value" : "these values"} by then: it is not known whether ${checkTotals().unknown === 1 ? "it is" : "they are"} in code. Check again, or search fewer files.`}
+								>
+									{missingCount() === 0 && checkTotals().found === 0 ? `${chk().columnName}: ` : ""}not checked {checkTotals().unknown}
+								</span>
 							</Show>
 							<button
 								type="button"
@@ -6909,8 +7196,7 @@ export function TableView(props: { path: string; group?: number }) {
 																						{() => {
 																							const trimmed = value().trim();
 																							if (!trimmed) return null;
-																							const count = chk().counts.get(termLookupKey(trimmed, chk().caseSensitive));
-																							return renderCheckBadge(trimmed, count, chk().options, cellTabIndex());
+																							return renderCheckBadge(trimmed, chk(), cellTabIndex());
 																						}}
 																					</>
 																				)}
@@ -6929,8 +7215,7 @@ export function TableView(props: { path: string; group?: number }) {
 																					{() => {
 																						const chk = checkedHere();
 																						if (!chk) return null;
-																						const count = chk.counts.get(termLookupKey(trimmed, chk.caseSensitive));
-																						return renderCheckBadge(trimmed, count, chk.options, cellTabIndex());
+																						return renderCheckBadge(trimmed, chk, cellTabIndex());
 																					}}
 																				</>
 																			);
@@ -7016,7 +7301,7 @@ export function TableView(props: { path: string; group?: number }) {
 																			setEditDraft(e.currentTarget.value);
 																			setEditDirty(true);
 																			setPickerOpen(true);
-																			setPickerIdx(-1);
+																			stepPicker({ kind: "shown" });
 																			setPickerAnchor(e.currentTarget.getBoundingClientRect());
 																		}}
 																		onKeyDown={(e) => {
@@ -7025,18 +7310,18 @@ export function TableView(props: { path: string; group?: number }) {
 																			if (pickerOpen() && opts.length > 0) {
 																				if (e.key === "ArrowDown") {
 																					e.preventDefault();
-																					setPickerIdx((i) => (i + 1) % opts.length);
+																					stepPicker({ kind: "arrow", key: "ArrowDown", count: opts.length });
 																					return;
 																				}
 																				if (e.key === "ArrowUp") {
 																					e.preventDefault();
-																					setPickerIdx((i) => (i <= 0 ? opts.length - 1 : i - 1));
+																					stepPicker({ kind: "arrow", key: "ArrowUp", count: opts.length });
 																					return;
 																				}
 																			}
 																			if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
 																				e.preventDefault();
-																				const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
+																				const chosen = suggestionTaken({ index: pickerIdx() }, opts, pickerOpen());
 																				const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
 																				finish(val, cellRange()?.isMulti ? "range" : "stay");
 																			} else if (e.key === "Enter" && (e.shiftKey || e.altKey)) {
@@ -7049,12 +7334,12 @@ export function TableView(props: { path: string; group?: number }) {
 																				setTimeout(() => setEditing(nextEdit), 0);
 																			} else if (e.key === "Enter") {
 																				e.preventDefault();
-																				const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
+																				const chosen = suggestionTaken({ index: pickerIdx() }, opts, pickerOpen());
 																				const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
 																				finish(val, "down");
 																			} else if (e.key === "Tab") {
 																				e.preventDefault();
-																				const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
+																				const chosen = suggestionTaken({ index: pickerIdx() }, opts, pickerOpen());
 																				const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
 																				finish(val, e.shiftKey ? "prev" : "next");
 																			} else if (e.key === "Escape") {
@@ -7174,7 +7459,7 @@ export function TableView(props: { path: string; group?: number }) {
 																	setEditDraft(e.currentTarget.value);
 																	setEditDirty(true);
 																	setPickerOpen(true);
-																	setPickerIdx(-1);
+																	stepPicker({ kind: "shown" });
 																	setPickerAnchor(e.currentTarget.getBoundingClientRect());
 																}}
 																onKeyDown={(e) => {
@@ -7183,23 +7468,23 @@ export function TableView(props: { path: string; group?: number }) {
 																	if (pickerOpen() && opts.length > 0) {
 																		if (e.key === "ArrowDown") {
 																			e.preventDefault();
-																			setPickerIdx((i) => (i + 1) % opts.length);
+																			stepPicker({ kind: "arrow", key: "ArrowDown", count: opts.length });
 																			return;
 																		}
 																		if (e.key === "ArrowUp") {
 																			e.preventDefault();
-																			setPickerIdx((i) => (i <= 0 ? opts.length - 1 : i - 1));
+																			stepPicker({ kind: "arrow", key: "ArrowUp", count: opts.length });
 																			return;
 																		}
 																	}
 																	if (e.key === "Enter") {
 																		e.preventDefault();
-																		const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
+																		const chosen = suggestionTaken({ index: pickerIdx() }, opts, pickerOpen());
 																		const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
 																		finish(val, "down");
 																	} else if (e.key === "Tab") {
 																		e.preventDefault();
-																		const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
+																		const chosen = suggestionTaken({ index: pickerIdx() }, opts, pickerOpen());
 																		const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
 																		finish(val, e.shiftKey ? "prev" : "next");
 																	} else if (e.key === "Escape") {
@@ -7346,6 +7631,7 @@ export function TableView(props: { path: string; group?: number }) {
 								aria-label="Cell suggestions"
 								style={posStyle()}
 								onMouseDown={(e) => e.preventDefault()}
+								onMouseLeave={() => stepPicker({ kind: "left" })}
 							>
 								<For each={opts()}>
 									{(opt, idx) => {
@@ -7357,6 +7643,8 @@ export function TableView(props: { path: string; group?: number }) {
 												if (active) optEl?.scrollIntoView({ block: "nearest" });
 											},
 										);
+										// Marked by a pointer that moved onto it, not by being drawn under one at rest (`stepSuggestionMark`):
+										// both reports of the pointer are passed on, and the rule tells a move from a redraw.
 										return (
 											<button
 												type="button"
@@ -7366,7 +7654,8 @@ export function TableView(props: { path: string; group?: number }) {
 												ref={(el) => {
 													optEl = el;
 												}}
-												onMouseEnter={() => setPickerIdx(idx())}
+												onMouseEnter={(e) => stepPicker({ kind: "pointer", index: idx(), screenX: e.screenX, screenY: e.screenY })}
+												onMouseMove={(e) => stepPicker({ kind: "pointer", index: idx(), screenX: e.screenX, screenY: e.screenY })}
 												onClick={() => {
 													const baseVal = activeInputEl?.value ?? editDraft();
 													const nextVal = resolvePickerChoice(opt.value, baseVal);

@@ -27,7 +27,7 @@ import { isPlanPath } from "../plan/model";
 import { PlanView } from "../plan/PlanView";
 import { baseName, dirName, isInside, relativePath, relativeTo } from "../../shared/paths";
 import { linkWritten } from "../../shared/docLinks";
-import { droppedFileNote, extractCommentSpans, writtenInComment } from "../../shared/editorDocHelpers";
+import { DRAG_TYPE, dragEffect, dropEffectFor, droppedFileNote, droppedInComment, droppedNoteLanguage, effectAllowedFor, extractCommentSpans } from "../../shared/editorDocHelpers";
 import { sslCommentSpans } from "./textmate";
 import { tabLabels } from "./tabs";
 import { Menu, type MenuItem } from "../Menu";
@@ -744,6 +744,13 @@ export function EditorGroup(props: { index: number }) {
 		const stays = dragged.group === index && lands === (g.tabs[g.tabs.indexOf(dragged.path) + 1] ?? null);
 		setDropAt(stays ? null : { group: index, before: lands });
 	};
+	/**
+	 * A tab over a row of tabs is a move, and is said to be: a tab allows a copy too (a link to its file, on a
+	 * Markdown document), and left to the browser's own choice the move would be shown as a copy.
+	 */
+	const overTabs = (e: DragEvent) => {
+		if (e.dataTransfer) e.dataTransfer.dropEffect = dragEffect("tab", "tab-strip");
+	};
 	const drop = (e: DragEvent) => {
 		const tab = dragged;
 		if (!tab) return;
@@ -975,7 +982,7 @@ export function EditorGroup(props: { index: number }) {
 								if (e.target === e.currentTarget) void newUntitled(props.index);
 							}}
 							// Past the last tab: the dragged one would stand last.
-							onDragOver={(e) => dragged && (e.preventDefault(), markDrop(props.index, null))}
+							onDragOver={(e) => dragged && (e.preventDefault(), overTabs(e), markDrop(props.index, null))}
 							onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setDropAt(null)}
 							onDrop={drop}
 						>
@@ -1003,9 +1010,11 @@ export function EditorGroup(props: { index: number }) {
 								draggable="true"
 								onDragStart={(e) => {
 									dragged = { path, group: props.index };
-									// The tab's own kind of thing: dropped on the text, or outside the app, it is nothing.
-									e.dataTransfer?.setData("application/x-ssl-studio-tab", path);
-									if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+									// The tab's own kind of thing: outside the app, or on text that does not ask for it, it is nothing.
+									e.dataTransfer?.setData(DRAG_TYPE.tab, path);
+									// What its targets ask for: a move along a row of tabs, and a copy on a Markdown document, which
+									// writes a link to the tab's file. With `move` alone here that drop could never happen.
+									if (e.dataTransfer) e.dataTransfer.effectAllowed = effectAllowedFor("tab");
 								}}
 								onDragEnd={() => {
 									dragged = null;
@@ -1015,6 +1024,7 @@ export function EditorGroup(props: { index: number }) {
 									if (!dragged) return;
 									e.preventDefault();
 									e.stopPropagation();
+									overTabs(e);
 									// Over a tab's first half it would stand before that tab, over its second half after it.
 									const box = e.currentTarget.getBoundingClientRect();
 									const row = group().tabs;
@@ -1411,14 +1421,15 @@ export function EditorGroup(props: { index: number }) {
 						class="editor-host"
 						ref={host}
 						onDragOver={(e) => {
-							const types = e.dataTransfer?.types;
-							if (!types?.includes("application/x-ssl-studio-file")) return;
+							// A file's row, from the Explorer or the Docs panel: a note of it is written, which is a copy.
+							const effect = e.dataTransfer ? dropEffectFor("code-editor", e.dataTransfer.types) : "none";
+							if (effect === "none") return;
 							e.preventDefault();
 							e.stopPropagation();
-							if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+							e.dataTransfer!.dropEffect = effect;
 						}}
 						onDrop={(e) => {
-							const droppedPath = e.dataTransfer?.getData("application/x-ssl-studio-file");
+							const droppedPath = e.dataTransfer?.getData(DRAG_TYPE["explorer-row"]);
 							if (!droppedPath || !editor) return;
 							const model = editor.getModel();
 							const curPath = group().active;
@@ -1428,6 +1439,7 @@ export function EditorGroup(props: { index: number }) {
 							const hit = editor.getTargetAtClientPoint(e.clientX, e.clientY);
 							const pos = hit?.position ?? editor.getPosition() ?? new monaco.Position(1, 1);
 							const lang = model.getLanguageId();
+							const noteLang = droppedNoteLanguage(lang);
 							let snippet: string;
 							if (lang === "markdown" || isMarkdown(curPath)) {
 								const relRaw = relativePath(dirName(curPath), droppedPath).replace(/\\/g, "/");
@@ -1435,23 +1447,24 @@ export function EditorGroup(props: { index: number }) {
 								const droppedDoc = docs().find((d) => d.exists && canonical(d.path) === canonical(droppedPath));
 								const title = droppedDoc?.title?.trim() || baseName(droppedPath).replace(/\.[^.]+$/, "") || baseName(droppedPath);
 								snippet = `[${title}](${relLink})`;
-							} else if (lang === "ssl" || lang === "sql") {
+							} else if (noteLang) {
 								const root = state.workspace?.root;
 								const rel =
 									root && isInside(root, droppedPath)
 										? relativeTo(root, droppedPath).replace(/\\/g, "/")
 										: relativePath(dirName(curPath), droppedPath).replace(/\\/g, "/");
-								let insideComment = false;
-								if (pos.lineNumber <= 5000) {
-									const before: string[] = [];
-									for (let i = 1; i < pos.lineNumber; i++) before.push(model.getLineContent(i));
-									// Where a comment is in SSL is the grammar's to say, the one the colours come from (ADR 0003).
-									const spansOf = lang === "ssl" ? sslCommentSpans : extractCommentSpans;
-									insideComment = writtenInComment(before, model.getLineContent(pos.lineNumber), pos.column - 1, spansOf);
-								}
-								const note = droppedFileNote(rel, lang, insideComment);
+								// Where a comment is in SSL is the grammar's to say, the one the colours come from (ADR 0003).
+								// Null where it cannot be known, and then no comment is written (see `droppedFileNote`).
+								const insideComment = droppedInComment(
+									noteLang,
+									pos.lineNumber,
+									(n) => model.getLineContent(n),
+									pos.column - 1,
+									noteLang === "ssl" ? sslCommentSpans : extractCommentSpans,
+								);
+								const note = droppedFileNote(rel, noteLang, insideComment);
 								if (note === null) {
-									notify(`${rel} was not written here: its path has “${lang === "ssl" ? ";" : "*/"}” in it, which ends a comment in ${lang === "ssl" ? "SSL" : "SQL"}.`, "error");
+									notify(`${rel} was not written here: its path has “${noteLang === "ssl" ? ";" : "*/"}” in it, which ends a comment in ${noteLang === "ssl" ? "SSL" : "SQL"}.`, "error");
 									return;
 								}
 								snippet = note;

@@ -155,3 +155,14 @@ what the Explorer says), the user answered "Yes, those too". So:
 - **Where they show**: the docs' as the Catalog row at the end of the
   Docs list; the tests' and the code's with the project's own files,
   since those folders have no list of their own in the panel.
+
+**2026-11-25, on the user's word.** One thing under "Not decided" no
+longer stands as written:
+
+- **The language server is not asked for the tables a script uses.** The
+  request (LSP-REQUESTS, L6) is withdrawn and its issue closed. The user:
+  "I don't want to bloat the lsp by adding ide features when it should not
+  be the lsps responsibility." Which tables a script names is the IDE's own
+  to find, from the names of the tables a project describes; the server is
+  asked only where comments and strings are (LSP-REQUESTS, L9). Whether the
+  agent is told a project's schema is no longer waiting on the server.

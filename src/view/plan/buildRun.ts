@@ -17,9 +17,9 @@ import { catalogsKeptFor, workPrompt } from "../projectDocs";
 import { applyText, canonical, documents, notify, openFile, setState, state } from "../state";
 import { joinPath, relativeTo } from "../../shared/paths";
 import { TEMPLATES } from "../../shared/houseStyle";
-import { planHash, planHashMatches, specHash } from "./assist";
-import { assembleScript, bannerFor, cutShort, DEFAULT_TOKEN_BUDGET, judgeUnit, MAX_ATTEMPTS, modelIsLocal, newRun, nextCostBudget, nextStep, overBudget, patternsFrom, procedureSpans, procedureText, questionIn, raiseBudget, readCostBudget, readSpecFile, requeueRunning, requiredCalls, retryPrompt, reviewPrompt, runFileName, scriptOf, scriptProblem, spentUp, unbuiltNodes, unitPrompt, unwritableUnit, type BuildRun, type BuildUnit, type Edge } from "./build";
-import { builtOf, changeText, classifyUnits, recordBuilt, settleBuilt } from "./built";
+import { hashText, planHash, planHashMatches, specHash } from "./assist";
+import { assembleScript, bannerFor, cutShort, DEFAULT_TOKEN_BUDGET, givenFromAccepted, giveTo, isGiven, judgeUnit, MAX_ATTEMPTS, mendRun, modelIsLocal, newRun, nextCostBudget, nextStep, overBudget, patternsFrom, procedureSpans, procedureText, questionIn, raiseBudget, readCostBudget, readSpecFile, requeueRunning, requiredCalls, retryPrompt, reviewPrompt, reviewStale, runFileName, sameText, scriptOf, scriptProblem, settleAccepted, shownOf, spentUp, stillShown, takeBack, takenBack, textPrint, unbudgeted, unbuiltNodes, unitPrompt, unitsToReview, unwritableUnit, type BuildRun, type BuildUnit, type Edge } from "./build";
+import { builtFrom, builtOf, changeText, classifyUnits, nodePrints, recordBuilt, settleBuilt } from "./built";
 import { driftFor } from "./drift";
 import type { Plan } from "./model";
 import { askAgent, begin, latestAssistOf, planOf, savePlan, specPath, survey, updateAssist } from "./run";
@@ -36,6 +36,31 @@ const stopping = new Set<string>();
 const building = new Map<string, BuildRun>();
 /** Tool calls in a turn before it is stopped. Nothing here needs any; a skill may take one to load. */
 const TOOL_LIMIT = 2;
+
+/**
+ * What a second opinion reads of a run, as one short print: each unit that has passed, with its script and its
+ * code. A run keeps the print its opinion was last asked about (`reviewOf`, saved in the run's file beside the
+ * opinion), and the opinion is asked for when the two differ, and only then.
+ *
+ * The rule before this was "ask when this call built something, or the run has no opinion", and it failed both
+ * ways. An opinion that came back empty, or whose turn failed, left the run with none, so every "Carry on
+ * building" click on a finished build asked again: a turn of the model, and its cost, each time. And a unit that
+ * passed in a call which then stopped was never read: the next call found nothing left to build, had built
+ * nothing itself, and showed the opinion written before that unit as the second opinion on it.
+ */
+const passedPrint = (units: readonly BuildUnit[], plan: Plan) => hashText(JSON.stringify(units.filter((u) => u.status === "passed").map((u) => [u.name, scriptOf(u, plan), u.code ?? ""])));
+
+/**
+ * The second opinion as a review shows it. One asked about fewer units than have passed by now is said to be:
+ * a build that stopped, or reached its budget, after more had passed is reviewed with the opinion it has. An
+ * opinion from before the run kept what it was asked about is shown as it always was.
+ */
+function opinionNote(run: BuildRun, plan: Plan): string | undefined {
+	if (!run.review) return undefined;
+	const asked = run.reviewOf;
+	const older = asked !== undefined && asked !== passedPrint(run.units, plan);
+	return `${older ? "A second opinion from earlier in this build, which may be wrong. It has not read what was built since" : "A second opinion, which may be wrong"}:\n\n${run.review}`;
+}
 
 export const runFile = (path: string, root = snapshot(state).workspace?.root ?? "") =>
 	joinPath(root, ".ssl-studio", "plans", runFileName(relativeTo(root, path)));
@@ -58,46 +83,100 @@ function publish(path: string, run: BuildRun | null, expectedRoot?: string): boo
 	return true;
 }
 
+/** Run files that could not be read, and were said to be: said once each, not every time the plan comes to the front. */
+const unread = new Set<string>();
+/** A run's file that holds something, and nothing a build can be taken up from. A discarded build's file holds `null`, and says nothing. */
+function notARun(file: string, root: string) {
+	if (unread.has(file)) return;
+	unread.add(file);
+	notify(`The build's saved progress in ${relativeTo(root, file)} could not be read, so it was not taken up. A new build starts afresh.`, "error");
+}
+
+/**
+ * The units of a run whose script reads again as it did before they were accepted into the editor (`takenBack`).
+ * Nothing is read, and nothing waited for, where no unit was accepted that way.
+ */
+async function unitsTakenBack(run: BuildRun, plan: Plan, root: string): Promise<BuildUnit[]> {
+	const held = run.units.filter((u) => u.status === "passed" && isGiven(u, plan) && Array.isArray(u.was) && u.was.length);
+	const texts = new Map<string, string | null>();
+	for (const script of new Set(held.map((u) => scriptOf(u, plan)))) texts.set(script, await readScript(script, root));
+	return held.filter((u) => takenBack(u.was, texts.get(scriptOf(u, plan)) ?? null));
+}
+
+const scriptsOf = (units: readonly BuildUnit[], plan: Plan) => [...new Set(units.map((u) => scriptOf(u, plan)))];
+const TAKEN_BACK = (scripts: string[]) => `${scripts.join(", ")} no longer ${scripts.length === 1 ? "holds" : "hold"} what was accepted: the change was undone, or closed without saving. ${scripts.length === 1 ? "It is" : "They are"} offered for review again.`;
+
+/**
+ * Looks at each script accepted into the editor, and offers for review again the ones that no longer hold what
+ * they were given. Accepting is an undoable edit of a buffer, not a save: undone, or closed without saving, the
+ * code was gone, and the run still said "accepted", so the script could never be reviewed again and the plan was
+ * recorded as built with it the next time it was opened. Asked whenever the plan's assistant comes up (`loadRun`)
+ * and before a review opens.
+ */
+export async function recheckAccepted(path: string) {
+	const root = snapshot(state).workspace?.root;
+	const run = latestAssistOf(path).run;
+	const plan = planOf(path);
+	if (!root || !run || !plan) return;
+	const gone = await unitsTakenBack(run, plan, root);
+	if (!gone.length || snapshot(state).workspace?.root !== root) return;
+	const prints = new Set(gone.map((u) => u.given!));
+	if (mutate(path, (r) => takeBack(r, prints, plan))) notify(TAKEN_BACK(scriptsOf(gone, plan)));
+}
+
 /** Picks a run back up when its plan opens. A unit caught mid-turn goes back to waiting. */
 export async function loadRun(path: string) {
 	const root = snapshot(state).workspace?.root;
-	if (!root || latestAssistOf(path).run) return;
-	const text = await backend.read(runFile(path, root)).then(
+	if (!root) return;
+	// A run already taken up is not read again. Whether its accepted scripts still hold their code is: this is
+	// called each time the plan's assistant comes up, which is when "Review" is offered or is not.
+	if (latestAssistOf(path).run) return recheckAccepted(path);
+	const file = runFile(path, root);
+	const text = await backend.read(file).then(
 		(f) => f.text,
 		() => null,
 	);
 	if (!text || snapshot(state).workspace?.root !== root || latestAssistOf(path).run) return;
 	try {
-		const raw = JSON.parse(text) as Partial<BuildRun> | null;
+		const raw: unknown = JSON.parse(text);
+		if (raw === null) return;
+		// Tokens, cost and budget are not taken on trust (`mendRun`), nor is anything else a build goes by.
+		const mended = mendRun(raw);
+		if (!mended) return notARun(file, root);
 		const plan = planOf(path);
-		if (
-			!raw ||
-			typeof raw !== "object" ||
-			!Array.isArray(raw.units) ||
-			!Array.isArray(raw.accepted) ||
-			!Array.isArray(raw.map) ||
-			!plan ||
-			!planHashMatches(raw.planHash, plan)
-		) {
-			return;
-		}
+		if (!plan || !planHashMatches(mended.planHash, plan)) return;
 		const run: BuildRun = {
-			...(raw as BuildRun),
+			...mended,
 			// A run saved before layout was left out of the hash holds the older kind. It is of this plan, so it takes
 			// the kind that moving a node does not change: the next drag would otherwise put a build already paid for
 			// out of reach.
 			planHash: planHash(plan),
-			units: raw.units.filter((u): u is BuildUnit => Boolean(u && typeof u === "object" && typeof u.name === "string")),
-			accepted: raw.accepted.filter((s): s is string => typeof s === "string"),
+			// What it was built from, for the record made when it is accepted (`builtFrom`). It is of this plan, so these
+			// are this plan's, whatever the file holds: a run saved before they were kept holds none.
+			prints: nodePrints(plan),
 		};
 		for (const unit of run.units) if (unit.status === "running") unit.status = "pending";
 		if (run.status === "running") run.status = "stopped";
-		updateAssist(path, { run });
+		givenFromAccepted(run, plan);
+		// Accepted, and since undone or closed without saving: it is to be reviewed again, and is not recorded below.
+		const gone = await unitsTakenBack(run, plan, root);
+		// Scripts may have been read meanwhile: the folder, the run and the plan are looked at again.
+		const still = planOf(path);
+		if (snapshot(state).workspace?.root !== root || latestAssistOf(path).run || !still || !planHashMatches(run.planHash, still)) return;
+		if (gone.length) {
+			takeBack(run, new Set(gone.map((u) => u.given!)), plan);
+			publish(path, run, root);
+			notify(TAKEN_BACK(scriptsOf(gone, plan)));
+		} else {
+			settleAccepted(run, plan);
+			updateAssist(path, { run });
+		}
 		// Accepted, and the plan closed without saving its record: the code is still what was accepted.
 		const recorded = new Set((builtOf(plan)?.units ?? []).map((u) => u.name.toLowerCase()));
-		for (const script of run.accepted) if (run.units.some((u) => u.status === "passed" && scriptOf(u, plan) === script && !recorded.has(u.name.toLowerCase()))) recordAccepted(path, script, run);
+		for (const script of run.accepted) if (run.units.some((u) => u.status === "passed" && isGiven(u, plan) && scriptOf(u, plan) === script && !recorded.has(u.name.toLowerCase()))) recordAccepted(path, script, run);
 	} catch {
 		// Not a run this version can read: a new build starts afresh.
+		notARun(file, root);
 	}
 }
 
@@ -128,6 +207,11 @@ export async function read(text: string): Promise<Reading> {
 	walk(symbols);
 	return { findings: diagnostics, symbols: procedures, edges: await session.scratchCalls(text), size: { bytes: new TextEncoder().encode(text).length, codeLines: measure(text).codeLines } };
 }
+
+/** The model the next turn goes to: the one chosen, as the setting reads at this moment, or the one opencode takes when none is. */
+const modelNow = () => snapshot(state).settings.agentModel || currentModel();
+/** Whether this build's next turn would go to a model that may cost money, with no cost budget agreed to (`unbudgeted`). */
+const noBudgetFor = (run: BuildRun) => unbudgeted(run, snapshot(agent).models, modelNow(), snapshot(state).settings.agentOwnModels);
 
 async function buildUnit(path: string, root: string, plan: Plan, spec: string, run: BuildRun, unit: BuildUnit, callable: string, skills: string[]) {
 	if (snapshot(state).workspace?.root !== root) return;
@@ -160,6 +244,12 @@ async function buildUnit(path: string, root: string, plan: Plan, spec: string, r
 	let code: string | null = null;
 	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
 		if (snapshot(state).workspace?.root !== root) return;
+		// The model can be changed between two tries of one unit. No try goes to one that may cost money before a
+		// cost budget is agreed to: the unit waits, and the build stops and says why (`startBuild`).
+		if (noBudgetFor(run)) {
+			unit.status = "pending";
+			return publish(path, run, root);
+		}
 		unit.attempts = attempt;
 		const spent = latestAssistOf(path);
 		const before = { tokens: spent.tokens, cost: spent.cost };
@@ -173,8 +263,14 @@ async function buildUnit(path: string, root: string, plan: Plan, spec: string, r
 			return publish(path, run, root);
 		}
 		if (reply === null) {
-			// A dropped stream cannot recover the turn: it is simply asked again.
+			// A dropped stream cannot recover the turn: it is simply asked again. Not past the budget, though: what the
+			// turn cost is counted above, and this way round the loop used to skip the check further down, so three
+			// turns that did not finish were all asked for, however far over the budget the first had gone.
 			problems = ["The agent did not finish its turn."];
+			if (cutShort(run, attempt)) {
+				unit.status = "pending";
+				return publish(path, run, root);
+			}
 			continue;
 		}
 		code = fenced(reply, "ssl").at(-1) ?? null;
@@ -206,6 +302,8 @@ async function buildUnit(path: string, root: string, plan: Plan, spec: string, r
 			if (snapshot(state).workspace?.root !== root) return;
 			unit.status = "passed";
 			delete unit.draft;
+			// Its script may have been accepted already, with this unit stuck: it now has a unit to review again.
+			settleAccepted(run, plan);
 			return publish(path, run, root);
 		}
 		// Out of budget with tries still to come: it waits, and is not stuck (`cutShort`).
@@ -236,11 +334,20 @@ async function secondOpinion(path: string, root: string, plan: Plan, spec: strin
 	if (snapshot(state).workspace?.root !== root) return;
 	const workContext = work?.text ? cut(work.text, MAX_WORK_PROMPT_CHARS) : "";
 	const review = reviewPrompt(plan, spec, scripts, partial ? passed.flatMap((u) => u.nodes ?? []) : undefined);
+	// Of the units as they are asked about: a unit can be put back in the queue while the turn is out.
+	const print = passedPrint(passed, plan);
+	// A turn like any other: not asked of a model that may cost money while the build has no cost budget.
+	if (noBudgetFor(run)) return notify(`The second opinion was not asked for: the model is now ${modelNow()}, which may cost money, and this build has no cost budget.`);
 	const reply = await askAgent(path, "A second opinion", workContext ? `${review}\n\n${workContext}` : review, [], TOOL_LIMIT);
 	if (snapshot(state).workspace?.root !== root) return;
 	const now = latestAssistOf(path);
 	run.tokens += now.tokens - before.tokens;
 	run.cost += now.cost - before.cost;
+	// What was asked about is kept whatever came back, nothing at all and a turn that failed included: it was
+	// asked, and paid for, and asking again is for when the build has changed (`passedPrint`). A turn you stopped
+	// is not an answer, so carrying on asks it again.
+	if (stopping.has(path)) delete run.reviewOf;
+	else run.reviewOf = print;
 	if (reply?.trim()) run.review = reply.trim();
 	else delete run.review;
 }
@@ -321,10 +428,12 @@ export function startBuild(path: string) {
 			// A run from before layout was left out of the hash holds the older kind. It is of this plan, so it takes
 			// the kind that moving a node does not change.
 			run.planHash = hash;
+			// And one from before a run kept its plan's nodes holds none: they are this plan's (`builtFrom`).
+			run.prints ??= nodePrints(plan);
 			raiseBudget(run, { cost, tokens: moreTokens });
 			requeueRunning(run);
 		} else {
-			run = newRun({ hash, model }, units, map, cost === undefined ? {} : { cost });
+			run = newRun({ hash, model, prints: nodePrints(plan) }, units, map, cost === undefined ? {} : { cost });
 			classifyUnits(run, plan, driftFor((documents.get(canonical(path)) ?? documents.get(path))?.model.uri.toString()).moved);
 			// What is already built is built where it is now, which the plan's own record says: the same rule holds there.
 			if (cannotWrite(run.units)) return;
@@ -351,8 +460,6 @@ export function startBuild(path: string) {
 		if (snapshot(state).workspace?.root !== root) return;
 		const spec = specText.split("\n## Units")[0]!.trim();
 		publish(path, run, root);
-		/** Whether this call has built anything: the second opinion is on what was built, and is asked again only for more. */
-		let builtNow = false;
 		for (;;) {
 			if (snapshot(state).workspace?.root !== root) {
 				stopping.delete(path);
@@ -368,10 +475,17 @@ export function startBuild(path: string) {
 				if (next.ends === "budget") notify("The build reached its budget and has stopped. Carrying on spends more.");
 				break;
 			}
+			// The cost budget is asked for above, of the model chosen as the build begins, and only of one that may
+			// cost money. Changed to such a model while the build ran, the build went on with no budget at all. It
+			// stops before the next turn, and carrying on asks for the budget as a new build would have.
+			if (noBudgetFor(run)) {
+				run.status = "stopped";
+				notify(`The build has stopped: the model is now ${modelNow()}, which may cost money, and this build has no cost budget. Carrying on asks for one.`);
+				break;
+			}
 			const unit = next.unit;
 			try {
 				await buildUnit(path, root, plan, spec, run, unit, callable, ["ssl-new-procedure"]);
-				builtNow = true;
 			} catch (e: any) {
 				// A unit is marked as being built before its first turn. When building it threw (the language server
 				// gone, a script that could not be read), it stayed marked for the rest of the session: nothing took
@@ -391,7 +505,8 @@ export function startBuild(path: string) {
 		}
 		// "Carry on building" is offered on a run that has finished too. With nothing left to build it built nothing,
 		// and still asked for the second opinion it already had: a turn of the model, and its cost, for each click.
-		if (run.status === "built" && (builtNow || !run.review)) {
+		// It is asked for what has passed since it was last asked, whichever call that passed in (`passedPrint`).
+		if (run.status === "built" && run.reviewOf !== passedPrint(run.units, plan)) {
 			updateAssist(path, { progress: "Asking for a second opinion…" });
 			await secondOpinion(path, root, plan, spec, run);
 		}
@@ -460,21 +575,36 @@ export function answerUnit(path: string, name: string, answer: string) {
 
 export const discardRun = (path: string) => publish(path, null);
 
-export const scriptsToReview = (run: BuildRun, plan: Plan): string[] => [...new Set(run.units.filter((u) => u.status === "passed").map((u) => scriptOf(u, plan)))].filter((s) => !run.accepted.includes(s));
+/**
+ * The scripts with something to review: each that has a passed unit whose code it has not been given, accepted
+ * before or not (`unitsToReview`). It used to be the scripts not accepted yet. A script accepted with one unit
+ * passed and another stuck was then never offered again: the stuck unit, tried again and passed, never reached
+ * the file, and the plan recorded it as built the next time it was opened.
+ */
+export const scriptsToReview = (run: BuildRun, plan: Plan): string[] => [...new Set(unitsToReview(run, plan).map((u) => scriptOf(u, plan)))];
 
-/** The links, in the plan's text: an undoable edit, saved when you save the plan. */
+/**
+ * The links, in the plan's text: an undoable edit, saved when you save the plan.
+ * Each step is recorded as the run was built from it (`builtFrom`), which need not be how the chart has it now: a
+ * review stays open for as long as you like, and the chart can be changed under it. Recorded as the chart then
+ * stood, a step changed since the build counted as built, and was never built. Where nothing says what the run was
+ * built from, the procedures are linked to their steps and no step is recorded as built.
+ */
 function recordAccepted(path: string, script: string, runOverride?: BuildRun | null) {
 	const plan = planOf(path);
 	const run = runOverride ?? latestAssistOf(path).run;
 	if (!plan || !run) return;
-	const accepted = run.units.filter((u) => u.status === "passed" && scriptOf(u, plan) === script);
-	const recorded = recordBuilt(plan, plain(accepted), plain(run.units));
+	// Only what the script has been given: a unit of it that passed later, and waits for review, is not built yet.
+	const accepted = run.units.filter((u) => u.status === "passed" && isGiven(u, plan) && scriptOf(u, plan) === script);
+	const recorded = recordBuilt(plan, plain(accepted), plain(run.units), builtFrom(run, plan) ?? {});
 	const finished = !scriptsToReview(run, plan).length && run.units.every((u) => u.status === "passed" || u.status === "kept");
 	savePlan(path, finished ? settleBuilt(recorded, run) : recorded);
 }
 
 /** Stage 5: one review per script, walked in turn. Nothing is applied until you accept it. */
 export async function reviewBuild(path: string) {
+	// First, so that a script whose accepting was undone is among those reviewed (`recheckAccepted`).
+	await recheckAccepted(path);
 	const root = snapshot(state).workspace?.root;
 	const current = latestAssistOf(path).run;
 	const plan = planOf(path);
@@ -488,7 +618,10 @@ export async function reviewBuild(path: string) {
 	if (why) return notify(`The build cannot write ${script}: ${why}. Correct the plan's target scripts, or discard this build and write the plan doc again.`, "error");
 	const existing = await readScript(script, root);
 	if (snapshot(state).workspace?.root !== root) return;
-	const passed = run.units.filter((u) => u.status === "passed" && scriptOf(u, plan) === script);
+	// The units this script has not been given. What it was given at an earlier review is in it already.
+	const passed = unitsToReview(run, plan).filter((u) => scriptOf(u, plan) === script);
+	/** What this review is of: asked again at the moment of accepting, and of rejecting (`reviewStale`). */
+	const shown = shownOf(script, passed);
 	const spans = await spansIn(existing);
 	if (snapshot(state).workspace?.root !== root) return;
 	const proposed = assembleScript(existing, bannerFor(plan), passed, plan, spans);
@@ -496,13 +629,15 @@ export async function reviewBuild(path: string) {
 	if (snapshot(state).workspace?.root !== root) return;
 	const unresolved = reading.edges.filter((e) => !e.resolved).map((e) => e.target);
 	const unbuilt = unbuiltNodes(plan, run);
-	const local = snapshot(agent).models.find((m) => `${m.providerID}/${m.id}` === run.model)?.local ?? true;
+	// A model opencode does not list was called a local one here (`?? true`). What is not known to be local is not
+	// called local (`modelIsLocal`); a build with no model chosen ran on a local one, or not at all.
+	const local = !run.model || modelIsLocal(snapshot(agent).models, run.model, snapshot(state).settings.agentOwnModels);
 	const checks: Check[] = [
 		{ label: "Every step of the chart is built", ok: !unbuilt.length, detail: unbuilt.length ? `nothing yet for ${unbuilt.map((t) => `"${t}"`).join(", ")}` : undefined },
 		{ label: "Every call resolves", ok: !unresolved.length, detail: unresolved.length ? [...new Set(unresolved)].join(", ") : undefined },
 		{ label: "No errors", ok: !reading.findings.some((f) => f.severity === 1), detail: `${reading.findings.filter((f) => f.severity <= 2).length} errors and warnings` },
 		{ label: "This code has not been run", ok: null, detail: "SSL Studio cannot run SSL. Test it in STARLIMS." },
-		...(local ? [{ label: "A draft from a local model", ok: null, detail: `${run.model}: read it as you would a first attempt` }] : []),
+		...(local ? [{ label: "A draft from a local model", ok: null, detail: `${run.model ? `${run.model}: ` : ""}read it as you would a first attempt` }] : []),
 	];
 	const left = scriptsToReview(run, plan).length;
 	openReview({
@@ -511,20 +646,33 @@ export async function reviewBuild(path: string) {
 		proposed,
 		language: "ssl",
 		checks,
-		note: run.review ? `A second opinion, which may be wrong:\n\n${run.review}` : undefined,
+		note: opinionNote(run, plan),
 		acceptLabel: existing === null ? "Accept and create the file" : "Accept into the editor",
 		onAccept: async (final) => {
 			if (snapshot(state).workspace?.root !== root) return;
 			// The plan records this, so it must be open; the script is what you see afterwards.
 			if (!planOf(path)) await openFile(path);
 			if (snapshot(state).workspace?.root !== root) return;
+			// One question, asked here and not when the review opened: is what the review shows still what accepting
+			// would act on? The run it was opened from, the target script, and then the script's text. Where it is
+			// not, nothing is written and nothing is recorded: the error leaves the review open and says why.
+			const planNow = planOf(path);
+			if (!planNow) throw new Error("the plan could not be opened, so nothing was written");
+			const stale = reviewStale(shown, latestAssistOf(path).run, planNow);
+			if (stale) throw new Error(stale);
 			const full = joinPath(root, script);
-			const openNow = documents.has(canonical(full)) || documents.has(full);
-			const existsNow =
-				openNow ||
-				(await fileExists(full));
+			// The proposed text was put together from the script as it read when the review opened, and replaces all of
+			// it: accepted over a script changed since, it took out whatever had been typed there meanwhile.
+			const changed = () => new Error(`${script} has changed since this review was opened, so nothing was written. Reject this review and open it again: it then shows the build against the script as it is now`);
+			const now = await readScript(script, root);
 			if (snapshot(state).workspace?.root !== root) return;
-			if (!existsNow) {
+			if (!sameText(now, existing)) throw changed();
+			/** What the script would read as again with this accepting taken back (`BuildUnit.was`). */
+			let was: string[] = [];
+			if (now === null) {
+				// No script when the review opened, and none that reads now. One that is there is not written over.
+				if (await fileExists(full)) throw new Error(`${script} is there, and could not be read, so nothing was written`);
+				if (snapshot(state).workspace?.root !== root) return;
 				await backend.write(full, final);
 				if (snapshot(state).workspace?.root !== root) return;
 				setState((s) => {
@@ -535,31 +683,48 @@ export async function reviewBuild(path: string) {
 			} else {
 				await openFile(full);
 				if (snapshot(state).workspace?.root !== root) return;
-				applyText(monaco.Uri.file(full).fsPath, final);
+				// From here to the edit nothing is waited for: the text is looked at once more, as it stands in the
+				// buffer. A script that could not be opened used to be reported as applied to, and recorded as
+				// accepted, though nothing had been written.
+				const doc = documents.get(canonical(full)) ?? documents.get(full);
+				if (!doc) throw new Error(`${script} could not be opened, so nothing was written`);
+				const before = doc.model.getValue();
+				if (!sameText(before, existing)) throw changed();
+				if (!applyText(monaco.Uri.file(full).fsPath, final)) throw new Error(`${script} could not be opened, so nothing was written`);
+				// Undone, the buffer reads as before; closed without saving, the script reads as it was last saved.
+				was = [...new Set([before, doc.savedText].map(textPrint))].filter((print) => print !== textPrint(final));
 			}
 			if (snapshot(state).workspace?.root !== root) return;
-			const after = mutate(path, (r) => {
-				if (!r.accepted.includes(script)) r.accepted.push(script);
-			});
+			const after = mutate(path, (r) => giveTo(r, shown, planNow, was));
 			recordAccepted(path, script, after);
-			notify(!existsNow ? `Created ${script}.` : `Applied to ${script}. Review and save it; undo reverts it.`);
-			const latestPlan = planOf(path) ?? plan;
+			notify(now === null ? `Created ${script}.` : `Applied to ${script}. Review and save it; undo reverts it.`);
+			const latestPlan = planOf(path) ?? planNow;
 			if (after && scriptsToReview(after, latestPlan).length) void reviewBuild(path);
 		},
 		onReject: async () => {
 			if (snapshot(state).workspace?.root !== root) return;
+			// A review is of one run and one target: where the build has changed since, or the target has, there is
+			// nothing of this review's to send back, and the new build's units are not sent back in its place.
+			const sendsBack = () => {
+				const runNow = latestAssistOf(path).run;
+				return Boolean(runNow && stillShown(shown, runNow, planOf(path) ?? plan).length);
+			};
+			if (!sendsBack()) return;
 			const reason = await askUser(`What is wrong with ${script}? It goes back to the agent with your reason. Empty keeps it for later.`);
 			if (snapshot(state).workspace?.root !== root || !reason?.trim()) return;
 			mutate(path, (r) => {
-				for (const unit of r.units) {
-					if (unit.status === "passed" && scriptOf(unit, plan) === script) {
-						unit.status = "pending";
-						unit.feedback = reason.trim();
-						delete unit.code;
-					}
+				const planNow = planOf(path) ?? plan;
+				const back = stillShown(shown, r, planNow);
+				if (!back.length) return;
+				for (const unit of back) {
+					unit.status = "pending";
+					unit.feedback = reason.trim();
+					delete unit.code;
 				}
 				r.status = "stopped";
 				delete r.review;
+				delete r.reviewOf;
+				settleAccepted(r, planNow);
 			});
 		},
 	});

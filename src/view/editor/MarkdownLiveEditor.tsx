@@ -82,11 +82,11 @@ import {
 	type HoverTarget,
 	type ImageLightboxInfo,
 } from "./cmLivePlugin";
-import { applyMarkdownFormatToTextarea, focusLiveWidgetAt, guardRenderedLinks, type MermaidLightboxInfo } from "./cmLiveShared";
+import { applyMarkdownFormatToTextarea, focusLiveWidgetAt, guardRenderedLinks, pressBecomes, type MermaidLightboxInfo } from "./cmLiveShared";
 import { copyMermaidAsPng, downloadMermaidBlob, mermaidLivePreviewTheme, renderMermaidSvgForExport } from "./cmMermaid";
 import { cmMarkdownHighlight, cmStudioTheme } from "./cmTheme";
 import { buildFootnoteHoverPreview, buildHoverPreview, type HoverPreviewData } from "./hoverPreview";
-import { hydrateImagesInElement } from "./imageResolve";
+import { hydrateImagesInElement, rehydrateImages } from "./imageResolve";
 import { formatCodeFence } from "./languages";
 import {
 	bumpLiveSelection,
@@ -1860,6 +1860,8 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		() => [docs(), state.treeVersion] as const,
 		() => {
 			if (cmView) untrack(() => cmView!.dispatch({ effects: refreshLiveEffect.of(++refreshSeq) }));
+			// A picture inside a card is not a decoration of its own: the refresh above does not draw its card again.
+			untrack(() => rehydrateImages());
 		},
 		{ defer: true },
 	);
@@ -2524,15 +2526,25 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 								if (e.button !== 0) return;
 								const cur = mermaidBox();
 								if (!cur) return;
+								// The pointer is not taken hold of yet (see pressBecomes): let go where it went down, this is a click,
+								// and it has to reach the link it is on.
 								mermaidPan = { startX: e.clientX, startY: e.clientY, origX: cur.x, origY: cur.y };
 								mermaidDragged = false;
-								(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 							}}
 							onPointerMove={(e) => {
 								if (!mermaidPan) return;
 								const dx = e.clientX - mermaidPan.startX;
 								const dy = e.clientY - mermaidPan.startY;
-								if (Math.abs(dx) + Math.abs(dy) > 4) mermaidDragged = true;
+								const became = pressBecomes(dx, dy, e.buttons);
+								if (became === "released") {
+									mermaidPan = null;
+									return;
+								}
+								if (became === "pan" && !mermaidDragged) {
+									mermaidDragged = true;
+									// A drag from here on: held, it goes on when the pointer leaves the stage, and its end is no click on a link.
+									(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+								}
 								setMermaidBox((c) => (c ? { ...c, x: mermaidPan!.origX + dx, y: mermaidPan!.origY + dy } : null));
 							}}
 							onPointerUp={() => {

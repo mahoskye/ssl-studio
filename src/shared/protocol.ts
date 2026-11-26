@@ -4,7 +4,7 @@
 
 import type { CsvTableConfig } from "./csvFormat";
 import type { FormatDocumentRequest, FormatDocumentResult, SqlDialect } from "./format";
-import type { SearchOptions } from "./searchPattern";
+import type { Groups, OpenText, SearchOptions } from "./searchPattern";
 import type { GitStatus } from "./gitStatus";
 
 export type Entry = { name: string; path: string; kind: "file" | "dir"; size: number };
@@ -187,7 +187,11 @@ export type GitBranchesResult = { current: string; branches: GitBranchInfo[] };
 export type GitActionResult = { ok: boolean; message: string };
 export type GitStashResult = { ok: boolean; message: string; entries?: { ref: string; message: string }[] };
 
-export type SearchHit = { path: string; line: number; column: number; length: number; text: string; textOffset?: number };
+/**
+ * One match of a search. A hit of a regular expression that is to be replaced from (`searchScan` with `open`)
+ * says also where its groups lie on the line: what it becomes is then worked out without running the expression.
+ */
+export type SearchHit = { path: string; line: number; column: number; length: number; text: string; textOffset?: number } & Groups;
 
 export type ToolStatus = {
 	/** Found and runnable. */
@@ -414,18 +418,26 @@ export interface BackendApi {
 	/**
 	 * The same search, saying also whether it ran out of time before every file was read: `hits` is then only what
 	 * was found in the files it got to, and is not to be replaced from as if it were all of them.
+	 *
+	 * `open` is given by the Search panel, which replaces from what is listed. It holds the open files with unsaved
+	 * changes, as they are in the editor: each is searched in place of the file of its name on disk, here and under
+	 * the same time budget (searched in the window, a regular expression that takes minutes over a line froze it).
+	 * Given, even empty, the answer has `marks` too: for each file something was found in, a mark of its text as it
+	 * was searched (`textMark`), for a replace to be held to (`asSearched`).
 	 */
-	searchScan(query: string, options: SearchOptions): Promise<{ hits: SearchHit[]; timedOut: boolean }>;
+	searchScan(query: string, options: SearchOptions, open?: OpenText[]): Promise<{ hits: SearchHit[]; timedOut: boolean; marks?: Record<string, string> }>;
 	/**
 	 * Replaces every match in the files named, on disk, each as it is written now. Says how many in each; a file
 	 * that could not be written is left as it was and says why. Each file as it was is kept in local history.
+	 * With `options.asSearched`, a file whose text is no longer the one that was searched is left as it is, and
+	 * comes back as `changed`.
 	 */
 	replace(
 		query: string,
 		replacement: string,
 		options: SearchOptions,
 		paths: string[],
-	): Promise<{ path: string; count: number; skippedProtected?: number; invalidJson?: boolean; error?: string }[]>;
+	): Promise<{ path: string; count: number; skippedProtected?: number; invalidJson?: boolean; error?: string; changed?: boolean }[]>;
 	history(path: string): Promise<Snapshot[]>;
 	snapshot(path: string, id: string): Promise<string>;
 	/** The open folder's project settings (defaults when it has no project.toml). */
@@ -438,6 +450,12 @@ export interface BackendApi {
 	setupUndo(): Promise<{ removed: string[]; kept: string[] }>;
 	/** How many open files have edits that are not on disk, so the app can ask before its window closes. */
 	unsavedChanged(count: number): Promise<void>;
+	/**
+	 * Whether a view is open that may hold text still being typed (a table's open cell, a field of a plan step).
+	 * Such text is in no document yet, so no count of unsaved files has it: the app then asks the view before its
+	 * window closes, and the view puts the text in its document and counts.
+	 */
+	typingChanged(held: boolean): Promise<void>;
 	/** Closes the app whatever is unsaved: the user has just said what to do with it. */
 	closeWindow(): Promise<void>;
 	/** README.md, AGENTS.md and project.toml, then the Markdown and plans in the project's docs and plans folders. */
@@ -542,8 +560,16 @@ export type BackendEvents = {
 	lspState: LspState;
 	fileChanged: { path: string };
 	agent: { type: string; data: unknown };
-	/** The window was asked to close while files had unsaved edits: the view asks what to do. */
+	/**
+	 * The window was asked to close while files had unsaved edits, or while a view may hold text still being typed:
+	 * the view puts that text in its document, and asks what to do where anything is then unsaved.
+	 */
 	closeRequested: Record<string, never>;
+	/**
+	 * Something the backend has to say to the person that no call's answer carries (a save that worked, whose copy
+	 * for local history did not): the view shows it as a notice, and an error is kept in Output.
+	 */
+	notice: { kind: "info" | "error"; text: string };
 };
 
 export type AgentModel = { providerID: string; id: string; name: string; local: boolean; tools: boolean; variants: string[] };

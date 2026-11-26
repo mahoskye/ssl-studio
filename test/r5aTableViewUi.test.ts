@@ -462,7 +462,8 @@ describe("Source invariants across TableView.tsx, CsvFormatDialog.tsx, and table
 	test("Repair 7: runCodeCheck distinguishes explicit user cancellation, aborts workers in catch, and clears on workspace switch", () => {
 		expect(tvSrc).toContain("let userCancelledRunId = 0;");
 		expect(tvSrc).toContain("const isUserCancelled = !disposed && userCancelledRunId === runId;");
-		expect(tvSrc).toMatch(/catch \(e: any\) \{\s*cancelled = true;\s*if \(runId === checkRunId\) \{\s*checkRunId\+\+;/);
+		// The scans run one after another now (`scanValuesInTurn`): a scan that fails ends the run, and there are no other workers to stop.
+		expect(tvSrc).toMatch(/catch \(e: any\) \{\s*if \(runId === checkRunId\) \{\s*checkRunId\+\+;/);
 		expect(tvSrc).toMatch(/\[\s*props\.path,\s*state\.workspace\?\.root[\s\S]*?clearCodeCheck\(\);/);
 	});
 

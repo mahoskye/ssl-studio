@@ -1,5 +1,5 @@
 import { CATALOG_FILE, type CatalogItem } from "./catalog";
-import { frontMatter } from "./frontMatter";
+import { frontMatter, quoteYamlText } from "./frontMatter";
 import { baseName, isInside, joinPath, relativePath } from "./paths";
 import type { DocFile, DocGroup } from "./protocol";
 
@@ -123,13 +123,19 @@ export const PROMPTS = {
 export const isPrompt = (line: string | undefined) => Object.values(PROMPTS).some((prompt) => prompt === (line ?? "").trim());
 
 const fence = (pairs: [string, string | undefined][]) => `---\n${pairs.filter(([, v]) => v !== undefined).map(([k, v]) => `${k}: ${v}`).join("\n")}\n---\n`;
-/** A value on its one line: a line end inside it is a space, and it is quoted when it holds what would be read as something else. */
-const quoted = (value: string) => {
-	const text = value.replace(/\s*[\r\n]+\s*/g, " ").trim();
-	return /[:#\[\]{}"',]|^\s|\s$/.test(text) ? JSON.stringify(text) : text;
-};
+/**
+ * A value on its one line: a line end inside it is a space, and it is quoted when it holds what would be read as
+ * something else. What that is, is said in one place, beside the reader (`quoteYamlText`): the rule kept here knew
+ * a colon and a hash and not `@x`, `- x` or `NO`, which the other writers of front matter quote or YAML misreads.
+ */
+const quoted = (value: string) => quoteYamlText(value.replace(/\s*[\r\n]+\s*/g, " "));
 /** A value as it is written in front matter: quoted when it holds what would be read as something else. */
 export const frontValue = quoted;
+/**
+ * A list on one line, `[a, "b, c"]`, each item written by the same rule as a value on its own: an item with a
+ * comma was read back as two, one with a hash cut the list short, and `[x]` made the whole line a string.
+ */
+const quotedList = (items: readonly string[]) => `[${items.map(quoted).filter((item) => item !== '""').join(", ")}]`;
 
 export const ticketTemplate = (ticket: { key: string; title: string; source?: string; related?: readonly string[]; blocks?: readonly string[]; blockedBy?: readonly string[]; status?: string; type?: string; parent?: string; description?: string }) => `${fence([
 	// Quoted like the title when it holds what YAML reads as something else: a key such as #12 was a comment, and the ticket had none.
@@ -138,10 +144,12 @@ export const ticketTemplate = (ticket: { key: string; title: string; source?: st
 	["type", ticket.type ? quoted(ticket.type) : undefined],
 	["source", ticket.source?.trim() ? quoted(ticket.source) : undefined],
 	["status", ticket.status ? quoted(ticket.status) : "open"],
-	["parent", ticket.parent || undefined],
-	["related", `[${(ticket.related ?? []).join(", ")}]`],
-	["blocks", ticket.blocks?.length ? `[${ticket.blocks.join(", ")}]` : undefined],
-	["blocked-by", ticket.blockedBy?.length ? `[${ticket.blockedBy.join(", ")}]` : undefined],
+	// The tickets it names, by the same rule: these four were written as they came, so a parent #11 was a comment
+	// and the ticket had no parent, and `related: [#13, a, b]` was not the two keys it was written from.
+	["parent", ticket.parent?.trim() ? quoted(ticket.parent) : undefined],
+	["related", quotedList(ticket.related ?? [])],
+	["blocks", ticket.blocks?.length ? quotedList(ticket.blocks) : undefined],
+	["blocked-by", ticket.blockedBy?.length ? quotedList(ticket.blockedBy) : undefined],
 ])}
 # ${ticket.key}: ${ticket.title}
 

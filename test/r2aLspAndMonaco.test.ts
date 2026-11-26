@@ -690,3 +690,93 @@ describe("session.ts toMinimalEdits, multi-owner diagnostics, and untrack owner 
 		model.dispose();
 	});
 });
+
+describe("LspSession: where a document's comments and names are (starlims-lsp 0.32.0, ssl/lexicalTokens)", () => {
+	const LEGEND_032 = { tokenTypes: ["function", "method", "parameter", "variable", "property", "class", "label"], tokenModifiers: ["declaration", "defaultLibrary", "readonly", "public", "unknown"] };
+	const comment = { kind: "comment", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 9 } } };
+
+	/** A session over a server that is not there: what it sends is kept, and what it is answered is given. */
+	async function fakeServer(ssl: Record<string, number>, answer: (method: string, params: any) => any) {
+		const sess = new LspSession();
+		const sent: { method: string; params: any }[] = [];
+		(sess.client as any).notify = (method: string, params: any) => void sent.push({ method, params });
+		(sess.client as any).request = async (method: string, params: any) => {
+			sent.push({ method, params });
+			if (method === "initialize") return { capabilities: { experimental: { ssl }, semanticTokensProvider: { legend: LEGEND_032 } } };
+			return answer(method, params);
+		};
+		return { sess, sent };
+	}
+	/** A model whose text can be said to have changed, as an edit says it to the session. */
+	function tracked(sess: InstanceType<typeof LspSession>, uri: string) {
+		const model = makeFakeModel("/* a note;\nnA := 1;", uri);
+		let changed: (event: any) => void = () => {};
+		model.onDidChangeContent = (listener: (event: any) => void) => {
+			changed = listener;
+			return { dispose() {} };
+		};
+		sess.track(model);
+		return { model, edit: () => changed({ changes: [{ range: new MockRange(2, 1, 2, 1), rangeLength: 0, text: " " }] }) };
+	}
+
+	test("the tokens of the text as it is, and nothing for a text that changed while it was asked", async () => {
+		let onAsk = () => {};
+		const { sess, sent } = await fakeServer({ lexicalTokens: 1 }, (method) => {
+			if (method !== "ssl/lexicalTokens") return null;
+			onAsk();
+			return { uri: "file:///ws/lex-a.ssl", version: 1, tokens: [comment] };
+		});
+		const { model, edit } = tracked(sess, "file:///ws/lex-a.ssl");
+		await sess.start("/ws");
+		expect(await sess.lexicalTokens(model)).toEqual([comment]);
+		expect(sent.at(-1)).toEqual({ method: "ssl/lexicalTokens", params: { textDocument: { uri: model.uri.toString() } } });
+
+		// An edit goes to the server while the answer is on its way: the ranges are of the text before it.
+		onAsk = edit;
+		expect(await sess.lexicalTokens(model)).toBeNull();
+		expect(sent.some((m) => m.method === "textDocument/didChange" && m.params.textDocument.version === 2)).toBe(true);
+		model.dispose();
+	});
+
+	test("nothing, and no question, from a server without the request or for a document it does not hold", async () => {
+		const older = await fakeServer({ syntaxTree: 1, callGraph: 1 }, () => ({ version: 1, tokens: [comment] }));
+		const held = tracked(older.sess, "file:///ws/lex-b.ssl");
+		await older.sess.start("/ws");
+		expect(await older.sess.lexicalTokens(held.model)).toBeNull();
+		expect(await older.sess.scratchLexical("/* a note;")).toBeNull();
+		expect(older.sent.some((m) => m.method === "ssl/lexicalTokens")).toBe(false);
+		held.model.dispose();
+
+		const newer = await fakeServer({ lexicalTokens: 1 }, () => ({ version: 1, tokens: [comment] }));
+		await newer.sess.start("/ws");
+		const stray = makeFakeModel("/* a note;", "file:///ws/lex-c.ssl");
+		expect(await newer.sess.lexicalTokens(stray)).toBeNull();
+		expect(await newer.sess.nameTokens(stray)).toBeNull();
+		expect(newer.sent.some((m) => m.method === "ssl/lexicalTokens" || m.method === "textDocument/semanticTokens/full")).toBe(false);
+		stray.dispose();
+	});
+
+	test("the names come with the types and modifiers of the server's own legend", async () => {
+		const { sess } = await fakeServer({ lexicalTokens: 1 }, (method) => (method === "textDocument/semanticTokens/full" ? { data: [1, 0, 2, 6, 1] } : null));
+		const { model } = tracked(sess, "file:///ws/lex-d.ssl");
+		await sess.start("/ws");
+		// `label` is not coloured by every theme, and `translateTokens` drops what is not: this one keeps every name.
+		expect(await sess.nameTokens(model)).toEqual([{ line: 1, character: 0, length: 2, type: "label", modifiers: ["declaration"] }]);
+		model.dispose();
+	});
+
+	test("a text that is not open is asked about under a scratch name with the file's own ending, and closed again", async () => {
+		const { sess, sent } = await fakeServer({ lexicalTokens: 1 }, (method) => (method === "ssl/lexicalTokens" ? { version: 1, tokens: [comment] } : null));
+		await sess.start("/ws");
+		expect(await sess.scratchLexical("/* a note;", "Orders.ds")).toEqual([comment]);
+		await sess.scratchLexical("/* a note;", "Legacy.ssl.txt");
+		await sess.scratchLexical("/* a note;", "Rules.srvscr");
+		await sess.scratchLexical("/* a note;");
+		const opened = sent.filter((m) => m.method === "textDocument/didOpen").map((m) => m.params.textDocument.uri as string);
+		expect(opened.map((uri) => uri.replace(/^.*\/\.ssl-studio\/lexical-\d+/, ""))).toEqual([".ds", ".ssl.txt", ".srvscr", ".ssl"]);
+		expect(opened.every((uri) => uri.includes("/ws/.ssl-studio/lexical-"))).toBe(true);
+		expect(sent.filter((m) => m.method === "textDocument/didClose").map((m) => m.params.textDocument.uri)).toEqual(opened);
+		// Each is asked about between its opening and its closing.
+		expect(sent.filter((m) => !["initialize", "initialized"].includes(m.method)).map((m) => m.method).slice(0, 3)).toEqual(["textDocument/didOpen", "ssl/lexicalTokens", "textDocument/didClose"]);
+	});
+});

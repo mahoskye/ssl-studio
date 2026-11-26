@@ -16,6 +16,12 @@ const said = (value: unknown) => (typeof value === "string" ? value : typeof val
 const ticks = (text: string, least: number) => "`".repeat(Math.max(least, ...[...text.matchAll(/`+/g)].map((run) => run[0].length + 1)));
 /** All the words under a node, as they are: what a block of code holds. */
 const words = (node: Node): string => (typeof node.text === "string" ? node.text : node.type === "hardBreak" ? "\n" : kids(node).map(words).join(""));
+/**
+ * The text of a block of code, its lines ending as Markdown's do. A carriage return is a line end for Markdown and
+ * was none here: in a quotation or a list the rest of its line got no mark and no indent, stood outside the fence,
+ * and was read as Markdown and as HTML.
+ */
+const codeText = (node: Node): string => words(node).replace(/\r\n?/g, "\n");
 
 /**
  * Words as Markdown reads them back: a character that would be taken for a
@@ -26,10 +32,17 @@ const words = (node: Node): string => (typeof node.text === "string" ? node.text
  */
 function literal(text: string): string {
 	const word = (ch: string | undefined) => ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
+	// What Markdown would take for an address in running text ("www.…", "ftp://…", an "HTTP://…" that
+	// `withAddresses` did not write as one) is written so that it is none: a backslash before the "." or ":" that
+	// makes it one. Such an address is read on to the next space, through whatever stands there: text marked as
+	// code right after it lost its opening backtick to it, and what the ticket showed as code was HTML in the file.
+	const stops = new Set<number>();
+	if (/:\/\/|www\./i.test(text)) for (const found of text.matchAll(/(?:https?|ftp)(?=:\/\/)|www(?=\.)/gi)) stops.add(found.index + found[0].length);
 	let out = "";
 	for (let at = 0; at < text.length; at++) {
 		const ch = text[at]!;
 		const next = text[at + 1];
+		if (stops.has(at)) out += "\\";
 		if (ch === "\\" || ch === "*" || ch === "`" || ch === "~" || ch === "[" || ch === "]") out += `\\${ch}`;
 		else if (ch === "_" && !(word(text[at - 1]) && word(next))) out += "\\_";
 		else if (ch === "<" && next !== undefined && /[A-Za-z/!?]/.test(next)) out += "&lt;";
@@ -59,21 +72,38 @@ function safeUrl(raw: string): string {
 
 /** Text with the marks it carries: code, bold, italic, struck through, a link. */
 function marked(node: Node): string {
-	const text = node.text ?? "";
+	const text = (node.text ?? "").replace(/\r\n?/g, "\n");
 	const marks = (node.marks ?? []).map((mark) => mark.type);
 	const link = (node.marks ?? []).find((mark) => mark.type === "link");
 	const href = safeUrl(said(link?.attrs?.href));
 	if (marks.includes("code")) {
-		const fence = ticks(text, 1);
 		// A backtick at either end needs room to be told from the fence.
-		const code = inCell ? codeTag(text) : `${fence}${/^`|`$/.test(text) ? ` ${text} ` : text}${fence}`;
+		const span = (line: string) => {
+			const fence = ticks(line, 1);
+			return `${fence}${/^`|`$/.test(line) ? ` ${line} ` : line}${fence}`;
+		};
+		// Code is on one line. Text marked as code that holds line ends is written a line at a time, each as code of
+		// its own, and an empty line in it is left out. Written as one piece, an empty line in it ended the paragraph
+		// and the code with it: what came after ("<div style=…>") was HTML in the file.
+		const code = inCell
+			? codeTag(text)
+			: text.includes("\n")
+				? text
+						.split("\n")
+						.filter((line) => line.trim())
+						.map(span)
+						.join("\n")
+				: span(text);
+		if (!code) return "";
 		return href ? `[${code}](${href})` : code;
 	}
 	// A mark sits against the words, with the space around them outside it.
 	const [, lead, body, trail] = /^(\s*)([\s\S]*?)(\s*)$/.exec(text)!;
 	if (!body) return text;
-	// An address is written as one; inside a link's own words it is words, since a link cannot hold a link.
-	let out = href ? literal(body) : withAddresses(body, literal);
+	// An address is written as one; inside a link's own words it is words, since a link cannot hold a link. A link's
+	// words are one paragraph: an empty line among them ended it, the link was no link, and its address was read as
+	// running text (see `inline`).
+	let out = href ? literal(body.replace(/\n(?:[ \t]*\n)+/g, "\n")) : withAddresses(body, literal);
 	// Stars and tildes mark words only where a word meets them, and not through each other: around words that
 	// begin or end with a mark of their own ("Note:", "~2 hours"), or under more than one mark, the same is said
 	// with a tag, which holds wherever it stands.
@@ -87,9 +117,17 @@ function marked(node: Node): string {
 	return `${lead}${out}${trail}`;
 }
 
-/** The same words under the same marks, written as two nodes: one run of words. Two runs side by side would end and begin with the same mark. */
+/**
+ * The same words under the same marks, written as two nodes: one run of words. Two runs side by side would end and begin with the same mark.
+ * Text marked as code is written as code whatever else it is marked with, so two such runs are one where they go to
+ * the same link: side by side their backticks ran together ("`a``b`"), and neither was code.
+ */
 function joined(nodes: Node[]): Node[] {
-	const same = (a: Node, b: Node) => a.type === "text" && b.type === "text" && JSON.stringify(a.marks ?? []) === JSON.stringify(b.marks ?? []);
+	const marks = (node: Node) => {
+		const all = node.marks ?? [];
+		return JSON.stringify(all.some((mark) => mark.type === "code") ? ["code", all.find((mark) => mark.type === "link")?.attrs?.href ?? null] : all);
+	};
+	const same = (a: Node, b: Node) => a.type === "text" && b.type === "text" && marks(a) === marks(b);
 	const out: Node[] = [];
 	for (const node of nodes) {
 		const last = out[out.length - 1];
@@ -110,41 +148,73 @@ const card = (node: Node) => {
 	return node.attrs?.data ? "*(a linked page, not brought across)*" : "";
 };
 
+/** Whether a node is written as code between backticks. */
+const isCode = (node: Node) => node.type === "text" && !inCell && (node.marks ?? []).some((mark) => mark.type === "code");
+
 /** The nodes of a line, side by side. */
 function inline(nodes: Node[]): string {
-	return joined(nodes)
-		.map((node) => {
-			switch (node.type) {
-				case "text":
-					return marked(node);
-				case "hardBreak":
-					return "\n";
-				case "mention":
-				case "emoji":
-				case "status":
-					// By what it shows; failing that, by whatever it has that names it.
-					return literal(said(node.attrs?.text) || said(node.attrs?.shortName) || said(node.attrs?.displayName) || said(node.attrs?.id));
-				case "inlineCard":
-				case "blockCard":
-				case "embedCard":
-					return card(node);
-				case "date": {
-					const when = Number(said(node.attrs?.timestamp));
-					if (!Number.isFinite(when) || when <= 0) return "";
-					const d = new Date(when);
-					return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : "";
-				}
-				case "media":
-				case "mediaInline":
-					// What was attached stays in the ticket system: the words say something was there.
-					return "*(an attachment, not brought across)*";
-				default:
-					return typeof node.text === "string" ? literal(node.text) : kids(node).length ? inline(kids(node)) : literal(said(node.attrs?.text)) || card(node);
-			}
-		})
-		.join("")
-		.replace(/\n+$/, "")
-		.replace(/\n/g, "  \n");
+	const pieces: string[] = [];
+	for (const node of joined(nodes)) {
+		const piece = inlineNode(node);
+		// A backtick of the words right before code is written by its number: after "\`" the editor's reader takes
+		// the next backtick for more of the same run and not for the start of code, and the code's text is read as
+		// Markdown and as HTML.
+		const before = pieces[pieces.length - 1];
+		if (piece.startsWith("`") && isCode(node) && before?.endsWith("\\`")) pieces[pieces.length - 1] = `${before.slice(0, -2)}&#96;`;
+		if (piece) pieces.push(piece);
+	}
+	let out = pieces.join("");
+	// A link's address with code after it and no space between is written between "<" and ">". A reader that makes
+	// no link of "[words](address)" (marked gives up on words with code in them that has a backtick of its own)
+	// reads the address as running text, on to the next space: through the backtick that opens the code, whose text
+	// is then read as Markdown and as HTML. Between "<" and ">" the address ends there.
+	if (out.includes("](") && out.includes("`")) {
+		out = out.replace(/\S+/g, (word) => {
+			const tick = word.lastIndexOf("`");
+			if (tick < 0 || !word.includes("](")) return word;
+			return word.slice(0, tick).replace(/\]\(([^()\s<>]*)\)/g, (link, to: string) => (/(?:https?|ftp):\/\/|www\./i.test(to) ? `](<${to}>)` : link)) + word.slice(tick);
+		});
+	}
+	return (
+		out
+			.replace(/\r\n?/g, "\n")
+			.replace(/\n+$/, "")
+			// Space before a line's first word is nothing on a page. Left in, four of them after an empty line made
+			// code of that line, where "&lt;div>" is shown as written.
+			.replace(/\n[ \t]+/g, "\n")
+			.replace(/\n/g, "  \n")
+	);
+}
+
+/** One node of a line. */
+function inlineNode(node: Node): string {
+	switch (node.type) {
+		case "text":
+			return marked(node);
+		case "hardBreak":
+			return "\n";
+		case "mention":
+		case "emoji":
+		case "status":
+			// By what it shows; failing that, by whatever it has that names it.
+			return withAddresses(said(node.attrs?.text) || said(node.attrs?.shortName) || said(node.attrs?.displayName) || said(node.attrs?.id), literal);
+		case "inlineCard":
+		case "blockCard":
+		case "embedCard":
+			return card(node);
+		case "date": {
+			const when = Number(said(node.attrs?.timestamp));
+			if (!Number.isFinite(when) || when <= 0) return "";
+			const d = new Date(when);
+			return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : "";
+		}
+		case "media":
+		case "mediaInline":
+			// What was attached stays in the ticket system: the words say something was there.
+			return "*(an attachment, not brought across)*";
+		default:
+			return typeof node.text === "string" ? withAddresses(node.text, literal) : kids(node).length ? inline(kids(node)) : withAddresses(said(node.attrs?.text), literal) || card(node);
+	}
 }
 
 /**
@@ -160,9 +230,17 @@ const plain = (text: string) =>
 				.replace(/^(\s*)(#{1,6}(?=\s|$)|>|[-+](?=\s|$))/, "$1\\$2")
 				.replace(/^(\s*\d+)([.)])(?=\s|$)/, "$1\\$2")
 				// A line of dashes or of "=" alone would make a heading of the line above it, however few they are.
-				.replace(/^(\s*)((?:-+|=+|_{3,})\s*)$/, "$1\\$2"),
+				.replace(/^(\s*)((?:-+|=+|_{3,})\s*)$/, "$1\\$2")
+				// With pipes or colons among the dashes it would make a table of the line above ("a|b", then "-|-").
+				.replace(/^(\s*)([|:-][-|: \t]*)$/, (row, lead: string, marks: string) => (marks.includes("-") ? `${lead}\\${marks}` : row)),
 		)
 		.join("\n");
+/**
+ * Words as a paragraph holds them: no space and no line break before the first, and no line that reads as a block
+ * of its own. A line break before the first word shows as nothing, and left in it made an empty first line: an item
+ * of a list that began with two of them was an empty item, and its words stood outside the list.
+ */
+const para = (nodes: Node[]) => plain(inline(nodes).replace(/^\s+/, ""));
 const indented = (text: string, by: string) =>
 	text
 		.split("\n")
@@ -174,7 +252,7 @@ function block(node: Node): string {
 	switch (node.type) {
 		case "paragraph":
 			// Space before a paragraph's first word is nothing on a page; four of them here would make it code.
-			return plain(inline(kids(node)).replace(/^[ \t]+/, ""));
+			return para(kids(node));
 		case "heading":
 			// A "#" that ends a heading would be taken for the heading's own closing mark.
 			return `${"#".repeat(Math.min(6, Math.max(1, Number(node.attrs?.level) || 1)))} ${inline(kids(node))
@@ -195,10 +273,17 @@ function block(node: Node): string {
 		}
 		case "taskList":
 			return kids(node)
-				.map((item) => (item.type === "taskList" ? indented(`  ${block(item)}`, "  ") : `- [${item.attrs?.state === "DONE" ? "x" : " "}] ${inline(kids(item))}`))
+				.map((item) => {
+					if (item.type === "taskList") return indented(`  ${block(item)}`, "  ");
+					// The lines of an item after its first stand under it, as words. They were written at the margin as
+					// they came: a second line that began with "#" was a heading, and the list ended above it.
+					const text = inline(kids(item)).replace(/^\s+/, "");
+					const cut = text.indexOf("\n");
+					return `- [${item.attrs?.state === "DONE" ? "x" : " "}] ${indented(cut < 0 ? text : text.slice(0, cut) + plain(text.slice(cut)), "  ")}`;
+				})
 				.join("\n");
 		case "codeBlock": {
-			const text = words(node).replace(/\n+$/, "");
+			const text = codeText(node).replace(/\n+$/, "");
 			const fence = ticks(text, 3);
 			return `${fence}${said(node.attrs?.language).replace(/[^\w+#.-]/g, "")}\n${text}\n${fence}`;
 		}
@@ -226,7 +311,7 @@ function block(node: Node): string {
 				inCell = true;
 				try {
 					return kid.type === "codeBlock"
-						? words(kid)
+						? codeText(kid)
 								.replace(/\n+$/, "")
 								.split("\n")
 								.map((line) => (line ? codeTag(line) : ""))
@@ -271,9 +356,10 @@ function block(node: Node): string {
 			return [title ? `**${literal(title)}**` : "", blocks(kids(node))].filter(Boolean).join("\n\n");
 		}
 		default:
-			// A node of a kind not known here: its blocks if it has any, its words if it has those.
-			if (typeof node.text === "string") return marked(node);
-			return kids(node).some((kid) => kid.type === "text" || kid.type === "hardBreak") ? inline(kids(node)) : blocks(kids(node));
+			// A node of a kind not known here: its blocks if it has any, its words if it has those. Its words are a
+			// paragraph's: written as they came, a line of them that began with "#" was a heading.
+			if (typeof node.text === "string") return para([{ ...node, type: "text" }]);
+			return kids(node).some((kid) => kid.type === "text" || kid.type === "hardBreak") ? para(kids(node)) : blocks(kids(node));
 	}
 }
 

@@ -176,7 +176,12 @@ export type CallGraphIn = {
 	indexing?: boolean;
 };
 
-export function fromCallGraph(input: CallGraphIn, toPath: (uri: string) => string, sizes: Map<string, number> = new Map()): Graph {
+/**
+ * `notAScript` names the paths that are not the project's: the IDE's own scratch documents. The server counts every
+ * document it has open, and one that is open for the length of a question (a check of proposed code, the comments
+ * of a file that is not open) was drawn as a script if the graph was asked for just then.
+ */
+export function fromCallGraph(input: CallGraphIn, toPath: (uri: string) => string, sizes: Map<string, number> = new Map(), notAScript: (path: string) => boolean = () => false): Graph {
 	const scriptsByPath = new Map<string, ScriptIn>();
 	const ids = new Map<string, string>(); // server id -> graph id
 	const script = (path: string) => {
@@ -189,6 +194,8 @@ export function fromCallGraph(input: CallGraphIn, toPath: (uri: string) => strin
 	for (const n of input.nodes) {
 		const uri = n.location?.uri ?? n.container;
 		const path = uri ? toPath(uri) : "";
+		// Not given an id, so the lines to and from it are left out with it.
+		if (path && notAScript(path)) continue;
 		if (n.kind === "script") {
 			if (n.isClass) script(path).isClass = true;
 			script(path).name = n.name;

@@ -195,10 +195,97 @@ const RENDERED_FORBID_TAGS = [
 	"svg", "math",
 ];
 
-/** Attributes that send, or open something over the page, on the elements that are left. */
-const RENDERED_FORBID_ATTR = ["action", "formaction", "ping", "usemap", "popover", "popovertarget", "command", "commandfor"];
+/**
+ * Attributes that send, or open something over the page, on the elements that are left; and `autoplay`, with which
+ * a `<video>` or an `<audio>` that names an address began to play it as soon as the document was read. Its
+ * `controls` stay: what the document shows can still be started by the reader.
+ */
+const RENDERED_FORBID_ATTR = ["action", "formaction", "ping", "usemap", "popover", "popovertarget", "command", "commandfor", "autoplay"];
 
 export const RENDERED_PURIFY_CONFIG = { FORBID_TAGS: RENDERED_FORBID_TAGS, FORBID_ATTR: RENDERED_FORBID_ATTR };
+
+/**
+ * The CSS functions that load from an address: `url()` and its newer spelling `src()`, and the two that take the
+ * address as a bare string, `image-set("…")` (found under a vendor prefix too, which ends the same) and
+ * `image("…")`. A string in an `image-set()` can come from a variable set elsewhere, so the function goes
+ * whatever it holds.
+ */
+const STYLE_FETCHERS = ["url(", "src(", "image-set(", "image("];
+
+/**
+ * A piece of a `style` attribute as the browser reads the names in it: line ends made one, each escape replaced by
+ * the character it stands for (`u\72l(`, `\75 rl(` and `\URL(` are all `url(`), and lower case. A CR after an
+ * escape's digits is the one space the escape takes with it, as it is after the browser has made line ends one.
+ */
+function cssRead(text: string): string {
+	return text
+		.replace(/\r\n?|\f/g, "\n")
+		.replace(/\\(?:([0-9a-fA-F]{1,6})[ \t\n]?|([\s\S]))/g, (_all, hex: string | undefined, char: string | undefined) => {
+			if (hex === undefined) return char ?? "";
+			const code = Number.parseInt(hex, 16);
+			return code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) ? "\ufffd" : String.fromCodePoint(code);
+		})
+		.toLowerCase();
+}
+
+/** The declarations of a `style` attribute: cut at each `;` that is not in a string, in brackets or in a comment. */
+function styleDeclarations(style: string): string[] {
+	const out: string[] = [];
+	let start = 0;
+	let depth = 0;
+	let quote = "";
+	for (let i = 0; i < style.length; i++) {
+		const ch = style[i]!;
+		if (ch === "\\") i++;
+		else if (quote) {
+			if (ch === quote || ch === "\n") quote = "";
+		} else if (ch === '"' || ch === "'") quote = ch;
+		else if (ch === "/" && style[i + 1] === "*") {
+			const end = style.indexOf("*/", i + 2);
+			i = end < 0 ? style.length : end + 1;
+		} else if (ch === "(" || ch === "[" || ch === "{") depth++;
+		else if (ch === ")" || ch === "]" || ch === "}") depth = Math.max(0, depth - 1);
+		else if (ch === ";" && depth === 0) {
+			out.push(style.slice(start, i));
+			start = i + 1;
+		}
+	}
+	out.push(style.slice(start));
+	return out;
+}
+
+/**
+ * A `style` attribute without the declarations that would load from an address. A rendered document kept its
+ * `style` whole, and `style="background:url(https://…)"` asked that address for a picture when the document was
+ * read: what a document shows is its own, and what it fetches says who read it and when. The whole declaration
+ * goes, not the function alone, so nothing half-written is left for the browser to make sense of; the others stay
+ * as they were written, and a `style` with nothing to take out is returned untouched.
+ *
+ * What is safe does not rest on where the cuts fall: a piece is kept only if no fetching function is spelt in it,
+ * and a function's name cannot run across a `;`. A cut in the wrong place can only take a harmless declaration
+ * out with its neighbour.
+ */
+export function styleWithoutFetches(style: string): string {
+	const all = styleDeclarations(style);
+	const kept = all.filter((declaration) => {
+		const read = cssRead(declaration);
+		return !STYLE_FETCHERS.some((name) => read.includes(name));
+	});
+	return kept.length === all.length ? style : kept.join(";");
+}
+
+/**
+ * What the sanitiser is told of one attribute of an element that stays (its `uponSanitizeAttribute` hook, which
+ * gives the name in lower case): a `style` is kept less what would load from an address, and one left with
+ * nothing in it goes. No other attribute is touched.
+ */
+export function renderedKeepsStyle(data: { attrName: string; attrValue: string; keepAttr: boolean }): void {
+	if (data.attrName !== "style") return;
+	const kept = styleWithoutFetches(data.attrValue);
+	if (kept === data.attrValue) return;
+	if (kept.trim()) data.attrValue = kept;
+	else data.keepAttr = false;
+}
 
 /**
  * Whether an element the lists above let through stays. The one `<input>` rendered Markdown needs is the
@@ -220,6 +307,7 @@ function sanitizer(): typeof DOMPurify {
 				const type = (node as Partial<Element>).getAttribute?.("type");
 				if (!renderedKeepsElement(data.tagName, type)) node.parentNode?.removeChild(node);
 			});
+			renderedSanitizer.addHook("uponSanitizeAttribute", (_node, data) => renderedKeepsStyle(data));
 		}
 	}
 	return renderedSanitizer;
@@ -271,6 +359,22 @@ export function guardRenderedLinks(root: HTMLElement, follow?: (href: string) =>
 		root.removeEventListener("submit", cancel, true);
 		root.removeEventListener("click", open);
 	};
+}
+
+/** How far, in pixels, a pressed pointer may tremble and still be a click. */
+const PRESS_TREMBLE = 4;
+
+/**
+ * What a move of the pointer makes of a press on the diagram viewer's drawing, `dx` and `dy` from where it went
+ * down: still a "press" (a click, if it is let go here), a "pan" once it has gone further than a hand trembles,
+ * or "released" when the button is no longer down. The viewer took hold of the pointer the moment it went down,
+ * and in Chromium the click of a pointer that is held is given to the holder: a click on a node's link reached
+ * the stage and never the link. So the pointer is held only from "pan" on, and until then the viewer hears of a
+ * move only while the pointer is over it: one let go outside comes back with no button down, and is not a drag.
+ */
+export function pressBecomes(dx: number, dy: number, buttons: number): "press" | "pan" | "released" {
+	if (!(buttons & 1)) return "released";
+	return Math.abs(dx) + Math.abs(dy) > PRESS_TREMBLE ? "pan" : "press";
 }
 
 /** Builds `finishMarkdown` options and sanitizes nested HTML for Table cells and Callout bodies. */

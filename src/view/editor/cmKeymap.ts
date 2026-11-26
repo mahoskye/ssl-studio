@@ -26,6 +26,7 @@ import { EditorSelection, Prec, type ChangeSpec, type Extension } from "@codemir
 import { EditorView, keymap, type Command, type KeyBinding } from "@codemirror/view";
 import { fenced } from "../../shared/catalog";
 import { linkWritten } from "../../shared/docLinks";
+import { DRAG_TYPE, dropEffectFor } from "../../shared/editorDocHelpers";
 import { htmlToMarkdown, looksLikeRichHtml, tsvToMarkdownTable } from "../../shared/htmlToMarkdown";
 import { nameFor } from "../../shared/namedLinks";
 import { baseName, dirName, relativePath } from "../../shared/paths";
@@ -932,14 +933,12 @@ export function cmSmartPasteExtension(filePath: () => string): Extension {
 			if (!view.state.facet(EditorView.editable)) return false;
 			const dt = event.dataTransfer;
 			if (!dt) return false;
-			const types = Array.from(dt.types);
-			const accepted =
-				types.includes("Files") ||
-				types.includes("application/x-ssl-studio-file") ||
-				types.includes("application/x-ssl-studio-tab");
-			if (!accepted) return false;
+			// Files from outside, a file's row, a tab: each leaves a link here and stays where it is, which is a copy.
+			// The table that says so is the one the rows and the tabs take what they allow from (`DRAG_PAIRS`).
+			const effect = dropEffectFor("markdown-editor", dt.types);
+			if (effect === "none") return false;
 			event.preventDefault();
-			dt.dropEffect = "copy";
+			dt.dropEffect = effect;
 			return true;
 		},
 		drop(event, view) {
@@ -947,7 +946,7 @@ export function cmSmartPasteExtension(filePath: () => string): Extension {
 			const dt = event.dataTransfer;
 			if (!dt) return false;
 			const dropPos = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head;
-			const droppedPath = dt.getData("application/x-ssl-studio-file") || dt.getData("application/x-ssl-studio-tab");
+			const droppedPath = dt.getData(DRAG_TYPE["explorer-row"]) || dt.getData(DRAG_TYPE.tab);
 			if (droppedPath) {
 				event.preventDefault();
 				const curPath = filePath();

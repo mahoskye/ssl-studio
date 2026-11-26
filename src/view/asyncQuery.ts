@@ -35,10 +35,27 @@ export function createAsyncQuery<S, T>(
 
 	const src = maybeFetcher ? createMemo(() => (sourceOrFetcher as Accessor<S | false | null | undefined>)()) : null;
 
+	/** What the effect below last began a run for: the source's value, and the count of refetches. */
+	const [begun, setBegun] = createSignal<readonly [unknown, number] | undefined>(undefined);
+	/**
+	 * Whether what is asked for now has not been begun yet. The effect sets `loading` when it runs, and that is after
+	 * everything that reads `loading` in the same update has read it: for that moment the query said it was not
+	 * loading while it held the answer to the question before, or none. A reader that acts once on "not loading"
+	 * acted then: the quick pick took an Enter that was waiting for the symbols as answered by an empty list, and
+	 * dropped it. Said from the source itself, `loading` is true from the update in which the question changes.
+	 */
+	const awaited = createMemo(() => {
+		const key = src ? src() : true;
+		const count = bump();
+		if (key === false || key === null || key === undefined) return false;
+		const last = begun();
+		return !last || last[0] !== key || last[1] !== count;
+	});
+
 	if (maybeFetcher && src) {
 		createEffect(
 			() => [src(), bump()] as const,
-			([key]) => {
+			([key, count]) => {
 				const runId = ++seq;
 				if (key === false || key === null || key === undefined) {
 					setLoading(false);
@@ -47,6 +64,7 @@ export function createAsyncQuery<S, T>(
 					setLatest(undefined);
 					return;
 				}
+				setBegun([key, count] as const);
 				setLoading(true);
 				setError(undefined);
 				let cancelled = false;
@@ -83,8 +101,9 @@ export function createAsyncQuery<S, T>(
 		const fetcher = sourceOrFetcher as () => Promise<T> | T;
 		createEffect(
 			() => bump(),
-			() => {
+			(count) => {
 				const runId = ++seq;
+				setBegun([true, count] as const);
 				setLoading(true);
 				setError(undefined);
 				let cancelled = false;
@@ -121,7 +140,7 @@ export function createAsyncQuery<S, T>(
 
 	const read = (() => value()) as AsyncQuery<T>;
 	Object.defineProperties(read, {
-		loading: { get: () => loading() },
+		loading: { get: () => loading() || awaited() },
 		error: { get: () => error() },
 		latest: { get: () => latest() },
 	});

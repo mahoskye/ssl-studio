@@ -567,7 +567,7 @@ describe("Blocks — a fold stays on its block when lines are added or removed a
 		const src = readSrc("src/view/blocks/BlocksView.tsx");
 		expect(src).toContain("const isCollapsed = (n: Node) => (collapseVersion(), Boolean(n.fold && collapsed().has(n.fold)));");
 		expect(src).toContain("collapsed().has(n.fold) ? collapsed().delete(n.fold) : collapsed().add(n.fold);");
-		expect(src).toContain("if (banner?.fold) collapsed().add(banner.fold);");
+		expect(src).toContain("if (openFolds(collapsedByPath, path, root, model.getLineCount())) setCollapseVersion((v) => v + 1);");
 		// Nothing is kept, or looked up, by the key that holds the line.
 		expect(src).not.toMatch(/collapsed\(\)\.(has|add|delete)\((n|c|banner)\.key\)/);
 	});
@@ -599,17 +599,23 @@ describe("Blocks — the lines an edit leaves to be formatted (finding 5b)", () 
 
 	test("BlocksView formats after each of the four edits, a range and never the file, and only with the server running (source only, as above)", () => {
 		const src = readSrc("src/view/blocks/BlocksView.tsx");
-		const format = between(src, "const formatLines = async (start: number, end: number) => {", "const formatEdited = async (span: Span) => {");
+		const format = between(src, "const formatLines = async (start: number, end: number, raw: Span[] = []) => {", "const formatEdited = async (span: Span, raw: Span[] = []) => {");
 		// Asked of a running server only, and before the request is made; the undo step is closed either way.
 		expect(format.indexOf('if (state.lsp.state !== "running") return;')).toBeGreaterThan(0);
-		expect(format.indexOf('if (state.lsp.state !== "running") return;')).toBeLessThan(format.indexOf("session.formatRanges(model, [[start - 1, Math.min(end, model.getLineCount()) - 1]], model.getOptions())"));
+		expect(format.indexOf('if (state.lsp.state !== "running") return;')).toBeLessThan(format.indexOf("session.formatRanges(model, [[run.start - 1, run.end - 1]], model.getOptions())"));
+		// Each run of lines is asked on its own, what the server could not read cut out of it, and an answer is applied
+		// only when it changes no line outside its run (pass 4, M1; the functions are run in pass4Regressions.test.ts).
+		expect(format).toContain("for (const run of cutOut({ start: Math.max(1, start), end: Math.min(end, model.getLineCount()) }, raw)) {");
+		expect(format).toContain("if (edits.length && formatStaysWithin(before, linesWithEdits(before, edits), run)) kept.push(...edits);");
 		expect(format).toContain("} finally {\n\t\t\tif (!model.isDisposed()) model.pushStackElement();");
 		const remove = between(src, "const remove = async (n: Node) => {", "const opened = (");
-		expect(remove).toContain("replaceLines(card.start, card.end, null, false);\n\t\tawait formatEdited(editedLines(card.start, null, model.getLineCount()));");
+		expect(remove).toContain("replaceLines(card.start, card.end, null, false);\n\t\tawait formatEdited(editedLines(card.start, null, model.getLineCount()), raw);");
 		const condition = between(src, "const commitCondition = (n: Node, value: string) => {", "const commitEdit = (n: Node, text: string) => {");
 		expect(condition).toContain("void formatEdited({ start: h.line, end: h.line });");
 		const edit = between(src, "const commitEdit = (n: Node, text: string) => {", "const drop = (e: DragEvent, line: number) => {");
-		expect(edit).toContain("else void formatEdited(editedLines(n.start, text, model.getLineCount()));");
+		expect(edit).toContain("void formatEdited(editedLines(n.start, put, model.getLineCount()));");
+		// Code the server could not read is written as typed and no format follows it.
+		expect(edit).toContain('if (n.kind === "raw") {\n\t\t\treplaceLines(n.start, n.end, text, true);\n\t\t\treturn editedHere();');
 		const drop = between(src, "const drop = (e: DragEvent, line: number) => {", "const dropZone = ");
 		expect(drop).toContain("void formatEdited(editedLines(targetLine, inserted, model.getLineCount()));");
 		// The only format the view asks for is of line ranges, and it never sets a file's whole text.
@@ -630,7 +636,7 @@ describe("Call graph — the second click of a double-click is its node's (findi
 		expect(secondClick(at(2, 1100), null)).toBe(false);
 	});
 
-	test("the click the window system counts as the second is the node's, wherever and however late it lands", () => {
+	test("the click the window system counts as the second is the node's, as late as a slow double-click lands", () => {
 		expect(secondClick(at(2, 1150), onNode)).toBe(true);
 		// A slow double-click, by someone who has set the system to allow it: the count is the system's to say.
 		expect(secondClick(at(2, 1900), onNode)).toBe(true);
@@ -654,11 +660,11 @@ describe("Call graph — the second click of a double-click is its node's (findi
 		const src = readSrc("src/view/graph/GraphView.tsx");
 		const listener = between(src, 'el.addEventListener(\n\t\t\t\t\t\t\t\t"click",', "true,\n\t\t\t\t\t\t\t);");
 		// What was clicked before is taken up once: a click that is not its second is a click of its own and goes on to the nodes.
-		expect(listener).toContain("const first = clicked;\n\t\t\t\t\t\t\t\t\tclicked = null;\n\t\t\t\t\t\t\t\t\tif (!first || !secondClick(clickAt(e), first)) return;\n\t\t\t\t\t\t\t\t\te.stopPropagation();");
-		expect(listener).toContain('if (first.box.kind !== "fold" && first.box.kind !== "dir") open(first.box);');
+		expect(listener).toContain('const heard = clicks.heard(clickAt(e), panned);\n\t\t\t\t\t\t\t\t\tif (heard.is === "own") return;\n\t\t\t\t\t\t\t\t\te.stopPropagation();');
+		expect(listener).toContain('if (heard.node.kind !== "fold" && heard.node.kind !== "dir") open(heard.node);');
 		// A node's own click says which node it was, and focuses at once; no node opens on the browser's dblclick,
 		// which is given to whatever node has come to lie under the pointer.
-		expect(src).toContain('onClick={(e) => (e.stopPropagation(), (clicked = { ...clickAt(e), box: b }), far() ? comeIn(b) : b.kind === "dir" ? toggleDir(b.folder) : b.kind === "fold" ? toggleFold(b.path) : focus(b.id))}');
+		expect(src).toContain('onClick={(e) => (e.stopPropagation(), clicks.onNode(clickAt(e), b), far() ? comeIn(b) : b.kind === "dir" ? toggleDir(b.folder) : b.kind === "fold" ? toggleFold(b.path) : focus(b.id))}');
 		expect(src).not.toContain('onDblClick={() => b.kind !== "fold" && b.kind !== "dir" && open(b)}');
 	});
 });

@@ -14,6 +14,7 @@ import { activePath, canonical, closeAllTabs, closeTab, fileRemoved, fileRenamed
 import { closeComparison } from "../editor/Review";
 import { baseName, dirName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
 import { imageType, looksBinary, utf16Kind } from "../../shared/fileKind";
+import { DRAG_TYPE, dragEffect, effectAllowedFor } from "../../shared/editorDocHelpers";
 import { htmlToMarkdown } from "../../shared/htmlToMarkdown";
 import { ATTACH_TO_AGENT, COPY, COPY_NAME, COPY_PATH, COPY_RELATIVE, CUT, FIND_IN_FOLDER, folderFor, holdsRoot, menuEntriesFor, nameProblem, NEW_FILE, NEW_FOLDER, OPEN, OPEN_GOVERNING_DOC, OPEN_SIDE, openFolders, PASTE, RENAME, retarget, SCHEMA_FROM_SQL, TRASH, without } from "./explorerMenu";
 import { copyName, copyProblem, folderOf, moveProblem, type Clip } from "./explorerMoves";
@@ -230,9 +231,11 @@ function EntryRow(props: { entry: Entry; depth: number }) {
 				draggable={true}
 				onDragStart={(e) => {
 					dragging = entry();
-					// Its own kind of thing: dropped on the text, or outside the app, it is nothing.
-					e.dataTransfer?.setData("application/x-ssl-studio-file", props.entry.path);
-					if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+					// Its own kind of thing: outside the app, or on text that does not ask for it, it is nothing.
+					e.dataTransfer?.setData(DRAG_TYPE["explorer-row"], props.entry.path);
+					// What its targets ask for: a move into a folder, and a copy on an editor's text, where a note of the
+					// file is written and the file stays. With `move` alone here no editor could ever take the drop.
+					if (e.dataTransfer) e.dataTransfer.effectAllowed = effectAllowedFor("explorer-row");
 				}}
 				onDragEnd={() => {
 					dragging = null;
@@ -803,13 +806,15 @@ function dragOver(e: DragEvent, into: string) {
 	if (isExternalFileDrag(e)) {
 		if (canonical(into) !== canonical(root) && !isInside(root, into)) return setDropInto(null);
 		e.preventDefault();
-		if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+		if (e.dataTransfer) e.dataTransfer.dropEffect = dragEffect("os-files", "explorer-folder");
 		setDropInto(into);
 		return;
 	}
 	if (!dragging || moveProblem(dragging.path, into, root)) return setDropInto(null);
 	e.preventDefault();
-	if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+	// Said here each time: a row allows a copy too (for the editors), and a folder left to the browser's own
+	// choice would show the move as a copy.
+	if (e.dataTransfer) e.dataTransfer.dropEffect = dragEffect("explorer-row", "explorer-folder");
 	setDropInto(into);
 }
 

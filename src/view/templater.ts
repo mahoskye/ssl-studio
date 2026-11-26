@@ -7,6 +7,7 @@ import { addToFrontMatterList, frontMatter, withFrontMatter } from "../shared/fr
 import { buildCalloutBlock, CALLOUT_PRESETS } from "../shared/markdownEdit";
 import { baseName, dirName, isInside, joinPath, relativePath, relativeTo, resolvePath } from "../shared/paths";
 import { slug } from "../shared/projectDocs";
+import type { BackendApi } from "../shared/protocol";
 import {
 	DEFAULT_TEMPLATES,
 	formatTemplateHeaderAttr,
@@ -31,6 +32,25 @@ import { activePath, applyText, canonical, documents, fileRemoved, markdownMode,
 function ensureEditableMarkdown(path: string, group?: number) {
 	if (markdownMode(path, group) === "read") {
 		setMarkdownMode(path, state.settings.livePreview === false ? "source" : "live", group);
+	}
+}
+
+/**
+ * Makes a new file with `text` in it, and refuses as `create` does when something is there already. Making the
+ * file and writing it are two calls to the backend: when the write failed after the file was made, the empty file
+ * stayed, and the next try at the same name found it, said "already exists" and opened it (an empty template of a
+ * built-in's name took the built-in's place). The empty file is taken away again, to the trash and only while it
+ * is still empty, and the write's own error is the one that is told. Where nothing can be put in the trash (the
+ * browser host) it stays, as before.
+ */
+export async function createWithText(api: Pick<BackendApi, "create" | "write" | "sizes" | "trash">, dest: string, text: string): Promise<void> {
+	await api.create(dest, "file");
+	try {
+		await api.write(dest, text);
+	} catch (e) {
+		const sizes = await api.sizes([dest]).catch(() => null);
+		if (sizes?.[dest] === 0) await api.trash(dest).catch(() => {});
+		throw e;
 	}
 }
 
@@ -364,11 +384,10 @@ export async function newNoteFromTemplate(explicit?: MarkdownTemplate): Promise<
 		return;
 	}
 
-	// Check target existence BEFORE running interactive content prompts so user effort is never wasted.
-	const alreadyExists = await backend
-		.read(dest)
-		.then(() => true)
-		.catch(() => false);
+	// Check target existence BEFORE running interactive content prompts so user effort is never wasted. Asked
+	// whether the file is there, not read: a file the read refuses (a text too large to open) was taken for no
+	// file, the template's questions were asked, and only then did making the file fail with "already exists".
+	const alreadyExists = await fileExists(dest);
 	if (state.workspace?.root !== root) return;
 	if (alreadyExists) {
 		notify(`${withExt} already exists — opened it instead.`);
@@ -380,8 +399,7 @@ export async function newNoteFromTemplate(explicit?: MarkdownTemplate): Promise<
 	if (rendered.cancelled || state.workspace?.root !== root) return;
 
 	try {
-		await backend.create(dest, "file");
-		await backend.write(dest, rendered.text);
+		await createWithText(backend, dest, rendered.text);
 		if (state.workspace?.root !== root) return;
 		setState((s) => { s.treeVersion += 1; });
 		ensureEditableMarkdown(canonical(dest));
@@ -424,8 +442,7 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 			];
 			const header = `<!-- template: ${attrs.join(" ")} -->\n`;
 			try {
-				await backend.create(dest, "file");
-				await backend.write(dest, header + copyBuiltin.content);
+				await createWithText(backend, dest, header + copyBuiltin.content);
 				if (state.workspace?.root !== startRoot) return;
 				setState((s) => { s.treeVersion += 1; });
 				notify(`Saved customizable copy to ${relativeTo(startRoot, dest)}.`);
@@ -561,8 +578,7 @@ status: draft
 - 
 `;
 		try {
-			await backend.create(dest, "file");
-			await backend.write(dest, starter);
+			await createWithText(backend, dest, starter);
 			if (state.workspace?.root !== startRoot) return;
 			setState((s) => { s.treeVersion += 1; });
 		} catch (e: any) {

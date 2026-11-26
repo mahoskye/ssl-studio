@@ -90,10 +90,10 @@ describe("steps pasted into another plan", () => {
 		expect(second!.offset).toEqual({ x: 36, y: 36 });
 	});
 
-	test("how it went wrong: with no plan said, the helper takes the paste for one into the same plan", () => {
-		// This is how the chart called it. The step goes to "Billing", which only shares an id with "Validation".
+	test("with no plan said, the helper takes the paste for one into the same plan, and still does not go by the stage's id alone", () => {
+		// This is how the chart called it. The step went to "Billing", which only shares an id with "Validation": since pass 4 the stage's name is compared too.
 		const pasted = pastePlanSelection(billing(), copyPlanSelection(intake(), new Set(["n2"]))!, "DOWN");
-		expect(stageOf(pasted.plan, pasted.pastedIds[0]!)).toBe("Billing");
+		expect(stageOf(pasted.plan, pasted.pastedIds[0]!)).toBeNull();
 	});
 
 	test("nothing to copy copies nothing, and what was copied before stays", () => {

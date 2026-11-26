@@ -1,7 +1,8 @@
 // Secondary Monaco Hover, Definition, Link, Completion, and CodeLens providers bridging
 // SSL/SQL/Markdown/XML/JSON code to documented `schema/` tables/columns, workspace tickets,
 // governing plans/ADRs/questions, and comment doc references (ADR 0003: matches identifiers
-// strictly against workspace docs, DDL, and starlims-lsp symbols, never parsing SSL).
+// strictly against workspace docs, DDL, and starlims-lsp symbols, never parsing SSL: which word is a
+// keyword or a name being declared, and where the comments are, is the language server's to say).
 import { createEffect, createMemo, createRoot, runWithOwner } from "solid-js";
 import { findCodeCitations, type CodeCitation } from "../../shared/codeCitations";
 import { parseCsv } from "../../shared/csv";
@@ -20,10 +21,12 @@ import {
 	type SchemaColumnInfo,
 } from "../../shared/schemaIndex";
 import { ticketMatcher } from "../../shared/ticketRefs";
+import { isSslOwnWord, namesByLine, NO_FACTS } from "../../shared/lexicalTokens";
 import { codeMatchesRef, docsGoverningFile } from "../../shared/workContext";
 import { backend } from "../backend";
 import { quickPick, type QuickPickOption } from "../dialogs";
 import { docAuditData } from "../docAudit";
+import { searchableText, sslFacts } from "../lsp/facts";
 import { session } from "../lsp/session";
 import { symbols } from "../panels/Objects";
 import { docs, isMarkdown } from "../project";
@@ -133,15 +136,6 @@ const SQL_RESERVED_KEYWORDS = new Set([
 	"elseif",
 	"endif",
 ]);
-
-const SSL_DECL_LINE_RE = /^\s*:(?:DECLARE|PARAMETERS|PROCEDURE|PUBLIC|CLASS|LABEL)\b/i;
-
-function isSslDeclarationTarget(lineText: string, matchStart: number): boolean {
-	if (matchStart > 0 && lineText[matchStart - 1] === ":") return true;
-	if (!SSL_DECL_LINE_RE.test(lineText)) return false;
-	const semi = lineText.indexOf(";");
-	return semi < 0 || matchStart < semi;
-}
 
 /**
  * Derives comment spans per line: for SSL strictly from the canonical SSL TextMate
@@ -783,7 +777,8 @@ export function registerSchemaHoverProviders(): void {
 				}
 
 				const wordLower = word.word.toLowerCase();
-				if (SQL_RESERVED_KEYWORDS.has(wordLower) || (lang === "ssl" && isSslDeclarationTarget(lineText, word.startColumn - 1))) {
+				// A keyword, a member, or a name its statement declares is the language's own, whatever table is called the same.
+				if (SQL_RESERVED_KEYWORDS.has(wordLower) || (lang === "ssl" && isSslOwnWord(await sslFacts(model), position.lineNumber - 1, word.startColumn - 1))) {
 					return null;
 				}
 
@@ -796,7 +791,7 @@ export function registerSchemaHoverProviders(): void {
 
 				// 4. Column hover for tables referenced elsewhere in this file
 				if (model.getValueLength() <= 200_000) {
-					const refTables = referencedSchemaTables(model.getValue(), allDocs, 8);
+					const refTables = referencedSchemaTables(await searchableText(model), allDocs, 8);
 					if (refTables.length) {
 						const matches: SchemaColumnInfo[] = [];
 						for (const refDoc of refTables) {
@@ -844,7 +839,7 @@ export function registerSchemaHoverProviders(): void {
 					const qDoc = findSchemaDocForIdentifier(qualifier, allDocs);
 					if (qDoc) return definitionLocation(qDoc.path, 1);
 				}
-				if (SQL_RESERVED_KEYWORDS.has(word.word.toLowerCase()) || (lang === "ssl" && isSslDeclarationTarget(lineText, word.startColumn - 1))) {
+				if (SQL_RESERVED_KEYWORDS.has(word.word.toLowerCase()) || (lang === "ssl" && isSslOwnWord(await sslFacts(model), position.lineNumber - 1, word.startColumn - 1))) {
 					return null;
 				}
 				const tableDoc = findSchemaDocForIdentifier(word.word, allDocs);
@@ -924,7 +919,7 @@ export function registerSchemaHoverProviders(): void {
 				}
 
 				if (model.getValueLength() <= 200_000) {
-					const refTables = referencedSchemaTables(model.getValue(), allDocs, 6);
+					const refTables = referencedSchemaTables(await searchableText(model), allDocs, 6);
 					const seenCols = new Set<string>();
 					for (const refDoc of refTables) {
 						const cols = await loadColumnsForDoc(refDoc);
@@ -953,9 +948,13 @@ export function registerSchemaHoverProviders(): void {
 	// LinkProvider for SSL & SQL: comment doc paths + [[wikilinks]], ticket keys, and schema table names.
 	for (const lang of ["ssl", "sql"] as const) {
 		monaco.languages.registerLinkProvider(lang, {
-			provideLinks(model) {
+			async provideLinks(model) {
+				if (model.getLineCount() > 5000) return { links: [] };
+				// Which words are the language's own is asked first: the lines are read after the answer, from the text it is of.
+				const facts = lang === "ssl" ? await sslFacts(model) : NO_FACTS;
+				if (model.isDisposed()) return { links: [] };
+				const ownNames = facts.names ? namesByLine(facts.names) : null;
 				const lineCount = model.getLineCount();
-				if (lineCount > 5000) return { links: [] };
 				const allDocs = docs();
 				const wsRoot = state.workspace?.root;
 				const { map: ticketMap, match: matchTickets } = ticketIndex();
@@ -1029,7 +1028,7 @@ export function registerSchemaHoverProviders(): void {
 							const to = from + m[0].length;
 							if (taken.some(([a, b]) => from < b && to > a)) continue;
 							if (SQL_RESERVED_KEYWORDS.has(m[0].toLowerCase())) continue;
-							if (lang === "ssl" && isSslDeclarationTarget(text, from)) continue;
+							if (lang === "ssl" && isSslOwnWord(facts, lineNum - 1, from, ownNames?.get(lineNum - 1) ?? (ownNames ? [] : undefined))) continue;
 							const doc = findSchemaDocForIdentifier(m[0], allDocs);
 							if (!doc) continue;
 							const rel = wsRoot ? relativeTo(wsRoot, doc.path).replace(/\\/g, "/") : doc.name;
