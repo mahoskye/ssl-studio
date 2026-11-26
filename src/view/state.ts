@@ -7,7 +7,9 @@ import { backend, on } from "./backend";
 import { removeRecentGroup, resetRecentTabs } from "./recentTabs";
 import { monaco } from "./editor/monaco";
 import { languageFor, setFormattingHost } from "./editor/languages";
-import { DEFAULT_SQL_DIALECT } from "../shared/format";
+import { DEFAULT_SQL_DIALECT, isSqlLanguage } from "../shared/format";
+import { isDataSourceName } from "../shared/lexicalTokens";
+import { sqlBodyStart } from "../shared/sqlDataSource";
 import { getPath, SERVER_DEFAULTS } from "../shared/styleProfile";
 import { session } from "./lsp/session";
 import { changedRanges, minimalReplace } from "./lsp/edits";
@@ -79,6 +81,10 @@ type Doc = {
 	binary?: { size: number; image?: string };
 	/** Stops any active non-SSL document validator (plan/doc/json/toml/xml) on language switch or dispose. */
 	validatorDispose?: () => void;
+	/** Of a data source read as SQL: the line (from 0) its SQL starts on (ADR 0038). Not set for one that is SSL. */
+	sqlBodyLine?: number;
+	/** The language mode was chosen by hand. Nothing changes it then but another choice. */
+	languageChosen?: boolean;
 };
 
 const [state, setStore] = createStore({
@@ -1006,8 +1012,12 @@ function attachValidator(model: monaco.editor.ITextModel, path: string, language
 /** Makes a model the open document for a path, and follows its edits. */
 function attach(path: string, text: string, saved: { text: string; mtime: number }): Doc {
 	const uri = monaco.Uri.file(path);
-	const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(text, languageFor(path), uri);
+	// A data source that is SQL from its first line opens as SQL. One with SSL directives above its SQL is seen
+	// for what it is once the language server has said what it read (`readDataSource`).
+	const sqlFrom = isDataSourceName(path) ? sqlBodyStart(text, null) : null;
+	const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(text, sqlFrom === null ? languageFor(path) : "sql", uri);
 	const doc: Doc = { path, model, savedVersion: text === saved.text ? model.getAlternativeVersionId() : -1, savedText: saved.text, mtime: saved.mtime };
+	if (sqlFrom !== null) doc.sqlBodyLine = sqlFrom;
 	docs.set(path, doc);
 	model.onDidChangeContent(() => {
 		const dirty = model.getAlternativeVersionId() !== doc.savedVersion && model.getValue() !== doc.savedText;
@@ -1021,8 +1031,61 @@ function attach(path: string, text: string, saved: { text: string; mtime: number
 	session.track(model);
 	setHouseIndent(model);
 	doc.validatorDispose = attachValidator(model, path, model.getLanguageId());
+	if (isDataSourceName(path)) followDataSource(doc);
 	return doc;
 }
+
+/** The language mode a document has when none is chosen for it: by its name, and for a data source by what it holds. */
+function detectedLanguage(doc: Doc): string {
+	return isDataSourceName(doc.path) && doc.sqlBodyLine !== undefined ? "sql" : languageFor(doc.path);
+}
+
+/** The same for an open document's path: what "Auto Detect" in the language picker goes back to. */
+export const detectedLanguageOf = (path: string): string => {
+	const doc = docs.get(canonical(path));
+	return doc ? detectedLanguage(doc) : languageFor(path);
+};
+
+/**
+ * Reads an open data source as SQL or as SSL, and shows it in that language mode (ADR 0038).
+ *
+ * The language server says what it read as SSL (its lexical tokens): nothing of an SQL data source, or its
+ * directives alone. What stands below that is the IDE's to read, and is SQL if it opens with an SQL statement
+ * (`sqlBodyStart`). With no server to say, only a file that is SQL from its first line is taken for SQL. A mode
+ * chosen by hand is left as chosen.
+ */
+async function readDataSource(doc: Doc): Promise<void> {
+	const model = doc.model;
+	if (model.isDisposed() || doc.binary || !isDataSourceName(doc.path)) return;
+	const version = model.getVersionId();
+	const lexical = await session.lexicalTokens(model).catch(() => null);
+	if (model.isDisposed() || model.getVersionId() !== version || docs.get(doc.path) !== doc) return;
+	const body = sqlBodyStart(model.getValue(), lexical);
+	doc.sqlBodyLine = body ?? undefined;
+	if (doc.languageChosen) return;
+	const now = model.getLanguageId();
+	const want = body === null ? "ssl" : isSqlLanguage(now) ? now : "sql";
+	if (now !== want && (now === "ssl" || isSqlLanguage(now))) setDocumentLanguage(doc.path, want, false);
+}
+
+/** Reads a data source when it is opened, and again a moment after it is written in. */
+function followDataSource(doc: Doc) {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const written = doc.model.onDidChangeContent(() => {
+		clearTimeout(timer);
+		timer = setTimeout(() => void readDataSource(doc), 400);
+	});
+	doc.model.onWillDispose(() => {
+		clearTimeout(timer);
+		written.dispose();
+	});
+	void readDataSource(doc);
+}
+
+// The server has started, or started again: what it reads of each open data source can be asked now.
+session.onReady(() => {
+	for (const doc of docs.values()) if (isDataSourceName(doc.path)) void readDataSource(doc);
+});
 
 async function loadDoc(path: string): Promise<Doc> {
 	path = canonical(path);
@@ -1041,6 +1104,13 @@ async function loadDoc(path: string): Promise<Doc> {
 session.sslSettings = () => snapshot(state).settings.ssl ?? {};
 
 setFormattingHost({
+	sqlBodyLine: async (model) => {
+		const doc = model.uri.scheme === "file" ? docs.get(canonical(model.uri.fsPath)) : undefined;
+		if (!doc) return undefined;
+		// Read again now: the text may have been written in since it was last read.
+		await readDataSource(doc);
+		return doc.sqlBodyLine;
+	},
 	options: () => ({
 		printWidth: Number(getPath(state.settings.ssl, "format.maxLineLength") ?? SERVER_DEFAULTS.format.maxLineLength),
 		sqlDialect: state.settings.sqlDialect ?? DEFAULT_SQL_DIALECT,
@@ -1940,20 +2010,26 @@ export function widenToProcedures(ranges: [number, number][], symbols: monaco.la
 		}, []);
 }
 
-/** Switches an open text document's Monaco language mode (VS Code "Change Language Mode") and updates LSP & reactive views. */
-export function setDocumentLanguage(path: string, languageId: string): boolean {
+/**
+ * Switches an open text document's Monaco language mode (VS Code "Change Language Mode") and updates LSP & reactive views.
+ * `chosen` says a person picked the mode: it then stays until they pick another, unless what they picked is the
+ * mode the document would have anyway, which is to go back to having it worked out.
+ */
+export function setDocumentLanguage(path: string, languageId: string, chosen = true): boolean {
 	const doc = docs.get(canonical(path));
 	if (!doc || doc.binary || doc.model.isDisposed()) return false;
+	if (chosen) doc.languageChosen = languageId !== detectedLanguage(doc);
 	const prev = doc.model.getLanguageId();
 	if (prev === languageId) return false;
-	if (prev === "ssl" && languageId !== "ssl") session.untrack(doc.model);
 	doc.validatorDispose?.();
 	doc.validatorDispose = undefined;
 	monaco.editor.setModelLanguage(doc.model, languageId);
-	if (languageId === "ssl" && prev !== "ssl") {
-		session.track(doc.model);
-		setHouseIndent(doc.model);
-	} else doc.validatorDispose = attachValidator(doc.model, doc.path, languageId);
+	// The server is told of what it reads in the new mode, and no longer of what it does not. A data source shown
+	// as SQL it reads still, so its findings there are kept.
+	if (session.reads(doc.model)) session.track(doc.model);
+	else session.untrack(doc.model);
+	if (languageId === "ssl") setHouseIndent(doc.model);
+	else doc.validatorDispose = attachValidator(doc.model, doc.path, languageId);
 	setState((s) => {
 		s.kindVersion += 1;
 	});

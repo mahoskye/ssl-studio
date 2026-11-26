@@ -17,6 +17,8 @@ import {
 } from "../../shared/fencedFormat";
 import { formatJson } from "../../shared/jsonFormat";
 import { LANGUAGES, languageFor, languageName, type LanguageDef } from "../../shared/languages";
+import { isDataSourceName } from "../../shared/lexicalTokens";
+import { splitAtLine } from "../../shared/sqlDataSource";
 import { backend } from "../backend";
 import { monaco } from "./monaco";
 import "monaco-editor/languages/definitions/markdown/register";
@@ -268,6 +270,8 @@ type FormattingOptions = {
 
 type FormattingHost = {
 	options(): FormattingOptions;
+	/** The line (from 0) an open data source's SQL starts on, where it has been read as an SQL data source (ADR 0038). */
+	sqlBodyLine?(model: monaco.editor.ITextModel): Promise<number | undefined>;
 	formatSsl(code: string): Promise<{ ok: true; text: string } | { ok: false; error: string; lspOffline?: boolean }>;
 	onError(error: string, path: string): void;
 	onNotice?(message: string): void;
@@ -404,7 +408,12 @@ async function computeNonSslFormat(
 	const uri = model.uri.toString();
 	const path = model.uri.fsPath || model.uri.path;
 	if (!canFormatNonSsl(languageId, path)) return { ok: true, text: model.getValue(), changed: false };
-	const text = model.getValue();
+	const whole = model.getValue();
+	// Of an SQL data source the SQL is formatted and what stands above it is left as it is: the directives there
+	// (`:PARAMETERS …;`) are SSL, which no SQL formatter is to be given. One not read as SQL yet is left alone.
+	const bodyLine = isDataSourceName(path) ? await formattingHost.sqlBodyLine?.(model) : 0;
+	if (bodyLine === undefined) return { ok: true, text: whole, changed: false };
+	const { above, body: text } = splitAtLine(whole, bodyLine);
 	const extra = formattingHost.options();
 	try {
 		const result = await backend.formatDocument({
@@ -422,7 +431,7 @@ async function computeNonSslFormat(
 			formattingHost.onError(result.error, path);
 			return { ok: false };
 		}
-		let finalText = result.text;
+		let finalText = above + result.text;
 		if (languageId === "markdown") {
 			const embedded = await formatAllMarkdownFences(finalText, path);
 			finalText = embedded.text;
@@ -434,7 +443,7 @@ async function computeNonSslFormat(
 				);
 			}
 		}
-		return { ok: true, text: finalText, changed: finalText !== text };
+		return { ok: true, text: finalText, changed: finalText !== whole };
 	} catch (err: any) {
 		// If the backend is unreachable for plain JSON, keep the local zero-dependency JSON formatter working.
 		if (languageId === "json" && !/\.jsonc$/i.test(path) && !/\.plan\.json$/i.test(path)) {

@@ -42,10 +42,22 @@ export function sqlDialectInfo(id: SqlDialect | undefined) {
 	return SQL_DIALECTS.find((d) => d.id === id) ?? SQL_DIALECTS[0];
 }
 
-/** Whether the IDE's built-in non-SSL formatter handles this language/path. */
+const SQL_LANGUAGE_IDS = new Set(["sql", "pgsql", "mysql"]);
+/** Whether a language mode is one of SQL's. */
+export const isSqlLanguage = (languageId: string | undefined): boolean => Boolean(languageId && SQL_LANGUAGE_IDS.has(languageId));
+
+/** A data source by its name: `.ds`, or `.ds.txt`. It is SSL, or SQL, and its name does not say which. */
+const DATA_SOURCE_NAME = /\.ds(?:\.txt)?$/i;
+
+/**
+ * Whether the IDE's built-in non-SSL formatter handles this language/path. A script is never its to format,
+ * whatever mode it is shown in. A data source is, where it is shown as SQL: the IDE has read it as an SQL data
+ * source (shared/sqlDataSource.ts), and formats its SQL and nothing above it.
+ */
 export function canFormatNonSsl(languageId: string | undefined, path?: string): boolean {
 	if (!languageId || languageId === "ssl") return false;
-	if (path && (/\.(ssl|srvscr|ds)$/i.test(path) || /\.plan\.json$/i.test(path))) return false;
+	if (path && (/\.(ssl|srvscr)(?:\.txt)?$/i.test(path) || /\.plan\.json$/i.test(path))) return false;
+	if (path && DATA_SOURCE_NAME.test(path)) return isSqlLanguage(languageId);
 	return FORMATTABLE_NON_SSL_LANGUAGES.has(languageId);
 }
 

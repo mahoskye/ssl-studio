@@ -30,7 +30,11 @@ describe("shared formatting guards and dialect helpers", () => {
 
 		// ADR 0003: starlims-lsp owns SSL exclusively.
 		expect(canFormatNonSsl("ssl", "Sample/Release.ssl")).toBe(false);
-		expect(canFormatNonSsl("sql", "Sample/Query.ds")).toBe(false);
+		// A data source is the server's as SSL, and in any mode but SQL; shown as SQL it has been read as an SQL
+		// data source (ADR 0038), and its SQL is formatted as SQL.
+		expect(canFormatNonSsl("ssl", "Sample/Query.ds")).toBe(false);
+		expect(canFormatNonSsl("javascript", "Sample/Query.ds")).toBe(false);
+		expect(canFormatNonSsl("sql", "Sample/Query.ds")).toBe(true);
 		expect(canFormatNonSsl("javascript", "Sample/Run.srvscr")).toBe(false);
 
 		// Plans keep their own deterministic line-per-node printer.
@@ -58,10 +62,27 @@ describe("backend formatDocument", () => {
 	test("refuses SSL files so starlims-lsp stays the sole SSL formatter", async () => {
 		const byLang = await formatDocument({ path: "a.ssl", text: ":PROCEDURE Test;\n:ENDPROC;\n", languageId: "ssl" });
 		expect(byLang.ok).toBe(false);
-		const byExt = await formatDocument({ path: "Query.ds", text: "SELECT 1", languageId: "sql" });
+		const byExt = await formatDocument({ path: "Query.ds", text: ":DECLARE x;", languageId: "ssl" });
 		expect(byExt.ok).toBe(false);
+		// A data source in a mode that is neither SSL nor SQL is still not for that mode's formatter.
+		const otherMode = await formatDocument({ path: "Query.ds", text: "x = 1", languageId: "javascript" });
+		expect(otherMode.ok).toBe(false);
 		const bySrvscr = await formatDocument({ path: "Run.srvscr", text: "x := 1;", languageId: "javascript" });
 		expect(bySrvscr.ok).toBe(false);
+		// A script shown as SQL by hand is a script still.
+		const scriptAsSql = await formatDocument({ path: "Run.ssl", text: "select 1", languageId: "sql" });
+		expect(scriptAsSql.ok).toBe(false);
+	});
+
+	test("formats the SQL of a data source the view has read as SQL (ADR 0038)", async () => {
+		const sql = await formatDocument({ path: "src/Orders/OpenSamples.ds", text: "select s.sample_id from demo_samples s where s.due_on < @dFrom\n", languageId: "sql" });
+		expect(sql.ok).toBe(true);
+		if (!sql.ok) return;
+		expect(sql.formatter).toBe("sql-formatter");
+		expect(sql.text).toContain("SELECT");
+		expect(sql.text).toContain("@dFrom");
+		// No `;` is added: a data source's SQL runs as one command, and STARLIMS refuses one with a `;` in it.
+		expect(sql.text).not.toContain(";");
 	});
 
 	test("formats SQL Server T-SQL and preserves idempotency and CRLF", async () => {

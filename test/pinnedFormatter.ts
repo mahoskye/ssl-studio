@@ -66,6 +66,15 @@ export function formatter(path: string) {
 			send({ method: "textDocument/didClose", params: { textDocument: { uri } } });
 			return applyTextEdits(text, edits);
 		},
+		/** What the server read as SSL in a text of the given name: its `ssl/lexicalTokens`. */
+		async lexical(text: string, ending = ".ssl"): Promise<{ kind: string; range: { start: { line: number; character: number }; end: { line: number; character: number } } }[]> {
+			await started;
+			const uri = `file:///ws/.ssl-studio/lexical-${++count}${ending}`;
+			send({ method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "ssl", version: 1, text } } });
+			const answer = await request("ssl/lexicalTokens", { textDocument: { uri } });
+			send({ method: "textDocument/didClose", params: { textDocument: { uri } } });
+			return answer?.tokens ?? [];
+		},
 		stop: () => void child.kill(),
 	};
 }

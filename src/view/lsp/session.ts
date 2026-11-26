@@ -6,7 +6,8 @@ import { LEGEND, onSemanticThemeChange, refreshSemanticTokens, translateTokens }
 import { backend, on } from "../backend";
 import { LspClient } from "./client";
 import { applyTextEdits, formattedParts, smallEdits, trimEdit, typedLead } from "./edits";
-import { decodeNameTokens, type LexToken, type NameToken } from "../../shared/lexicalTokens";
+import { decodeNameTokens, isDataSourceName, type LexToken, type NameToken } from "../../shared/lexicalTokens";
+import { isSqlLanguage } from "../../shared/format";
 import { baseName } from "../../shared/paths";
 
 export type Diagnostic = {
@@ -206,9 +207,10 @@ export class LspSession {
 				setLspReadyEpoch(myEpoch);
 				for (const model of monaco.editor.getModels()) {
 					const uri = model.uri.toString();
-					if (this.tracked.has(uri) && !this.versions.get(uri) && !model.isDisposed() && model.getLanguageId() === "ssl") this.open(model);
+					if (this.tracked.has(uri) && !this.versions.get(uri) && !model.isDisposed() && readByServer(model)) this.open(model);
 				}
 				refreshSemanticTokens();
+				for (const listener of this.readyListeners) listener();
 			} catch (err) {
 				if (this.epoch === myEpoch) {
 					this.readyFlag = false;
@@ -218,6 +220,18 @@ export class LspSession {
 			}
 		})();
 		return this.initialized;
+	}
+
+	private readyListeners = new Set<() => void>();
+	/** Told each time the server has started and been given the open documents: what was asked of it before can be asked again. */
+	onReady(listener: () => void): () => void {
+		this.readyListeners.add(listener);
+		return () => void this.readyListeners.delete(listener);
+	}
+
+	/** Whether a model is one the server is told of, in the language mode it is in now (`readByServer`). */
+	reads(model: monaco.editor.ITextModel): boolean {
+		return readByServer(model) && isServed(model);
 	}
 
 	/**
@@ -455,13 +469,13 @@ export class LspSession {
 
 	/** Keeps the server's copy of an SSL model in step with the editor. */
 	track(model: monaco.editor.ITextModel) {
-		if (model.getLanguageId() !== "ssl" || !isServed(model)) return;
+		if (!readByServer(model) || !isServed(model)) return;
 		const uri = model.uri.toString();
 		if (this.tracked.has(uri)) return;
 		this.versions.set(uri, 0);
 		this.initialized
 			?.then(() => {
-				if (this.readyFlag && this.tracked.has(uri) && !this.versions.get(uri) && !model.isDisposed() && model.getLanguageId() === "ssl") {
+				if (this.readyFlag && this.tracked.has(uri) && !this.versions.get(uri) && !model.isDisposed() && readByServer(model)) {
 					this.open(model);
 				}
 			})
@@ -716,6 +730,17 @@ export function toSmallEdits(model: monaco.editor.ITextModel, edits: { range: Ra
 }
 
 export const session = new LspSession();
+
+/**
+ * Whether a model is in a language mode the server reads: SSL, or SQL where the file is a data source. The server
+ * tells an SQL data source from an SSL one by the file itself, whatever mode the editor shows it in, and checks
+ * what is its own to check in one (its parameters, a misplaced `;`): shown as SQL (ADR 0038), it is still told
+ * of, so those findings are kept.
+ */
+function readByServer(model: monaco.editor.ITextModel) {
+	const language = model.getLanguageId();
+	return language === "ssl" || (isSqlLanguage(language) && isDataSourceName(model.uri.path));
+}
 
 /**
  * Whether a model is a document the server is told of: a file, or a document not yet saved. The server reads an

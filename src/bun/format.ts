@@ -30,6 +30,7 @@ import {
 	type FormatDocumentResult,
 	type SqlDialect,
 	type SqlKeywordCase,
+	isSqlLanguage,
 } from "../shared/format";
 
 const pluginXml: Plugin = ((pluginXmlModule as { default?: Plugin }).default ?? pluginXmlModule) as Plugin;
@@ -381,8 +382,11 @@ export async function formatDocument(
 	const languageId = req.languageId ?? "";
 	const text = req.text ?? "";
 
-	// ADR 0003 & ADR 0015: starlims-lsp owns SSL formatting exclusively.
-	if (languageId === "ssl" || /\.(ssl|srvscr|ds)$/i.test(path)) {
+	// ADR 0003 & ADR 0015: starlims-lsp owns SSL formatting exclusively. A data source is formatted here only as
+	// SQL: the view sends the SQL of one it has read as an SQL data source, and nothing of its header (ADR 0038).
+	const script = /\.(ssl|srvscr)(?:\.txt)?$/i.test(path);
+	const dataSource = /\.ds(?:\.txt)?$/i.test(path);
+	if (languageId === "ssl" || script || (dataSource && !isSqlLanguage(languageId))) {
 		return { ok: false, error: "SSL files are formatted by starlims-lsp." };
 	}
 

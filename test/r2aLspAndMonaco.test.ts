@@ -1066,3 +1066,43 @@ describe("Format on save takes the changed lines from a format of the whole docu
 		end.dispose();
 	});
 });
+
+describe("A data source shown as SQL is still the server's to read (ADR 0038)", () => {
+	test("it is told of as before, under its own name; an SQL file is not, nor a data source in any other mode", async () => {
+		const sess = new LspSession();
+		const sent: { method: string; params: any }[] = [];
+		(sess.client as any).notify = (method: string, params: any) => void sent.push({ method, params });
+		(sess.client as any).request = async (method: string) => (method === "initialize" ? { capabilities: {} } : null);
+		const inMode = (uri: string, language: string) => {
+			const model = makeFakeModel("SELECT 1", uri);
+			model.getLanguageId = () => language;
+			return model;
+		};
+		const dataSource = inMode("file:///ws/src/Orders/OpenSamples.ds", "sql");
+		const asText = inMode("file:///ws/src/Orders/Other.ds.txt", "mysql");
+		const query = inMode("file:///ws/schema/query.sql", "sql");
+		const otherMode = inMode("file:///ws/src/Orders/Odd.ds", "javascript");
+		const script = inMode("file:///ws/src/Orders/Save.ssl", "ssl");
+		expect([dataSource, asText, query, otherMode, script].map((model) => sess.reads(model))).toEqual([true, true, false, false, true]);
+		for (const model of [dataSource, asText, query, otherMode, script]) sess.track(model);
+		await sess.start("/ws");
+		const opened = sent.filter((m) => m.method === "textDocument/didOpen").map((m) => [m.params.textDocument.uri.split("/").pop(), m.params.textDocument.languageId]);
+		// The server is given each as SSL by language id: it tells what a data source is by the file itself.
+		expect(opened.sort()).toEqual([["OpenSamples.ds", "ssl"], ["Other.ds.txt", "ssl"], ["Save.ssl", "ssl"]]);
+		for (const model of [dataSource, asText, query, otherMode, script]) model.dispose();
+	});
+
+	test("onReady tells its listeners each time the server has started, until they leave", async () => {
+		const sess = new LspSession();
+		(sess.client as any).notify = () => {};
+		(sess.client as any).request = async (method: string) => (method === "initialize" ? { capabilities: {} } : null);
+		let told = 0;
+		const leave = sess.onReady(() => void told++);
+		await sess.start("/ws");
+		await sess.start("/ws");
+		expect(told).toBe(2);
+		leave();
+		await sess.start("/ws");
+		expect(told).toBe(2);
+	});
+});
