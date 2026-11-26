@@ -461,7 +461,12 @@ describe("system commands and file URI encoding", () => {
 
 	test("fileUriForDbus encodes #, ?, %, spaces, and single quotes", () => {
 		const uri = fileUriForDbus("/tmp/report #1?v=2's 100%.txt");
-		expect(uri).toBe("file:///tmp/report%20%231%3Fv=2%27s%20100%25.txt");
+		// The helper is called on Linux only, where the address begins at the root. Asked on Windows, a path written
+		// that way is on the drive the process is on, and Bun 1.4.4 says so (`file:///C:/tmp/...`) where 1.3.3 did
+		// not: the Windows test VM runs the app's own 1.4.4 and failed here, CI's 1.3.3 passed. What is tested is how
+		// the name is written, which is the same wherever the address begins.
+		expect(uri).toMatch(/^file:\/\/\/(?:[A-Za-z]:\/)?tmp\/report%20%231%3Fv=2%27s%20100%25\.txt$/);
+		if (process.platform !== "win32") expect(uri).toBe("file:///tmp/report%20%231%3Fv=2%27s%20100%25.txt");
 		expect(uri).not.toContain("'");
 		expect(uri).not.toContain("#");
 		expect(uri).not.toContain("?");
