@@ -6,7 +6,7 @@ import { App } from "./App";
 import { connect, backend, onConnectionLost } from "./backend";
 import { installKeys } from "./commands";
 import { installContextMenu } from "./contextMenu";
-import { loadLanguageConfiguration } from "./editor/monaco";
+import { loadLanguageConfiguration, setEditorKeys } from "./editor/monaco";
 import "./editor/opener";
 import { loadGrammar } from "./editor/textmate";
 import { registerProviders, session } from "./lsp/session";
@@ -39,6 +39,7 @@ async function start() {
 	// A window that was reloaded starts with no view open that holds typed text, and the backend still has what the
 	// page before it said (state.ts, `tellHolding`): told now, a close is not sent round by the view for nothing.
 	void backend.typingChanged(false).catch(() => undefined);
+	setEditorKeys();
 	await Promise.all([loadGrammar(), loadLanguageConfiguration(), loadSettings(true)]);
 	applyFonts(state.settings);
 	applyTheme(resolveTheme(state.settings.theme, state.themes, undefined, state.settings.themeMaterial));

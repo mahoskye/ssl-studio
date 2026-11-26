@@ -62,3 +62,128 @@ test("the server's edits are applied to text that is in no editor", () => {
 	expect(applyTextEdits("ab\ncd", [{ range: { start: at(0, 99), end: at(0, 99) }, newText: "!" }])).toBe("ab!\ncd");
 	expect(applyTextEdits(text, [])).toBe(text);
 });
+
+import { smallEdits, typedLead, type SmallEdit } from "../src/view/lsp/edits";
+
+describe("typedLead", () => {
+	test("punctuation typed before the word, which the text opens with, is counted", () => {
+		expect(typedLead(":", ":WHILE")).toBe(1);
+		expect(typedLead("\tx := 1;\n:", ":WHILE")).toBe(1);
+		expect(typedLead("x := .", ".T.")).toBe(1);
+		expect(typedLead("a ::", "::b")).toBe(2);
+	});
+	test("the longest repeat is taken, and only as much as was typed", () => {
+		expect(typedLead("x -", "->y")).toBe(1);
+		expect(typedLead("x ->", "->y")).toBe(2);
+		expect(typedLead("x >", "->y")).toBe(0);
+	});
+	test("nothing is counted where the text opens with a word, or nothing of it was typed", () => {
+		expect(typedLead(":", "WHILE")).toBe(0);
+		expect(typedLead("x := ", ":WHILE")).toBe(0);
+		expect(typedLead("", ":WHILE")).toBe(0);
+		expect(typedLead("sName", "sName")).toBe(0);
+	});
+	test("a snippet's placeholder is not text that was typed", () => {
+		expect(typedLead("$", "${1:name}", true)).toBe(0);
+		expect(typedLead(":", ":WHILE ${1:condition};", true)).toBe(1);
+		expect(typedLead("$", "$name")).toBe(1);
+	});
+	test("half of a character of two units is never counted", () => {
+		expect(typedLead("\ud83d", "🔴x")).toBe(0);
+	});
+});
+
+describe("smallEdits", () => {
+	/** The block with the edits applied, each at its place in the block as it was. */
+	const apply = (lines: string[], edits: SmallEdit[]) => {
+		const text = lines.join("\n");
+		const starts = [0];
+		for (let i = 0; i < text.length; i++) if (text[i] === "\n") starts.push(i + 1);
+		let out = text;
+		for (const e of [...edits].reverse()) out = out.slice(0, starts[e.startLine]! + e.startColumn) + e.text + out.slice(starts[e.endLine]! + e.endColumn);
+		return out.split("\n");
+	};
+	/** Edits in order, none reaching into or touching the next, each within the block. */
+	const wellFormed = (lines: string[], edits: SmallEdit[]) => {
+		let line = 0;
+		let column = -1;
+		for (const e of edits) {
+			expect(e.startLine > line || (e.startLine === line && e.startColumn > column)).toBe(true);
+			expect(e.endLine > e.startLine || e.endColumn >= e.startColumn).toBe(true);
+			expect(e.endLine).toBeLessThan(lines.length);
+			expect(e.endColumn).toBeLessThanOrEqual(lines[e.endLine]!.length);
+			line = e.endLine;
+			column = e.endColumn;
+		}
+	};
+	const check = (before: string[], after: string[]) => {
+		const edits = smallEdits(before, after);
+		wellFormed(before, edits);
+		expect(apply(before, edits)).toEqual(after);
+		return edits;
+	};
+
+	test("a line the formatter kept is changed only where it differs", () => {
+		const edits = check(["x:=5 ;"], ["\tx := 5;"]);
+		// Nothing at or after the semicolon: a cursor at the line's end stays there.
+		expect(edits.every((e) => e.startLine === 0 && e.endLine === 0 && e.endColumn <= 5)).toBe(true);
+		expect(edits.length).toBeGreaterThan(1);
+	});
+	test("a procedure reformatted leaves the lines that did not change alone", () => {
+		const before = [":PROCEDURE  foo ;", ":PARAMETERS a,b;", ":DECLARE x;", "x:=a+b ;", ":IF x>1;", "x := 1;", ":ELSE;", "      x:=0;", ":ENDIF;", "x:=5 ;", ":RETURN x;", ":ENDPROC;"];
+		const after = [":PROCEDURE foo;", "\t:PARAMETERS a, b;", "\t:DECLARE x;", "", "\tx := a + b;", "", "\t:IF x > 1;", "\t\tx := 1;", "\t:ELSE;", "\t\tx := 0;", "\t:ENDIF;", "", "\tx := 5;", "\t:RETURN x;", ":ENDPROC;"];
+		const edits = check(before, after);
+		// The last line is the same in both: no edit reaches it.
+		expect(edits.every((e) => e.endLine < before.length - 1)).toBe(true);
+		// The line typed last ("x:=5 ;", line 9) is changed within itself, by edits that end before its semicolon.
+		const onTyped = edits.filter((e) => e.endLine === 9);
+		expect(onTyped.length).toBeGreaterThan(0);
+		expect(onTyped.every((e) => e.endColumn <= 5)).toBe(true);
+	});
+	test("letter case changed by the formatter is a change within the line", () => {
+		const edits = check(['\tx := sqlexecute("select 1");'], ['\tx := SQLExecute("select 1");']);
+		expect(edits.every((e) => e.startLine === 0 && e.endLine === 0)).toBe(true);
+	});
+	test("lines added and taken out, at the start, in the middle and at the end", () => {
+		check(["a;", "b;"], ["", "a;", "b;"]);
+		check(["a;", "b;"], ["a;", "", "b;"]);
+		check(["a;", "b;"], ["a;", "b;", "", "c;"]);
+		check(["", "a;", "b;"], ["a;", "b;"]);
+		check(["a;", "", "", "b;"], ["a;", "b;"]);
+		check(["a;", "b;", "", ""], ["a;", "b;"]);
+		check(["a ;", "", ""], ["a;"]);
+		check(["a ;"], ["", "a;", ""]);
+	});
+	test("lines the formatter rewrote are replaced whole", () => {
+		const edits = check(["x := Foo(1, 2, 3);"], ["x := Foo(1,", "\t2, 3);"]);
+		expect(edits).toEqual([{ startLine: 0, startColumn: 0, endLine: 0, endColumn: 18, text: "x := Foo(1,\n\t2, 3);" }]);
+		check(["a;", "one two", "b;"], ["a;", "three", "four", "b;"]);
+	});
+	test("nothing to change gives no edits", () => {
+		expect(smallEdits(["a;", "b;"], ["a;", "b;"])).toEqual([]);
+	});
+	test("a character of two units is never cut", () => {
+		const edits = check(['s:="🔴" ;'], ['s := "🟢";']);
+		for (const e of edits) for (const at of [e.startColumn, e.endColumn]) expect(at > 0 && 's:="🔴" ;'.charCodeAt(at - 1) >= 0xd800 && 's:="🔴" ;'.charCodeAt(at - 1) <= 0xdbff).toBe(false);
+	});
+	test("a block too large for the table, or a line too long for one, is changed in one piece", () => {
+		const before = Array.from({ length: 40 }, (_, i) => `x${i}:=1 ;`);
+		const after = before.map((l) => l.replace(":=1 ;", " := 1;"));
+		expect(smallEdits(before, after, 100)).toEqual([{ startLine: 0, startColumn: 0, endLine: 39, endColumn: before[39]!.length, text: after.join("\n") }]);
+		const long = `x := "${"a".repeat(300)}" ;`;
+		const edits = smallEdits([long], [long.replace('" ;', '";')]);
+		expect(edits.length).toBe(1);
+		expect(apply([long], edits)).toEqual([long.replace('" ;', '";')]);
+	});
+	test("any two blocks: the edits make the one from the other", () => {
+		// A fixed sequence in place of a random one, so that a failure is the same failure every run.
+		let seed = 7;
+		const next = (n: number) => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n;
+		const pieces = ["x := 1;", "x:=1 ;", "\tx := 1;", "", "  ", ":IF a;", "\t:IF A;", ":ENDIF;", "y := Foo( 1 );", "y := foo(1);", "/* note;"];
+		for (let round = 0; round < 300; round++) {
+			const before = Array.from({ length: 1 + next(7) }, () => pieces[next(pieces.length)]!);
+			const after = Array.from({ length: 1 + next(7) }, () => pieces[next(pieces.length)]!);
+			check(before, after);
+		}
+	});
+});

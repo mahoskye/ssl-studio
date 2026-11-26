@@ -73,6 +73,7 @@ type FakeModel = {
 	getLanguageId(): string;
 	getVersionId(): number;
 	getAlternativeVersionId(): number;
+	detectIndentation(insertSpaces: boolean, tabSize: number): void;
 	getLineCount(): number;
 	getLineMaxColumn(line: number): number;
 	getLineFirstNonWhitespaceColumn(line: number): number;
@@ -152,6 +153,8 @@ function createFakeModel(text: string, lang: string, uri: ReturnType<typeof make
 		getVersionId() {
 			return this._version;
 		},
+		// What Tab writes is the real editor's to work out: asked here, nothing follows from it.
+		detectIndentation() {},
 		getAlternativeVersionId() {
 			return this._altVersion;
 		},

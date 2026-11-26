@@ -5,7 +5,7 @@ import { monaco } from "../editor/monaco";
 import { LEGEND, onSemanticThemeChange, refreshSemanticTokens, translateTokens } from "../editor/semantic";
 import { backend, on } from "../backend";
 import { LspClient } from "./client";
-import { applyTextEdits, trimEdit } from "./edits";
+import { applyTextEdits, smallEdits, trimEdit, typedLead } from "./edits";
 import { decodeNameTokens, type LexToken, type NameToken } from "../../shared/lexicalTokens";
 import { baseName } from "../../shared/paths";
 
@@ -449,7 +449,7 @@ export class LspSession {
 
 	/** Keeps the server's copy of an SSL model in step with the editor. */
 	track(model: monaco.editor.ITextModel) {
-		if (model.getLanguageId() !== "ssl" || model.uri.scheme !== "file") return;
+		if (model.getLanguageId() !== "ssl" || !isServed(model)) return;
 		const uri = model.uri.toString();
 		if (this.tracked.has(uri)) return;
 		this.versions.set(uri, 0);
@@ -556,8 +556,12 @@ export class LspSession {
 		return ((await this.request("workspace/symbol", { query })) ?? []) as { name: string; kind: number; containerName?: string; location: { uri: string; range: Range } }[];
 	}
 
-	/** Formats the given line ranges (0-based, inclusive) as small edits. */
-	async formatRanges(model: monaco.editor.ITextModel, ranges: [number, number][], options: monaco.languages.FormattingOptions) {
+	/**
+	 * Formats the given line ranges (0-based, inclusive). The edits are each range's changed lines; with `small`,
+	 * only the characters that differ in a line the formatter kept (`toSmallEdits`), for a cursor that is to stay
+	 * where it is.
+	 */
+	async formatRanges(model: monaco.editor.ITextModel, ranges: [number, number][], options: monaco.languages.FormattingOptions, small = false) {
 		if (model.isDisposed()) return [];
 		const version = model.getVersionId();
 		const edits: monaco.editor.IIdentifiedSingleEditOperation[] = [];
@@ -573,7 +577,7 @@ export class LspSession {
 				options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces },
 			});
 			if (model.isDisposed() || model.getVersionId() !== version) return [];
-			edits.push(...toMinimalEdits(model, result ?? []));
+			edits.push(...(small ? toSmallEdits : toMinimalEdits)(model, result ?? []));
 		}
 		return edits;
 	}
@@ -635,9 +639,48 @@ export function toMinimalEdits(model: monaco.editor.ITextModel, edits: { range: 
 	});
 }
 
+/**
+ * The formatter's edits as the smallest edits that make the same change (`smallEdits`): a line the formatter kept
+ * is changed only where its characters differ. For edits applied where a cursor is: one inside a replaced range
+ * is put at the range's edge, and format on save, which replaced a whole procedure, took the cursor off the line
+ * being typed. Edits that share a line are left as `toMinimalEdits` makes them.
+ */
+export function toSmallEdits(model: monaco.editor.ITextModel, edits: { range: Range; newText: string }[]): monaco.editor.IIdentifiedSingleEditOperation[] {
+	if (!edits.length) return [];
+	const ranges = edits.map((edit) => model.validateRange(toRange(edit.range)));
+	const sorted = [...ranges].sort((a, b) => a.startLineNumber - b.startLineNumber || a.endLineNumber - b.endLineNumber);
+	for (let i = 1; i < sorted.length; i++) if (sorted[i]!.startLineNumber <= sorted[i - 1]!.endLineNumber) return toMinimalEdits(model, edits);
+	const eol = model.getEOL();
+	return edits.flatMap((edit, at) => {
+		const range = ranges[at]!;
+		const full = new monaco.Range(range.startLineNumber, 1, range.endLineNumber, model.getLineMaxColumn(range.endLineNumber));
+		const before = model.getValueInRange(new monaco.Range(range.startLineNumber, 1, range.startLineNumber, range.startColumn));
+		const after = model.getValueInRange(new monaco.Range(range.endLineNumber, range.endColumn, range.endLineNumber, model.getLineMaxColumn(range.endLineNumber)));
+		const oldLines = model.getValueInRange(full).split(eol);
+		const newLines = (before + edit.newText.replace(/\r?\n/g, eol) + after).split(eol);
+		const trimmed = trimEdit(oldLines, newLines);
+		if (!trimmed) return [];
+		const changed = oldLines.slice(trimmed.startLine, trimmed.endLine + 1);
+		// Lines only added, or only taken out: the one edit is the smallest there is.
+		if (!changed.length || !trimmed.lines.length) return toMinimalEdits(model, [edit]);
+		const first = full.startLineNumber + trimmed.startLine;
+		return smallEdits(changed, trimmed.lines).map((small) => ({
+			range: new monaco.Range(first + small.startLine, small.startColumn + 1, first + small.endLine, small.endColumn + 1),
+			text: small.text.replace(/\n/g, eol),
+		}));
+	});
+}
+
 export const session = new LspSession();
 
-const isFileModel = (model: monaco.editor.ITextModel) => model.uri.scheme === "file";
+/**
+ * Whether a model is a document the server is told of: a file, or a document not yet saved. The server reads an
+ * `untitled:` document as it does a file. Other models in the language (the earlier side of a comparison, a
+ * preview) are not the user's documents, and the server holds no copy of them to answer from.
+ */
+function isServed(model: monaco.editor.ITextModel) {
+	return model.uri.scheme === "file" || model.uri.scheme === "untitled";
+}
 const doc = (model: monaco.editor.ITextModel) => ({ textDocument: { uri: model.uri.toString() } });
 const quiet = <T>(work: Promise<T>, fallback: T) => work.catch(() => fallback);
 
@@ -657,30 +700,43 @@ export function registerProviders() {
 	monaco.languages.registerCompletionItemProvider("ssl", {
 		triggerCharacters: [":"],
 		async provideCompletionItems(model, position) {
-			if (!isFileModel(model)) return { suggestions: [] };
+			if (!isServed(model)) return { suggestions: [] };
 			const result = await quiet(session.request("textDocument/completion", { ...doc(model), position: toPosition(position) }), null);
 			const items = (result?.items ?? result ?? []) as any[];
 			const word = model.getWordUntilPosition(position);
 			const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
+			const beforeWord = model.getLineContent(position.lineNumber).slice(0, word.startColumn - 1);
 			return {
 				incomplete: Boolean(result?.isIncomplete),
-				suggestions: items.map((item) => ({
-					label: item.label,
-					kind: completionKinds[item.kind ?? 1] ?? K.Text,
-					detail: item.detail,
-					documentation: markdown(item.documentation),
-					insertText: item.textEdit?.newText ?? item.insertText ?? item.label,
-					insertTextRules: item.insertTextFormat === 2 ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
-					range: item.textEdit?.range ? toRange(item.textEdit.range) : range,
-					sortText: item.sortText,
-					filterText: item.filterText,
-				})),
+				suggestions: items.map((item) => {
+					const snippet = item.insertTextFormat === 2;
+					const insertText: string = item.textEdit?.newText ?? item.insertText ?? item.label;
+					const named = item.textEdit?.range ?? item.textEdit?.replace;
+					// With no range from the server the word at the cursor is replaced, and with it the punctuation
+					// before the word that the text itself opens with: ":WHILE" for a typed ":wh" is not "::WHILE".
+					const lead = named ? 0 : typedLead(beforeWord, insertText, snippet);
+					const typed = insertText.slice(0, lead);
+					const filter: string = item.filterText ?? item.label;
+					return {
+						label: item.label,
+						kind: completionKinds[item.kind ?? 1] ?? K.Text,
+						detail: item.detail,
+						documentation: markdown(item.documentation),
+						insertText,
+						insertTextRules: snippet ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
+						range: named ? toRange(named) : lead ? new monaco.Range(position.lineNumber, word.startColumn - lead, position.lineNumber, word.endColumn) : range,
+						sortText: item.sortText,
+						// The list is narrowed by what the range holds, which now starts with that punctuation: an item
+						// whose name does not (a snippet named "while" that writes ":WHILE") is found by it all the same.
+						filterText: lead && !filter.startsWith(typed) ? typed + filter : item.filterText,
+					};
+				}),
 			};
 		},
 	});
 	monaco.languages.registerHoverProvider("ssl", {
 		async provideHover(model, position) {
-			if (!isFileModel(model)) return null;
+			if (!isServed(model)) return null;
 			const hover = await quiet(session.request("textDocument/hover", { ...doc(model), position: toPosition(position) }), null);
 			if (!hover?.contents) return null;
 			const contents = (Array.isArray(hover.contents) ? hover.contents : [hover.contents]).map(markdown).filter(Boolean);
@@ -691,7 +747,7 @@ export function registerProviders() {
 		signatureHelpTriggerCharacters: ["(", ","],
 		signatureHelpRetriggerCharacters: [","],
 		async provideSignatureHelp(model, position) {
-			if (!isFileModel(model)) return null;
+			if (!isServed(model)) return null;
 			const help = await quiet(session.request("textDocument/signatureHelp", { ...doc(model), position: toPosition(position) }), null);
 			if (!help?.signatures?.length) return null;
 			return {
@@ -711,13 +767,13 @@ export function registerProviders() {
 	});
 	monaco.languages.registerDefinitionProvider("ssl", {
 		async provideDefinition(model, position) {
-			if (!isFileModel(model)) return [];
+			if (!isServed(model)) return [];
 			return locations(await quiet(session.request("textDocument/definition", { ...doc(model), position: toPosition(position) }), null));
 		},
 	});
 	monaco.languages.registerReferenceProvider("ssl", {
 		async provideReferences(model, position, context) {
-			if (!isFileModel(model)) return [];
+			if (!isServed(model)) return [];
 			return locations(
 				await quiet(session.request("textDocument/references", { ...doc(model), position: toPosition(position), context: { includeDeclaration: context.includeDeclaration } }), null),
 			);
@@ -725,7 +781,7 @@ export function registerProviders() {
 	});
 	monaco.languages.registerRenameProvider("ssl", {
 		async provideRenameEdits(model, position, newName) {
-			if (!isFileModel(model)) return { edits: [], rejectReason: "Save the file before renaming symbols." };
+			if (!isServed(model)) return { edits: [], rejectReason: "Nothing to rename here." };
 			let edit: any;
 			try {
 				edit = await session.request("textDocument/rename", { ...doc(model), position: toPosition(position), newName });
@@ -745,8 +801,8 @@ export function registerProviders() {
 			return { edits };
 		},
 		async resolveRenameLocation(model, position) {
-			if (!isFileModel(model)) {
-				return { range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column), text: "", rejectReason: "Save the file before renaming symbols." };
+			if (!isServed(model)) {
+				return { range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column), text: "", rejectReason: "Nothing to rename here." };
 			}
 			let result: any;
 			try {
@@ -760,11 +816,11 @@ export function registerProviders() {
 		},
 	});
 	monaco.languages.registerDocumentSymbolProvider("ssl", {
-		provideDocumentSymbols: (model) => (isFileModel(model) ? quiet(session.documentSymbols(model), []) : []),
+		provideDocumentSymbols: (model) => (isServed(model) ? quiet(session.documentSymbols(model), []) : []),
 	});
 	monaco.languages.registerFoldingRangeProvider("ssl", {
 		async provideFoldingRanges(model) {
-			if (!isFileModel(model)) return [];
+			if (!isServed(model)) return [];
 			const folds = (await quiet(session.request("textDocument/foldingRange", doc(model)), null)) ?? [];
 			const kinds: Record<string, monaco.languages.FoldingRangeKind> = {
 				comment: monaco.languages.FoldingRangeKind.Comment,
@@ -776,7 +832,7 @@ export function registerProviders() {
 	});
 	monaco.languages.registerDocumentFormattingEditProvider("ssl", {
 		async provideDocumentFormattingEdits(model, options) {
-			if (!isFileModel(model) || model.isDisposed()) return [];
+			if (!isServed(model) || model.isDisposed()) return [];
 			const version = model.getVersionId();
 			const edits = await quiet(session.request("textDocument/formatting", { ...doc(model), options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces } }), null);
 			if (!edits || model.isDisposed() || model.getVersionId() !== version) return [];
@@ -785,7 +841,7 @@ export function registerProviders() {
 	});
 	monaco.languages.registerDocumentRangeFormattingEditProvider("ssl", {
 		async provideDocumentRangeFormattingEdits(model, range, options) {
-			if (!isFileModel(model) || model.isDisposed()) return [];
+			if (!isServed(model) || model.isDisposed()) return [];
 			const version = model.getVersionId();
 			const edits = await quiet(
 				session.request("textDocument/rangeFormatting", {
@@ -803,7 +859,7 @@ export function registerProviders() {
 		onDidChange: onSemanticThemeChange,
 		getLegend: () => LEGEND,
 		async provideDocumentSemanticTokens(model) {
-			if (!isFileModel(model)) return null;
+			if (!isServed(model)) return null;
 			const result = await quiet(session.semanticTokens(model), null);
 			return result && { data: result };
 		},
@@ -811,7 +867,7 @@ export function registerProviders() {
 	});
 	monaco.languages.registerInlayHintsProvider("ssl", {
 		async provideInlayHints(model, range) {
-			if (!isFileModel(model)) return { hints: [], dispose() {} };
+			if (!isServed(model)) return { hints: [], dispose() {} };
 			const hints = (await quiet(session.request("textDocument/inlayHint", { ...doc(model), range: toLspRange(range) }), null)) ?? [];
 			return {
 				hints: hints.map((h: any) => ({

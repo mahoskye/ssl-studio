@@ -37,7 +37,7 @@ import { MenuBar } from "./MenuBar";
 import { useNavigation } from "./navigation";
 import { StatusBar } from "./StatusBar";
 import { applyFonts, applyTheme, resolveTheme } from "./themes/themes";
-import { activePath, dismiss, focusEditor, focusRequest, isTabsReady, keepForFolder, markdownMode, notify, openFolder, planMode, rememberTabs, rememberViews, setState, state, tableTextMode, unsavedPaths, type PanelId } from "./state";
+import { activePath, dismiss, focusEditor, focusRequest, isTabsReady, keepForFolder, markdownMode, notify, openFolder, planMode, rememberTabs, rememberViews, setHouseIndentEverywhere, setState, state, tableTextMode, unsavedPaths, type PanelId } from "./state";
 import { focusPanel, getOutlineMemory, getPlanPaletteMemory, isPanelAvailable, isPlanChartActive, isShown, lastShown, loadOutlineMemory, loadPlanPaletteMemory, movePanel, narrowHosted, narrowPanels, panelOn, PANELS, recordOutlineActive, recordPlanPaletteActive, setCrowded, setNarrowHosted, setNarrowPanels, setOutlineMemory, setPlanPaletteMemory, sideOf, togglePanel } from "./panels/registry";
 import { transitionOutlineAvailability, transitionPanelAvailability } from "./panels/outlineState";
 import { isPlanPath } from "./plan/model";
@@ -292,12 +292,14 @@ function PanelButton(props: { id: PanelId; badge?: string; badgeNote?: string })
 
 export function App() {
 	useTheme();
-	// A changed style profile goes to the language server, which re-checks.
+	// A changed style profile goes to the language server, which re-checks, and to the scripts that are open:
+	// what Tab writes in one that has no indentation yet is the profile's.
 	const sslJson = createMemo(() => JSON.stringify(state.settings.ssl));
 	createEffect(
 		() => sslJson(),
 		() => {
 			session.configure();
+			setHouseIndentEverywhere();
 		},
 		{ defer: true },
 	);

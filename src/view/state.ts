@@ -868,6 +868,24 @@ export function setTableTextMode(_path: string, text: boolean, group?: number) {
 /** One spelling per file: Monaco's (on Windows it lowercases the drive letter). Untitled paths stay as-is. */
 export const canonical = (path: string) => (isUntitled(path) ? path : monaco.Uri.file(path).fsPath);
 
+/**
+ * What Tab writes in a script: what the script is indented with already, and where it has no indentation yet (a
+ * new script, an empty one), what the house style says. Left to the editor's own defaults, a new script was
+ * indented with four spaces under a house style of tabs, and the formatter then rewrote every line typed.
+ */
+function setHouseIndent(model: monaco.editor.ITextModel) {
+	if (model.isDisposed() || model.getLanguageId() !== "ssl") return;
+	const ssl = snapshot(state).settings.ssl;
+	const size = Number(getPath(ssl, "format.indentSize") ?? SERVER_DEFAULTS.format.indentSize);
+	const spaces = (getPath(ssl, "format.indentStyle") ?? SERVER_DEFAULTS.format.indentStyle) === "space";
+	model.detectIndentation(spaces, Number.isInteger(size) && size > 0 ? size : 4);
+}
+
+/** The same for every script that is open, when the house style has changed. */
+export function setHouseIndentEverywhere() {
+	for (const doc of docs.values()) setHouseIndent(doc.model);
+}
+
 /** Opens a floating untitled buffer (Untitled-1, Untitled-2, ...) that stays in memory until saved. */
 export function newUntitled(group = snapshot(state).activeGroup, language = "plaintext"): string {
 	const cur = snapshot(state);
@@ -890,6 +908,10 @@ export function newUntitled(group = snapshot(state).activeGroup, language = "pla
 			s.dirty[path] = dirty;
 		});
 	});
+	// A script not yet saved is the language server's to read as well: it is told of it here, or when the
+	// document is made a script by its language mode (setDocumentLanguage).
+	session.track(model);
+	setHouseIndent(model);
 	doc.validatorDispose = attachValidator(model, path, language);
 	closeComparison();
 	setState((s) => {
@@ -997,6 +1019,7 @@ function attach(path: string, text: string, saved: { text: string; mtime: number
 		if (dirty) queueMicrotask(() => snapshot(state).dirty[path] && keepTab(path));
 	});
 	session.track(model);
+	setHouseIndent(model);
 	doc.validatorDispose = attachValidator(model, path, model.getLanguageId());
 	return doc;
 }
@@ -1849,12 +1872,33 @@ async function formatChanged(doc: Doc) {
 		// to the procedure the server says it is in.
 		ranges = widenToProcedures(ranges, await session.documentSymbols(doc.model).catch(() => []));
 		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== version) return;
-		const edits = await session.formatRanges(doc.model, ranges, doc.model.getOptions());
+		const edits = await session.formatRanges(doc.model, ranges, doc.model.getOptions(), true);
 		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== version) return;
-		if (edits.length) doc.model.pushEditOperations([], edits, () => null);
+		if (edits.length) applyAsOneStep(doc.model, edits, "format-on-save");
 	} catch (e: any) {
 		log(`format on save skipped: ${e?.message ?? e}`);
 	}
+}
+
+/**
+ * Edits made for the user and not by them, as one step of undo of their own. Without the stops on either side
+ * the formatting of a save joined the typing before it, and one undo took both away: the formatting, and the
+ * last words typed.
+ *
+ * They go through an editor that shows the document, where there is one, so that the step holds where the cursor
+ * was and undo puts it back there.
+ */
+function applyAsOneStep(model: monaco.editor.ITextModel, edits: monaco.editor.IIdentifiedSingleEditOperation[], source: string) {
+	const showing = monaco.editor.getEditors().filter((editor) => editor.getModel() === model);
+	const editor = showing.find((candidate) => candidate.hasTextFocus()) ?? showing[0];
+	if (editor) {
+		editor.pushUndoStop();
+		// False from an editor that may not be written in (a read-only view of the file): the model takes them.
+		if (editor.executeEdits(source, edits)) return void editor.pushUndoStop();
+	}
+	model.pushStackElement();
+	model.pushEditOperations([], edits, () => null);
+	model.pushStackElement();
 }
 
 const PROCEDURE_KINDS = new Set([monaco.languages.SymbolKind.Function, monaco.languages.SymbolKind.Method, monaco.languages.SymbolKind.Constructor]);
@@ -1893,8 +1937,10 @@ export function setDocumentLanguage(path: string, languageId: string): boolean {
 	doc.validatorDispose?.();
 	doc.validatorDispose = undefined;
 	monaco.editor.setModelLanguage(doc.model, languageId);
-	if (languageId === "ssl" && prev !== "ssl") session.track(doc.model);
-	else doc.validatorDispose = attachValidator(doc.model, doc.path, languageId);
+	if (languageId === "ssl" && prev !== "ssl") {
+		session.track(doc.model);
+		setHouseIndent(doc.model);
+	} else doc.validatorDispose = attachValidator(doc.model, doc.path, languageId);
 	setState((s) => {
 		s.kindVersion += 1;
 	});

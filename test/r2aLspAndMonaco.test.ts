@@ -780,3 +780,117 @@ describe("LspSession: where a document's comments and names are (starlims-lsp 0.
 		expect(sent.filter((m) => !["initialize", "initialized"].includes(m.method)).map((m) => m.method).slice(0, 3)).toEqual(["textDocument/didOpen", "ssl/lexicalTokens", "textDocument/didClose"]);
 	});
 });
+
+describe("The code editor's everyday editing: completion ranges, format on save, scripts not yet saved", () => {
+	test("toSmallEdits makes the formatter's text and leaves alone the lines it did not change", async () => {
+		const { toSmallEdits } = await import("../src/view/lsp/session");
+		const before = [":PROCEDURE  foo ;", ":DECLARE x;", "x:=5 ;", ":RETURN x;", ":ENDPROC;", "", "y := 1;"];
+		const after = [":PROCEDURE foo;", "\t:DECLARE x;", "", "\tx := 5;", "\t:RETURN x;", ":ENDPROC;"];
+		for (const eol of ["\n", "\r\n"]) {
+			const model = makeFakeModel(before.join(eol), `file:///ws/small-${eol.length}.ssl`, eol);
+			// As the server sends a range formatting: one edit over the whole range, its lines ended with a bare LF.
+			const edits = toSmallEdits(model, [{ range: { start: { line: 0, character: 0 }, end: { line: 4, character: 9 } }, newText: after.join("\n") }]);
+			// The line typed last ("x:=5 ;", line 3) is changed within itself, before its semicolon: a cursor at its end stays.
+			const onTyped = edits.filter((e) => e.range.endLineNumber === 3);
+			expect(onTyped.length).toBeGreaterThan(0);
+			expect(onTyped.every((e) => e.range.startLineNumber === 3 && e.range.endColumn <= 6)).toBe(true);
+			// ":ENDPROC;" and what follows the range are the same: nothing reaches them.
+			expect(edits.every((e) => e.range.endLineNumber < 5)).toBe(true);
+			expect(edits.every((e) => !/(^|[^\r])\n/.test(e.text ?? "") || eol === "\n")).toBe(true);
+			expect(model.applyEdits(edits)).toBe([...after, "", "y := 1;"].join(eol));
+			model.dispose();
+		}
+	});
+
+	test("toSmallEdits gives lines only added or only taken out as the one edit they are, and nothing for no change", async () => {
+		const { toSmallEdits } = await import("../src/view/lsp/session");
+		const whole = (text: string, newText: string, name: string) => {
+			const model = makeFakeModel(text, `file:///ws/${name}.ssl`);
+			const edits = toSmallEdits(model, [{ range: { start: { line: 0, character: 0 }, end: { line: 99, character: 0 } }, newText }]);
+			const out = model.applyEdits(edits);
+			model.dispose();
+			return { edits, out };
+		};
+		expect(whole("a;\nb;", "a;\n\nb;", "added").out).toBe("a;\n\nb;");
+		expect(whole("a;\n\n\nb;", "a;\nb;", "taken").out).toBe("a;\nb;");
+		expect(whole("a;\nb;", "a;\nb;", "same").edits).toEqual([]);
+	});
+
+	test("a completion with no range from the server replaces the punctuation typed before the word, and is still found by it", async () => {
+		const { registerProviders, session: shared } = await import("../src/view/lsp/session");
+		const { monaco } = await import("../src/view/editor/monaco");
+		let provider: any;
+		const languages = monaco.languages as any;
+		const registered = languages.registerCompletionItemProvider;
+		languages.registerCompletionItemProvider = (_language: string, given: any) => ((provider = given), { dispose() {} });
+		registerProviders();
+		languages.registerCompletionItemProvider = registered;
+
+		const items = [
+			{ label: ":WHILE", kind: 14, insertText: ":WHILE", insertTextFormat: 1 },
+			{ label: "while", kind: 15, insertText: ":WHILE ${1:condition};\n\t${0}\n:ENDWHILE;", insertTextFormat: 2 },
+			{ label: "WhileAway", kind: 3, insertText: "WhileAway", insertTextFormat: 1 },
+			{ label: ".T.", kind: 21, insertText: ".T.", insertTextFormat: 1 },
+			{ label: ":WITH", kind: 14, textEdit: { newText: ":WITH", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } } } },
+		];
+		const request = shared.request;
+		(shared as any).request = async () => ({ items });
+		try {
+			const ask = async (line: string) => {
+				const model = makeFakeModel(line, "file:///ws/complete.ssl");
+				const start = line.length - (/[A-Za-z0-9_]*$/.exec(line)?.[0].length ?? 0);
+				model.getLineContent = () => line;
+				model.getWordUntilPosition = () => ({ word: line.slice(start), startColumn: start + 1, endColumn: line.length + 1 });
+				const result = await provider.provideCompletionItems(model, { lineNumber: 1, column: line.length + 1 });
+				model.dispose();
+				return Object.fromEntries(result.suggestions.map((s: any) => [s.label, s])) as Record<string, any>;
+			};
+			const cols = (s: any) => [s.range.startColumn, s.range.endColumn];
+
+			// ":wh": the keyword takes the colon with it; so does the snippet, which is found by ":wh" for it.
+			const afterColon = await ask(":wh");
+			expect(cols(afterColon[":WHILE"])).toEqual([1, 4]);
+			expect(afterColon[":WHILE"].filterText).toBeUndefined();
+			expect(cols(afterColon.while)).toEqual([1, 4]);
+			expect(afterColon.while.filterText).toBe(":while");
+			// A name that opens with no punctuation replaces the word alone, as before.
+			expect(cols(afterColon.WhileAway)).toEqual([2, 4]);
+			expect(cols(afterColon[".T."])).toEqual([2, 4]);
+			// A range the server names is the server's.
+			expect(cols(afterColon[":WITH"])).toEqual([1, 4]);
+
+			// "wh" with no colon typed: nothing before the word to take.
+			const bare = await ask("\twh");
+			expect(cols(bare[":WHILE"])).toEqual([2, 4]);
+			expect(cols(bare.while)).toEqual([2, 4]);
+			expect(bare.while.filterText).toBeUndefined();
+
+			// A colon alone, and a dot before a word.
+			expect(cols((await ask("x := 1;:"))[":WHILE"])).toEqual([8, 9]);
+			const afterDot = await ask("b := .t");
+			expect(cols(afterDot[".T."])).toEqual([6, 8]);
+			expect(cols(afterDot[":WHILE"])).toEqual([7, 8]);
+		} finally {
+			(shared as any).request = request;
+		}
+	});
+
+	test("a script not yet saved is the server's to read; a model that is no document of the user's is not", async () => {
+		const sess = new LspSession();
+		const sent: { method: string; params: any }[] = [];
+		(sess.client as any).notify = (method: string, params: any) => void sent.push({ method, params });
+		(sess.client as any).request = async (method: string) => (method === "initialize" ? { capabilities: {} } : null);
+		const untitled = makeFakeModel(":DECLARE x;", "untitled:Untitled-1");
+		const preview = makeFakeModel(":DECLARE y;", "inmemory://model/1");
+		sess.track(untitled);
+		sess.track(preview);
+		await sess.start("/ws");
+		const opened = sent.filter((m) => m.method === "textDocument/didOpen").map((m) => m.params.textDocument.uri);
+		expect(opened).toEqual([untitled.uri.toString()]);
+		expect(untitled.uri.toString()).toBe("untitled:Untitled-1");
+		sess.untrack(untitled);
+		expect(sent.at(-1)).toEqual({ method: "textDocument/didClose", params: { textDocument: { uri: "untitled:Untitled-1" } } });
+		untitled.dispose();
+		preview.dispose();
+	});
+});
