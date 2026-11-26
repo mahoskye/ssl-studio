@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 import { LSP_PIN } from "../src/bun/tools";
 import {
 	decodeNameTokens,
+	isDataSourceName,
 	isSslOwnWord,
 	lineStarts,
 	namesByLine,
@@ -23,7 +24,7 @@ import {
 	type SslFacts,
 } from "../src/shared/lexicalTokens";
 import type { DocFile } from "../src/shared/protocol";
-import { referencedSchemaTables } from "../src/shared/schemaIndex";
+import { hasSchemaTables, referencedSchemaTables } from "../src/shared/schemaIndex";
 import { LEGEND, tokenStyle, translateTokens } from "../src/view/editor/semantic";
 import { fromCallGraph } from "../src/view/graph/model";
 
@@ -106,6 +107,74 @@ describe("comments by language", () => {
 		expect(out.length).toBe(sql.length);
 		const prose = "ORDERS -- the table of orders, see /* HOLIDAYS */";
 		expect(withoutComments(prose, "markdown", null)).toBe(prose);
+	});
+});
+
+describe("a data source's SQL: its comments are the IDE's own to find", () => {
+	const tables = ["ORDERS", "OLD_ORDERS", "HOLIDAYS", "SAMPLES", "NOTED"].map(table);
+	const found = (searched: string) => referencedSchemaTables(searched, tables, 16).map((d) => d.title).sort();
+
+	test("a data source is one by its name", () => {
+		expect(["Orders.ds", "/ws/Data Sources/Lab/Orders.DS", "Old.ds.txt"].every(isDataSourceName)).toBe(true);
+		expect(["Orders.ssl", "Orders.dsx", "ds", "Orders.ds.md"].some(isDataSourceName)).toBe(false);
+	});
+
+	test("a body that is SQL: the server reports nothing in it, and SQL's two kinds of comment are taken out", () => {
+		const sql = "select ID -- was OLD_ORDERS\r\nfrom ORDERS /* not\r\nHOLIDAYS */ where NOTE = '-- NOTED'";
+		const out = withoutComments(sql, "ssl", [], undefined, true);
+		expect(found(out)).toEqual(["NOTED", "ORDERS"]);
+		expect(out.length).toBe(sql.length);
+		expect(lineStarts(out)).toEqual(lineStarts(sql));
+		// The same file read as a script, which it is not: nothing in it is a comment the server knows of.
+		expect(withoutComments(sql, "ssl", [])).toBe(sql);
+	});
+
+	test("an SSL header above SQL: the header's tokens are the server's, the body's comments SQL's", () => {
+		const text = ":PARAMETERS sKey;\n/* by SAMPLES;\nselect ID from ORDERS -- not HOLIDAYS\nwhere KEY = ?sKey?";
+		const lexical = [token("keyword", 0, 0, 0, 11), token("comment", 1, 0, 1, 14)];
+		expect(found(withoutComments(text, "ssl", lexical, undefined, true))).toEqual(["ORDERS"]);
+	});
+
+	test("a body that is SSL: a mark inside what the server read is never taken for one of SQL's", () => {
+		const text = ['sSql := "select ID from ORDERS -- and SAMPLES";', "sMore := [/* HOLIDAYS */];", "/* reads NOTED;"].join("\n");
+		const lexical = [token("string", 0, 8, 0, 46), token("string", 1, 9, 1, 25), token("comment", 2, 0, 2, 15)];
+		const out = withoutComments(text, "ssl", lexical, undefined, true);
+		// The SSL comment is gone; the two strings are whole, SQL marks and all.
+		expect(found(out)).toEqual(["HOLIDAYS", "ORDERS", "SAMPLES"]);
+		expect(out.slice(0, text.indexOf("/* reads"))).toBe(text.slice(0, text.indexOf("/* reads")));
+	});
+
+	test("with no server, the grammar's comments first and SQL's in the rest", () => {
+		const grammar = (lines: readonly string[]) => lines.map((line) => (line.startsWith("/*") ? [{ from: 0, to: line.length }] : []));
+		const text = "/* by SAMPLES;\nselect ID from ORDERS -- not HOLIDAYS";
+		expect(found(withoutComments(text, "ssl", null, grammar, true))).toEqual(["ORDERS"]);
+	});
+});
+
+describe("table information is an extra: a project without it is put to no work for it", () => {
+	const doc = (name: string, group: DocFile["group"], extra: Partial<DocFile> = {}): DocFile => ({ path: `/ws/${name}`, name, group, exists: true, ...extra });
+
+	test("a project describes a table, or it does not", () => {
+		expect(hasSchemaTables([])).toBe(false);
+		expect(hasSchemaTables([doc("docs/notes.md", "docs"), doc("docs/tickets/T-1.md", "tickets")])).toBe(false);
+		expect(hasSchemaTables([{ ...table("ORDERS"), exists: false }])).toBe(false);
+		expect(hasSchemaTables([doc("docs/notes.md", "docs"), table("ORDERS")])).toBe(true);
+		// What the search itself goes by: the two cannot disagree.
+		expect(referencedSchemaTables("select * from ORDERS", [doc("docs/notes.md", "docs")])).toEqual([]);
+	});
+
+	test("the language server is asked about a text only where there is a table to look for (source only)", () => {
+		const hover = readSrc("src/view/editor/schemaHover.ts");
+		expect(hover.match(/!hasSchemaTables\(allDocs\) \|\| \(lang === "ssl" && isSslOwnWord\(await sslFacts\(model\)/g)?.length).toBe(2);
+		expect(hover).toContain("if (model.getValueLength() <= 200_000 && hasSchemaTables(allDocs)) {");
+		expect(hover).toContain('const facts = lang === "ssl" && schemaRe ? await sslFacts(model) : NO_FACTS;');
+		const agent = readSrc("src/view/agent/Agent.tsx");
+		expect(agent).toContain("const place = hasSchemaTables(all) ? tableSearchPlace(activeDocNow) : null;");
+		expect(agent).toContain("if (!hasSchemaTables(all)) return [] as DocFile[];");
+		const graph = readSrc("src/view/graph/GraphView.tsx");
+		expect(graph.match(/hasSchemaTables\(allDocs\)/g)?.length).toBe(3);
+		// Every search of a file's text for tables comes after one of those three checks.
+		expect(graph.match(/await searchableFileText\(/g)?.length).toBe(3);
 	});
 });
 
@@ -325,8 +394,19 @@ describe("against the language server's own answers", () => {
 			// A file that is not open is asked about under a scratch name with the file's own ending
 			// (`session.scratchLexical`): the server reads a data source that is SQL as no SSL at all.
 			const scratch = (name: string) => pathToFileURL(join(folder, ".ssl-studio", name)).href;
-			lsp.notify("textDocument/didOpen", { textDocument: { uri: scratch("lexical-1.ds"), languageId: "ssl", version: 1, text: "select ID from ORDERS -- a note\nwhere STATUS = 'A'\n" } });
-			expect((await lsp.request("ssl/lexicalTokens", { textDocument: { uri: scratch("lexical-1.ds") } })).tokens).toEqual([]);
+			const sqlSource = "select ID from ORDERS -- not ARCHIVE\nwhere STATUS = 'A' /* nor OUTAGES */\n";
+			lsp.notify("textDocument/didOpen", { textDocument: { uri: scratch("lexical-1.ds"), languageId: "ssl", version: 1, text: sqlSource } });
+			const none = (await lsp.request("ssl/lexicalTokens", { textDocument: { uri: scratch("lexical-1.ds") } })).tokens as LexToken[];
+			expect(none).toEqual([]);
+			// So the SQL's comments are found here, in the IDE: the server is not asked about SQL.
+			expect(found(withoutComments(sqlSource, "ssl", none))).toEqual(["ARCHIVE", "ORDERS", "OUTAGES"]);
+			expect(found(withoutComments(sqlSource, "ssl", none, undefined, true))).toEqual(["ORDERS"]);
+			// A header above the SQL: the server's tokens end with the header.
+			const headed = ":PARAMETERS sKey;\nselect ID from SAMPLES -- not ARCHIVE\nwhere STATUS = ?sKey?\n";
+			lsp.notify("textDocument/didOpen", { textDocument: { uri: scratch("lexical-3.ds"), languageId: "ssl", version: 1, text: headed } });
+			const header = (await lsp.request("ssl/lexicalTokens", { textDocument: { uri: scratch("lexical-3.ds") } })).tokens as LexToken[];
+			expect(header.every((t) => t.range.end.line === 0)).toBe(true);
+			expect(found(withoutComments(headed, "ssl", header, undefined, true))).toEqual(["SAMPLES"]);
 			lsp.notify("textDocument/didOpen", { textDocument: { uri: scratch("lexical-2.ssl"), languageId: "ssl", version: 1, text: "/* reads ORDERS;\nnA := 1;\n" } });
 			const closed = (await lsp.request("ssl/lexicalTokens", { textDocument: { uri: scratch("lexical-2.ssl") } })).tokens as LexToken[];
 			expect(closed.map((t) => t.kind)).toEqual(["comment"]);

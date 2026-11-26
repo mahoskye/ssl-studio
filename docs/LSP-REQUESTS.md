@@ -290,9 +290,17 @@ and `label`, each with `declaration`.
 the grammar, and a keyword is not known to be one: a table called `REGION`
 is linked from `:REGION`. With no server nothing is known of a word.
 
-**What the server does not say:** where the comments are in the SQL of a
-data source. It reads such a file as no SSL and answers no tokens, so a
-table named only in an SQL comment there still counts as used.
+**Not the server's to say:** where the comments are in the SQL of a data
+source. It reads such a body as no SSL and answers no tokens in it, and
+that is where its part ends. What connects a project's tables to its SQL
+is the IDE's own (the user, 2026-11-25; ADR 0026's change log). The IDE
+finds SQL's two kinds of comment itself, in the text of a data source that
+the server did not read as SSL (`withoutComments`).
+
+**Asked only where there is a table.** Few projects describe their
+tables. In one that does not, none of this runs: no text is prepared for
+the search and the server is sent none of these requests
+(`hasSchemaTables`, `src/shared/schemaIndex.ts`).
 
 ### L10: a range format that keeps to its range
 

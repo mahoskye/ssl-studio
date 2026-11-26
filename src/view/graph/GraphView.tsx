@@ -7,7 +7,7 @@
 // a plain list.
 import { docs } from "../project";
 import { codeMatchesRef, docsGoverningFile, scriptsForTicket } from "../../shared/workContext";
-import { referencedSchemaTables } from "../../shared/schemaIndex";
+import { hasSchemaTables, referencedSchemaTables } from "../../shared/schemaIndex";
 import { searchableFileText } from "../lsp/facts";
 import { registryTitle, toneOf } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
@@ -321,7 +321,7 @@ export function GraphView() {
 		const cached = schemaTablesByScript().get(filePath);
 		if (cached) return cached;
 		const allDocs = docs();
-		if (!allDocs.some((d) => d.exists && d.group === "schema")) return [];
+		if (!hasSchemaTables(allDocs)) return [];
 		const text = await readScriptText(filePath);
 		if (!text) return [];
 		const matched = referencedSchemaTables(await searchableFileText(text, filePath), allDocs, 16);
@@ -338,7 +338,7 @@ export function GraphView() {
 	createEffect(
 		() => [graph(), docs()] as const,
 		([g, allDocs]) => {
-			if (!g || !allDocs.some((d) => d.exists && d.group === "schema")) {
+			if (!g || !hasSchemaTables(allDocs)) {
 				setSchemaTablesByScript(new Map());
 				return;
 			}
@@ -595,7 +595,8 @@ export function GraphView() {
 		const scanFiles = [...new Set([...base.seedScripts, ...base.dataSources.map((d) => d.path), ...base.downstream.map((d) => d.path)])]
 			.filter((p) => p && p !== UNRESOLVED)
 			.slice(0, 24);
-		if (!scanFiles.length || !allDocs.length) {
+		// With no table described there is none to find: no file is read for it and the server is asked nothing.
+		if (!scanFiles.length || !hasSchemaTables(allDocs)) {
 			setImpactScanning(false);
 			return;
 		}

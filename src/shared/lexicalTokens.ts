@@ -58,7 +58,7 @@ export function withoutTokens(text: string, tokens: readonly LexToken[], kinds: 
 
 /** The text with these spans of each of its lines written over with spaces: what a reader of another language's comments found. */
 export function withoutSpans(text: string, spansOf: (lines: readonly string[]) => readonly { from: number; to: number }[][] | null): string {
-	const parts = text.split(/(\r\n|\n|\r)/);
+	const parts = text.split(LINE_END);
 	const lines = parts.filter((_, i) => i % 2 === 0);
 	const spans = spansOf(lines);
 	if (!spans) return text;
@@ -80,6 +80,11 @@ export function withoutSpans(text: string, spansOf: (lines: readonly string[]) =
 }
 
 const SQL_LANGUAGES = new Set(["sql", "pgsql", "mysql"]);
+const LINE_END = /(\r\n|\n|\r)/;
+const linesOf = (text: string) => text.split(LINE_END).filter((_, i) => i % 2 === 0);
+
+/** Whether a file is a data source by its name: `.ds` or `.ds.txt`. Its body may be SQL and not SSL at all. */
+export const isDataSourceName = (path: string) => /\.ds(?:\.txt)?$/i.test(path);
 
 /**
  * A text with its comments written over with spaces, for looking up the names in it. SSL's comments are the
@@ -96,10 +101,29 @@ export function withoutComments(
 	language: string,
 	lexical: readonly LexToken[] | null | undefined,
 	sslComments: (lines: readonly string[]) => readonly { from: number; to: number }[][] | null = () => null,
+	dataSource = false,
 ): string {
-	if (language === "ssl") return lexical ? withoutTokens(text, lexical) : withoutSpans(text, sslComments);
+	if (language === "ssl") {
+		const plain = lexical ? withoutTokens(text, lexical) : withoutSpans(text, sslComments);
+		return dataSource ? withoutSqlCommentsOutside(plain, lexical ? withoutTokens(text, lexical, SSL_KINDS) : plain) : plain;
+	}
 	if (SQL_LANGUAGES.has(language)) return withoutSpans(text, extractCommentSpans);
 	return text;
+}
+
+/** Every kind of token the server reports: what it read as SSL, and so not what SQL's comments are looked for in. */
+const SSL_KINDS = ["comment", "string", "keyword", "text", "codeBlock"];
+
+/**
+ * A data source's SQL comments, taken out as well. The body of a data source may be SQL, and the server reads such
+ * a body as no SSL and reports nothing in it: its comments are SQL's, `-- ...` and `/* ... *\/`. Finding them is the
+ * IDE's own to do and not the server's: it serves the search for a table's name, which is a feature of the IDE.
+ *
+ * They are looked for in `unread`, the text with all the server did read written over, so that a mark inside an SSL
+ * string or comment is never taken for one of SQL's, and are then written over in `text`. Both have the same lines.
+ */
+function withoutSqlCommentsOutside(text: string, unread: string): string {
+	return withoutSpans(text, () => extractCommentSpans(linesOf(unread)));
 }
 
 const before = (a: LexPosition, b: LexPosition) => a.line < b.line || (a.line === b.line && a.character < b.character);

@@ -36,7 +36,7 @@ import { summarizePlanForPrompt } from "../../shared/planSummary";
 import { DOC_FOLDERS, frontValue, isCatalog, promptText, registryTitle, slug } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
 import { keysIn, ticketColumn } from "../../shared/registryTickets";
-import { extractSchemaPreview, referencedSchemaTables } from "../../shared/schemaIndex";
+import { extractSchemaPreview, hasSchemaTables, referencedSchemaTables } from "../../shared/schemaIndex";
 import { renderTemplate } from "../../shared/templater";
 import { cut, docsGoverningFile, MAX_WORK_PROMPT_CHARS, ticketAtHand as listedTicketAtHand, ticketForFile, ticketWork, workFor, type WorkTextOptions } from "../../shared/workContext";
 import { backend } from "../backend";
@@ -475,7 +475,8 @@ async function prepareContextDelta(
 
 	// 3b. Targeted schema column tables referenced in the active SSL/SQL editor or selection (Wave 3.1).
 	if (flags.withRefTables) {
-		const place = tableSearchPlace(activeDocNow);
+		// A project that describes no table has none to send, and the text is not prepared for the search.
+		const place = hasSchemaTables(all) ? tableSearchPlace(activeDocNow) : null;
 		const activeModelText = !place ? "" : "text" in place ? place.text : await searchableText(place.model, place.selection);
 		const refTables = referencedSchemaTables(activeModelText, all, 6);
 		if (refTables.length) {
@@ -1278,9 +1279,11 @@ export function AgentPanel() {
 		liveSelectionVersion();
 		const doc = activeDoc();
 		if (!doc || doc.binary) return [] as DocFile[];
+		const all = docs();
+		if (!hasSchemaTables(all)) return [] as DocFile[];
 		const place = tableSearchPlace(doc);
 		const txt = !place ? "" : "text" in place ? place.text : searchableTextNow(place.model, place.selection);
-		return referencedSchemaTables(txt, docs(), 6);
+		return referencedSchemaTables(txt, all, 6);
 	});
 	const detectedGoverningDocs = createMemo(() => {
 		const root = state.workspace?.root ?? "";

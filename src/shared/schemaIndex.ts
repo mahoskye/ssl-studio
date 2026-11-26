@@ -261,6 +261,16 @@ const TWO_CHAR_STOP_WORDS = new Set([
 	"an", "be", "he", "it", "me", "my", "so", "up", "us", "we", "ok", "eq", "ne", "gt", "lt", "ge", "le",
 ]);
 
+const describesSchema = (f: DocFile) => f.exists && f.group === "schema" && !isCatalog(f) && SCHEMA_EXT_RE.test(f.name);
+
+/**
+ * Whether the project describes any table at all. Most do not: a description of the database is a thing a project
+ * may bring along, and what the IDE makes of one (hovers, links, the tables sent to the agent, the graph's tables)
+ * is an extra for the project that has it. A caller asks this first, so that a project without one is not put to
+ * any work for it: no text is prepared, and the language server is asked nothing.
+ */
+export const hasSchemaTables = (files: readonly DocFile[]): boolean => files.some(describesSchema);
+
 /**
  * Scans `codeText` (an SSL/SQL script or selection) in O(N) time for whole-identifier references
  * to documented schema tables/objects (e.g. `DEMO_HOLIDAYS`, `DEMO_OUTAGES`) so the Agent can inject
@@ -274,7 +284,7 @@ const TWO_CHAR_STOP_WORDS = new Set([
  */
 export function referencedSchemaTables(codeText: string, files: readonly DocFile[], limit = 8): DocFile[] {
 	if (!codeText.trim()) return [];
-	const schemaDocs = files.filter((f) => f.exists && f.group === "schema" && !isCatalog(f) && SCHEMA_EXT_RE.test(f.name));
+	const schemaDocs = files.filter(describesSchema);
 	if (!schemaDocs.length) return [];
 
 	// Tokenize into a lowercase Set for O(1) per-key lookup.

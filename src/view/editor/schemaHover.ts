@@ -16,6 +16,7 @@ import {
 	extractSchemaColumns,
 	extractSchemaPreview,
 	findSchemaDocForIdentifier,
+	hasSchemaTables,
 	referencedSchemaTables,
 	schemaDocKeys,
 	type SchemaColumnInfo,
@@ -777,8 +778,10 @@ export function registerSchemaHoverProviders(): void {
 				}
 
 				const wordLower = word.word.toLowerCase();
-				// A keyword, a member, or a name its statement declares is the language's own, whatever table is called the same.
-				if (SQL_RESERVED_KEYWORDS.has(wordLower) || (lang === "ssl" && isSslOwnWord(await sslFacts(model), position.lineNumber - 1, word.startColumn - 1))) {
+				// What is left is a table's or a column's hover. A project that describes no table has neither, and the
+				// server is not asked about the word. Where it does: a keyword, a member, or a name its statement declares
+				// is the language's own, whatever table is called the same.
+				if (SQL_RESERVED_KEYWORDS.has(wordLower) || !hasSchemaTables(allDocs) || (lang === "ssl" && isSslOwnWord(await sslFacts(model), position.lineNumber - 1, word.startColumn - 1))) {
 					return null;
 				}
 
@@ -839,7 +842,7 @@ export function registerSchemaHoverProviders(): void {
 					const qDoc = findSchemaDocForIdentifier(qualifier, allDocs);
 					if (qDoc) return definitionLocation(qDoc.path, 1);
 				}
-				if (SQL_RESERVED_KEYWORDS.has(word.word.toLowerCase()) || (lang === "ssl" && isSslOwnWord(await sslFacts(model), position.lineNumber - 1, word.startColumn - 1))) {
+				if (SQL_RESERVED_KEYWORDS.has(word.word.toLowerCase()) || !hasSchemaTables(allDocs) || (lang === "ssl" && isSslOwnWord(await sslFacts(model), position.lineNumber - 1, word.startColumn - 1))) {
 					return null;
 				}
 				const tableDoc = findSchemaDocForIdentifier(word.word, allDocs);
@@ -918,7 +921,7 @@ export function registerSchemaHoverProviders(): void {
 					}
 				}
 
-				if (model.getValueLength() <= 200_000) {
+				if (model.getValueLength() <= 200_000 && hasSchemaTables(allDocs)) {
 					const refTables = referencedSchemaTables(await searchableText(model), allDocs, 6);
 					const seenCols = new Set<string>();
 					for (const refDoc of refTables) {
@@ -950,11 +953,6 @@ export function registerSchemaHoverProviders(): void {
 		monaco.languages.registerLinkProvider(lang, {
 			async provideLinks(model) {
 				if (model.getLineCount() > 5000) return { links: [] };
-				// Which words are the language's own is asked first: the lines are read after the answer, from the text it is of.
-				const facts = lang === "ssl" ? await sslFacts(model) : NO_FACTS;
-				if (model.isDisposed()) return { links: [] };
-				const ownNames = facts.names ? namesByLine(facts.names) : null;
-				const lineCount = model.getLineCount();
 				const allDocs = docs();
 				const wsRoot = state.workspace?.root;
 				const { map: ticketMap, match: matchTickets } = ticketIndex();
@@ -971,6 +969,13 @@ export function registerSchemaHoverProviders(): void {
 				const schemaRe = schemaKeys.length
 					? new RegExp(`(?<![A-Za-z0-9_])(${schemaKeys.map(escapeRegExp).join("|")})(?![A-Za-z0-9_])`, "gi")
 					: null;
+
+				// Which words are the language's own matters to a table's link alone: with no table to link, the server is
+				// not asked. It is asked before the lines are read, so that they are read from the text the answer is of.
+				const facts = lang === "ssl" && schemaRe ? await sslFacts(model) : NO_FACTS;
+				if (model.isDisposed()) return { links: [] };
+				const ownNames = facts.names ? namesByLine(facts.names) : null;
+				const lineCount = model.getLineCount();
 
 				const lines: string[] = [];
 				for (let lineNum = 1; lineNum <= lineCount; lineNum++) lines.push(model.getLineContent(lineNum));
