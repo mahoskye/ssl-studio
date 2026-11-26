@@ -39,6 +39,7 @@ import { TableView } from "./TableView";
 import { FileView } from "./FileView";
 import { useGitMarks } from "./gitMarks";
 import { installCommentCommands } from "./sslComments";
+import { installFormatterIndent } from "./sslIndent";
 import { observeMarkerHoverSeverity } from "./hoverSeverity";
 import { Start } from "../Start";
 import { FileMark } from "../FileMark";
@@ -410,6 +411,8 @@ export function EditorGroup(props: { index: number }) {
 		const listKeys = continueLists(editor);
 		// "Toggle comment" as a script needs it, under the editor's own commands and keys.
 		const commentCommands = installCommentCommands(editor);
+		// A new line, and a statement as it is ended, indented as the formatter indents them.
+		const formatterIndent = installFormatterIndent(editor);
 		const stopHoverSeverity = observeMarkerHoverSeverity(editor);
 		setRoomy(editor.getLayoutInfo().width >= MINIMAP_FROM);
 		editor.onDidLayoutChange((layout) => setRoomy(layout.width >= MINIMAP_FROM));
@@ -479,6 +482,7 @@ export function EditorGroup(props: { index: number }) {
 			stopFocus();
 			listKeys.dispose();
 			commentCommands.dispose();
+			formatterIndent.dispose();
 			stopHoverSeverity();
 			disposeGitMarks?.();
 			setMountedEditor(undefined);

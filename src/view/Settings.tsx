@@ -336,6 +336,7 @@ export function SettingsDialog() {
 		livePreview: ["Markdown live preview", "A document drawn as it is written: headings larger, the markup hidden except on the line being written"],
 		markdownReadingHighlight: ["Markdown reading highlight", "Subtly dim lines below the active cursor (or mouse pointer when reading) in Markdown Live and Read views"],
 		inlayHints: ["Parameter name hints", "Names shown beside the arguments of a call"],
+		indentOnType: ["Indent as the formatter does", "A new line of a script, and a statement as its ; is typed, are indented as the language server's formatter indents them"],
 		ctrlClickAddsCursor: ["Ctrl+click adds a cursor", "As in Sublime Text, and Alt+click goes to a definition. Off: the other way round, as in VS Code"],
 		rulers: ["Ruler at the line length", "A line down the editor at the style profile's line length"],
 		rulerMargin: ["Rulers beside it", "Fainter rulers this many columns before and after; 0 for none"],
@@ -347,7 +348,7 @@ export function SettingsDialog() {
 	const anyShown = (group: Group, ...rows: (keyof typeof ROWS)[]) => rows.some((r) => shown(group, ...ROWS[r]));
 	const groups = {
 		appearance: () => anyShown("Appearance", "theme", "uiScale", "fontSize", "uiFont", "codeFont", "readFont", "menuBar"),
-		editor: () => anyShown("Editor", "formatOnSave", "sqlDialect", "minimap", "wordWrap", "livePreview", "markdownReadingHighlight", "inlayHints", "ctrlClickAddsCursor", "rulers", "rulerMargin", "csvTable", "attachmentsFolder", "templatesFolder"),
+		editor: () => anyShown("Editor", "formatOnSave", "sqlDialect", "minimap", "wordWrap", "livePreview", "markdownReadingHighlight", "inlayHints", "indentOnType", "ctrlClickAddsCursor", "rulers", "rulerMargin", "csvTable", "attachmentsFolder", "templatesFolder"),
 		server: () => anyShown("Language server", "lspPath"),
 		keyboard: () => keyRows().length > 0,
 	};
@@ -692,6 +693,20 @@ export function SettingsDialog() {
 									onChange={async (e) => {
 										const el = e.currentTarget;
 										if (!(await save("inlayHints", el.checked))) el.checked = untrack(() => state.settings.inlayHints !== false);
+									}}
+								/>
+							)}
+						</Row>
+						<Row group="Editor" label={ROWS.indentOnType[0]} hint={ROWS.indentOnType[1]} setting="indentOnType">
+							{(ids) => (
+								<input
+									id={ids.control}
+									aria-describedby={ids.hint}
+									type="checkbox"
+									checked={state.settings.indentOnType !== false}
+									onChange={async (e) => {
+										const el = e.currentTarget;
+										if (!(await save("indentOnType", el.checked))) el.checked = untrack(() => state.settings.indentOnType !== false);
 									}}
 								/>
 							)}

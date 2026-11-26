@@ -83,6 +83,7 @@ const SETTING_RULES: Partial<Record<keyof Settings, Rule>> = {
 	menuBar: "boolean",
 	inlayHints: "boolean",
 	ctrlClickAddsCursor: "boolean",
+	indentOnType: "boolean",
 	rulers: "boolean",
 	rulerMargin: { from: 0, to: 60 },
 	uiScale: { from: 0.8, to: 1.6 },

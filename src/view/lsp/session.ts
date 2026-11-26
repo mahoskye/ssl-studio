@@ -416,11 +416,16 @@ export class LspSession {
 		};
 	}
 
-	/** The formatter's output for text not in any editor. */
-	async formatText(text: string, options: { tabSize: number; insertSpaces: boolean }): Promise<string> {
+	/**
+	 * The formatter's output for text not in any editor. `name` is the name of the file the text is of, where it
+	 * is of one: the server tells a script from a data source by it (as for `scratchLexical`), and leaves an SQL
+	 * data source as it is.
+	 */
+	async formatText(text: string, options: { tabSize: number; insertSpaces: boolean }, name = "text.ssl"): Promise<string> {
 		await this.ready();
 		const myEpoch = this.epoch;
-		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/format-${++this.scratchCount}.ssl`).toString();
+		const ending = /(\.(?:ssl|ds)\.txt|\.[A-Za-z0-9]+)$/.exec(name)?.[1] ?? ".ssl";
+		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/format-${++this.scratchCount}${ending}`).toString();
 		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
 		try {
 			const edits = ((await this.client.request("textDocument/formatting", { textDocument: { uri }, options })) ?? []) as { range: Range; newText: string }[];

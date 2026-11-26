@@ -240,6 +240,11 @@ export type Settings = {
 	 * definition. On unless set to false; then the two are the other way round, as in VS Code (ADR 0034).
 	 */
 	ctrlClickAddsCursor?: boolean;
+	/**
+	 * A new line of a script, and a statement as its ";" is typed, take the indentation the language server's
+	 * formatter gives them (ADR 0036). On unless set to false.
+	 */
+	indentOnType?: boolean;
 	/** A ruler at the style's line length. On unless set to false. */
 	rulers?: boolean;
 	/** How many columns to each side of that ruler the fainter rulers stand; 0 for none. 10 unless set. */
