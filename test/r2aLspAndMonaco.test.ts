@@ -1003,3 +1003,66 @@ describe("The code editor's keys are Sublime Text's for editing (ADR 0034)", () 
 		expect(freed(rules, WIN | SHIFT | CODES.KeyM)).toEqual(["editor.action.toggleTabFocusMode"]);
 	});
 });
+
+describe("Format on save takes the changed lines from a format of the whole document (formatRangesAsDocument)", () => {
+	const OLD = [":PROCEDURE one;", "x:=sqlexecute(a) ;", ":RETURN x;", ":ENDPROC;", ":PROCEDURE two;", "y:=1 ;", ":ENDPROC;"];
+	const NEW = [":PROCEDURE one;", "\tx := SQLExecute(a);", "", "\t:RETURN x;", ":ENDPROC;", "", ":PROCEDURE two;", "\ty := 1;", ":ENDPROC;"];
+
+	/** A session whose server formats any document to `formatted`, as one edit over the whole of it. */
+	async function sessionThatFormats(formatted: string[] | null) {
+		const sess = new LspSession();
+		const asked: { method: string; params: any }[] = [];
+		(sess.client as any).notify = () => {};
+		(sess.client as any).request = async (method: string, params: any) => {
+			asked.push({ method, params });
+			if (method === "initialize") return { capabilities: {} };
+			if (method !== "textDocument/formatting" || !formatted) return null;
+			return [{ range: { start: { line: 0, character: 0 }, end: { line: 9999, character: 0 } }, newText: formatted.join("\n") }];
+		};
+		await sess.start("/ws");
+		return { sess, asked };
+	}
+	const modelOf = (lines: string[], name: string, eol = "\n") => {
+		const model = makeFakeModel(lines.join(eol), `file:///ws/${name}.ssl`, eol);
+		model.getLinesContent = () => model.getValue().split(eol);
+		return model;
+	};
+	const OPTIONS = { tabSize: 4, insertSpaces: false } as any;
+
+	test("the lines asked for become the formatter's; the rest of the document is not touched", async () => {
+		for (const eol of ["\n", "\r\n"]) {
+			const { sess, asked } = await sessionThatFormats(NEW);
+			const model = modelOf(OLD, `whole-${eol.length}`, eol);
+			const edits = (await sess.formatRangesAsDocument(model, [[0, 3]], OPTIONS))!;
+			// The document itself is formatted, not a range of it.
+			expect(asked.at(-1)!.method).toBe("textDocument/formatting");
+			expect(asked.at(-1)!.params.textDocument.uri).toBe(model.uri.toString());
+			// Nothing reaches the second procedure, and a line that is kept is changed within itself.
+			expect(edits.every((e) => e.range.endLineNumber <= 5)).toBe(true);
+			expect(edits.length).toBeGreaterThan(1);
+			expect(model.applyEdits(edits)).toBe([":PROCEDURE one;", "\tx := SQLExecute(a);", "", "\t:RETURN x;", ":ENDPROC;", "", ":PROCEDURE two;", "y:=1 ;", ":ENDPROC;"].join(eol));
+			model.dispose();
+		}
+	});
+
+	test("a document the formatter leaves alone, or does not answer for, gives no edits", async () => {
+		const same = await sessionThatFormats(OLD);
+		const model = modelOf(OLD, "same");
+		expect(await same.sess.formatRangesAsDocument(model, [[0, 6]], OPTIONS)).toEqual([]);
+		const silent = await sessionThatFormats(null);
+		expect(await silent.sess.formatRangesAsDocument(model, [[0, 6]], OPTIONS)).toEqual([]);
+		model.dispose();
+	});
+
+	test("lines the formatter has none of any more go with their line break, wherever they stand", async () => {
+		// Blank lines beyond the one the formatter keeps, in the middle of the text and at its end.
+		const middle = modelOf(["a := 1;", "", "", "b := 2;"], "gone-middle");
+		const { sess } = await sessionThatFormats(["a := 1;", "", "b := 2;"]);
+		expect(middle.applyEdits((await sess.formatRangesAsDocument(middle, [[1, 2]], OPTIONS))!)).toBe("a := 1;\n\nb := 2;");
+		middle.dispose();
+		const end = modelOf(["a := 1;", "", ""], "gone-end");
+		const trimmed = await sessionThatFormats(["a := 1;"]);
+		expect(end.applyEdits((await trimmed.sess.formatRangesAsDocument(end, [[1, 2]], OPTIONS))!)).toBe("a := 1;");
+		end.dispose();
+	});
+});

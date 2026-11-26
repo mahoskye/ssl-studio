@@ -5,7 +5,7 @@ import { monaco } from "../editor/monaco";
 import { LEGEND, onSemanticThemeChange, refreshSemanticTokens, translateTokens } from "../editor/semantic";
 import { backend, on } from "../backend";
 import { LspClient } from "./client";
-import { applyTextEdits, smallEdits, trimEdit, typedLead } from "./edits";
+import { applyTextEdits, formattedParts, smallEdits, trimEdit, typedLead } from "./edits";
 import { decodeNameTokens, type LexToken, type NameToken } from "../../shared/lexicalTokens";
 import { baseName } from "../../shared/paths";
 
@@ -560,6 +560,44 @@ export class LspSession {
 
 	async workspaceSymbols(query: string) {
 		return ((await this.request("workspace/symbol", { query })) ?? []) as { name: string; kind: number; containerName?: string; location: { uri: string; range: Range } }[];
+	}
+
+	/**
+	 * The edits that leave the given line ranges (0-based, inclusive) as a format of the whole document would leave
+	 * them, and touch nothing else. The document is formatted as "Format document" formats it, and the lines of the
+	 * ranges are taken from the answer (`formattedParts`), as the smallest edits that make the change.
+	 *
+	 * A range format is not the same: the server leaves out of it what it does to a whole document only. Null where
+	 * the two texts cannot be set side by side; the caller then has the range format to fall back on.
+	 */
+	async formatRangesAsDocument(model: monaco.editor.ITextModel, ranges: [number, number][], options: monaco.languages.FormattingOptions): Promise<monaco.editor.IIdentifiedSingleEditOperation[] | null> {
+		if (model.isDisposed()) return [];
+		const version = model.getVersionId();
+		const answer = ((await this.request("textDocument/formatting", {
+			textDocument: { uri: model.uri.toString() },
+			options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces },
+		})) ?? []) as { range: Range; newText: string }[];
+		if (model.isDisposed() || model.getVersionId() !== version) return [];
+		if (!answer.length) return [];
+		const oldLines = model.getLinesContent();
+		const parts = formattedParts(oldLines, applyTextEdits(oldLines.join("\n"), answer).split(/\r?\n/), ranges);
+		if (!parts) return null;
+		const eol = model.getEOL();
+		const lineCount = oldLines.length;
+		return parts.flatMap((part): monaco.editor.IIdentifiedSingleEditOperation[] => {
+			const first = part.start + 1;
+			const last = part.start + part.oldLines.length;
+			// The formatter has none of these lines any more: they go, with a line break, so no empty line is left.
+			if (!part.newLines.length) {
+				if (last < lineCount) return [{ range: new monaco.Range(first, 1, last + 1, 1), text: "" }];
+				if (first > 1) return [{ range: new monaco.Range(first - 1, model.getLineMaxColumn(first - 1), last, model.getLineMaxColumn(last)), text: "" }];
+				return [{ range: new monaco.Range(first, 1, last, model.getLineMaxColumn(last)), text: "" }];
+			}
+			return smallEdits(part.oldLines, part.newLines).map((small) => ({
+				range: new monaco.Range(first + small.startLine, small.startColumn + 1, first + small.endLine, small.endColumn + 1),
+				text: small.text.replace(/\n/g, eol),
+			}));
+		});
 	}
 
 	/**

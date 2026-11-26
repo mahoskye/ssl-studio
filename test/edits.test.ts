@@ -187,3 +187,54 @@ describe("smallEdits", () => {
 		}
 	});
 });
+
+import { formattedParts } from "../src/view/lsp/edits";
+
+describe("formattedParts: the lines a format of the whole document has in place of some of its lines", () => {
+	const OLD = [":PROCEDURE one;", "x:=sqlexecute(a) ;", ":RETURN x;", ":ENDPROC;", ":PROCEDURE two;", "y:=1 ;", ":ENDPROC;"];
+	const NEW = [":PROCEDURE one;", "\tx := SQLExecute(a);", "", "\t:RETURN x;", ":ENDPROC;", "", ":PROCEDURE two;", "\ty := 1;", ":ENDPROC;"];
+
+	test("one procedure: its lines as the formatter has them, the blank line it adds inside included", () => {
+		expect(formattedParts(OLD, NEW, [[0, 3]])).toEqual([{ start: 0, oldLines: OLD.slice(0, 4), newLines: [...NEW.slice(0, 5), ""] }]);
+	});
+
+	test("a blank line added between two procedures goes with the one that is asked for, on either side of it", () => {
+		// After the first procedure, and before the second.
+		expect(formattedParts(OLD, NEW, [[0, 3]])![0]!.newLines.at(-1)).toBe("");
+		expect(formattedParts(OLD, NEW, [[4, 6]])).toEqual([{ start: 4, oldLines: OLD.slice(4), newLines: NEW.slice(5) }]);
+	});
+
+	test("lines that are not asked for are in no part, whatever the formatter would do to them", () => {
+		const parts = formattedParts(OLD, NEW, [[5, 5]])!;
+		expect(parts).toEqual([{ start: 5, oldLines: ["y:=1 ;"], newLines: ["\ty := 1;"] }]);
+	});
+
+	test("ranges that touch are one part, so the lines added between them are taken once", () => {
+		const parts = formattedParts(OLD, NEW, [[4, 6], [0, 3]])!;
+		expect(parts.length).toBe(1);
+		expect(parts[0]!.newLines).toEqual(NEW);
+		expect(parts[0]!.oldLines).toEqual(OLD);
+	});
+
+	test("lines the formatter takes out: the part has fewer lines, or none", () => {
+		const old = ["a := 1;", "", "", "", "b := 2;"];
+		const formatted = ["a := 1;", "", "b := 2;"];
+		expect(formattedParts(old, formatted, [[0, 4]])).toEqual([{ start: 0, oldLines: old, newLines: formatted }]);
+		// The second and third blank lines alone: the formatter keeps one of the three, and which is its own affair.
+		const taken = formattedParts(old, formatted, [[2, 3]])!;
+		expect(taken[0]!.oldLines).toEqual(["", ""]);
+		expect(taken[0]!.newLines.every((line) => line === "")).toBe(true);
+		expect(taken[0]!.newLines.length).toBeLessThan(2);
+	});
+
+	test("a text the formatter leaves alone gives each part its own lines back", () => {
+		expect(formattedParts(NEW, NEW, [[1, 3]])).toEqual([{ start: 1, oldLines: NEW.slice(1, 4), newLines: NEW.slice(1, 4) }]);
+	});
+
+	test("ranges past the end are cut to the text, and two texts too unlike to set side by side give null", () => {
+		expect(formattedParts(OLD, NEW, [[5, 99]])![0]!.oldLines).toEqual(OLD.slice(5));
+		const a = Array.from({ length: 400 }, (_, i) => `a${i};`);
+		const b = Array.from({ length: 400 }, (_, i) => `b${i};`);
+		expect(formattedParts(a, b, [[0, 10]], 1000)).toBeNull();
+	});
+});

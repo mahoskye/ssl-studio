@@ -1860,7 +1860,16 @@ export const historyChanged = (() => {
 	};
 })();
 
-/** Format on save formats only the lines changed since the last save (ARCHITECTURE). */
+/**
+ * The size, in characters, up to which a save formats the whole document to take the changed lines from. The
+ * server formats a script of this size in a few tenths of a second; a larger one is asked for its ranges alone.
+ */
+const FORMAT_WHOLE_UP_TO = 400_000;
+
+/**
+ * Format on save formats only the lines changed since the last save (ARCHITECTURE), and leaves them as "Format
+ * document" would: they are taken from a format of the whole document (`formatRangesAsDocument`).
+ */
 async function formatChanged(doc: Doc) {
 	if (doc.model.isDisposed()) return;
 	const eol = doc.model.getEOL();
@@ -1872,7 +1881,11 @@ async function formatChanged(doc: Doc) {
 		// to the procedure the server says it is in.
 		ranges = widenToProcedures(ranges, await session.documentSymbols(doc.model).catch(() => []));
 		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== version) return;
-		const edits = await session.formatRanges(doc.model, ranges, doc.model.getOptions(), true);
+		// Where the whole document is too large to format on every save, or its formatted text cannot be set beside
+		// it, the ranges are formatted on their own: the server then leaves out its whole-document passes.
+		const whole = doc.model.getValueLength() <= FORMAT_WHOLE_UP_TO ? await session.formatRangesAsDocument(doc.model, ranges, doc.model.getOptions()) : null;
+		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== version) return;
+		const edits = whole ?? (await session.formatRanges(doc.model, ranges, doc.model.getOptions(), true));
 		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== version) return;
 		if (edits.length) applyAsOneStep(doc.model, edits, "format-on-save");
 	} catch (e: any) {

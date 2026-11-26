@@ -48,8 +48,11 @@ milestone M0.
   per-launch token is the fallback.)
 - **Formatting edits** from the server replace the whole range; the client
   trims them to the changed lines so the cursor and markers stay put. Format
-  on save formats changed ranges: a full format of a 400 KB script takes
-  about a second.
+  on save formats the lines that changed, and leaves them as "Format
+  document" would: the whole document is formatted and the changed lines
+  are taken from the answer. A script over 400,000 characters is asked for
+  its changed ranges alone, which leaves out the server's whole-document
+  passes.
 
 ## The language server (ADR 0003)
 

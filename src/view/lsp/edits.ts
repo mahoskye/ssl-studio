@@ -1,5 +1,6 @@
 // Turning the formatter's whole-range edits into small ones, and finding
 // the lines a save changed, so format on save touches only those.
+import { alignLines, LINE_CAME, LINE_SAME } from "../../shared/lineDiff";
 
 export type LineEdit = { startLine: number; endLine: number; lines: string[] };
 
@@ -232,6 +233,52 @@ export function smallEdits(oldLines: readonly string[], newLines: readonly strin
 		} else joined.push({ ...edit });
 	}
 	return joined;
+}
+
+/** Some lines of a text, and the lines a format of the whole text has in their place. `start` is the first line, from 0. */
+export type FormattedPart = { start: number; oldLines: string[]; newLines: string[] };
+
+/**
+ * For each range of lines (from 0, both ends included), the lines the formatter's text of the whole document has
+ * in their place: what a format of the document would make of those lines, and of no others.
+ *
+ * Format on save formats the lines that changed, and asked the server to format those ranges. A range format
+ * leaves out what the server does to a whole document only (the letter case of built-in functions, the blank
+ * lines between blocks), so a file saved "formatted" changed again under "Format document". Taken from a format
+ * of the whole document, the changed lines are as that command leaves them.
+ *
+ * The two texts are set side by side by their lines without spacing and letter case, which is all a formatter
+ * changes in a line it keeps. Lines the formatter added just before a range or just after it (a blank line
+ * between two procedures) go with the range. Null where the texts differ in too many lines to set side by side.
+ */
+export function formattedParts(oldLines: readonly string[], newLines: readonly string[], ranges: readonly [number, number][], budget?: number): FormattedPart[] | null {
+	const n = oldLines.length;
+	const ops = alignLines(oldLines.map(lineKey), newLines.map(lineKey), budget);
+	if (!ops) return null;
+	// For each line of the text as it is: how many of the formatter's lines stand before it once the lines added
+	// before it are counted (`reach`), and how many before those are (`lead`).
+	const lead = new Uint32Array(n + 1);
+	const reach = new Uint32Array(n + 1);
+	let i = 0;
+	let j = 0;
+	for (const op of ops) {
+		if (op === LINE_CAME) {
+			j++;
+			continue;
+		}
+		reach[i] = j;
+		if (op === LINE_SAME) j++;
+		lead[++i] = j;
+	}
+	reach[n] = newLines.length;
+	// Two ranges that touch would both take the lines added between them: they are one range.
+	const merged: [number, number][] = [];
+	for (const [start, end] of [...ranges].map(([s, e]): [number, number] => [Math.max(0, s), Math.min(n - 1, e)]).filter(([s, e]) => e >= s).sort((x, y) => x[0] - y[0])) {
+		const last = merged.at(-1);
+		if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end);
+		else merged.push([start, end]);
+	}
+	return merged.map(([start, end]) => ({ start, oldLines: oldLines.slice(start, end + 1), newLines: newLines.slice(lead[start]!, reach[end + 1]!) }));
 }
 
 /** A text edit as the language server sends it: a range of lines and UTF-16 columns, and what replaces it. */
