@@ -388,7 +388,10 @@ CREATE TABLE STYLE (
 		const parser = new mod.diagram.parser.Parser();
 		parser.yy = mod.diagram.db;
 		expect(() => parser.parse(`${erBody}\n`)).not.toThrow();
-	});
+		// Thirty seconds, not the five a test has by default. Nearly all of this test's time is Mermaid's parser being
+		// read from disk, which takes a third of a second once the files have been read before and took over five
+		// in the Windows test VM straight after it had started (2026-11-25): the test timed out with nothing wrong.
+	}, 30_000);
 });
 
 describe("R5C P1-1 — parseColumnClause edge cases", () => {
