@@ -39,6 +39,7 @@ import {
 import { baseName, dirName, relativeTo } from "../../shared/paths";
 import { recall, remember } from "../graph/canvas";
 import { Menu, type MenuItem } from "../Menu";
+import { FilterBox, filterKey, filterMenuItem, filterToggle } from "../FilterBox";
 import {
 	activeMarkdownTab,
 	chooseMarkdownPanelTab,
@@ -1263,6 +1264,8 @@ export function SymbolOutline(props: { filter?: string; compact?: boolean; label
 /** Unified Document panel (internal id "objects"): shares Info | Outline for Markdown, Outline for all other files. */
 export function Objects() {
 	const [filter, setFilter] = createSignal("");
+	// Out of sight until the panel's menu or Ctrl+F asks for it (ADR 0050).
+	const filterBox = filterToggle(filter, setFilter);
 	const [planTab, setPlanTab] = createSignal<"outline" | "procedures">("outline");
 	const isPlan = () => isPlanPath(activePath());
 	const isMd = () => isMarkdown(activePath());
@@ -1323,13 +1326,21 @@ export function Objects() {
 	});
 
 	return (
-		<div class="panel-body doc-outline-panel" data-panel="objects">
+		<div class="panel-body doc-outline-panel" data-panel="objects" onKeyDown={(e) => showFilterInput() && filterKey(e, filterBox)}>
 			<div class="panel-title">
 				<span>{isMd() ? "Document" : "Document outline"}</span>
-				<Show when={showOutlineControls()}>
-					<Menu floating label="Outline options" title="Outline options: follow cursor, sort order" class="outline-more" items={outlineMenuItems}>
+				<Show when={showFilterInput()}>
+					<Menu
+						floating
+						label={showOutlineControls() ? "Outline options" : "Procedure options"}
+						title={showOutlineControls() ? "Outline options: filter, follow cursor, sort order" : "Filter the procedures"}
+						class="outline-more"
+						items={() => [filterMenuItem(filterBox), ...(showOutlineControls() ? (["separator", ...outlineMenuItems()] as MenuItem[]) : [])]}
+					>
 						<Icon name="ellipsis" />
 					</Menu>
+				</Show>
+				<Show when={showOutlineControls()}>
 					<Show when={outlineHasExpandable()}>
 						<IconButton
 							label={outlineAnyOpen() ? "Collapse all outline items" : "Expand all outline items"}
@@ -1418,14 +1429,14 @@ export function Objects() {
 				</div>
 			</Show>
 			<Show when={showFilterInput()}>
-				<input
-					class="filter"
-					data-autofocus=""
-					aria-label={isPlan() && planTab() === "procedures" ? "Filter the workspace's procedures" : "Filter this document's outline"}
+				<FilterBox
+					toggle={filterBox}
+					label={isPlan() && planTab() === "procedures" ? "Filter the workspace's procedures" : "Filter this document's outline"}
 					placeholder="Filter"
 					value={filter()}
-					onInput={(e) => setFilter(e.currentTarget.value)}
+					onInput={setFilter}
 					onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
+					onDismiss={(box) => focusRowsBelow(box)}
 				/>
 			</Show>
 			<Show

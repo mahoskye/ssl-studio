@@ -1,5 +1,5 @@
 // Lean, view-aware bottom status bar (VS Code precedent, ADR 0032):
-// Left: Git branch, Code Problems, compact LSP & Agent status indicators.
+// Left: the language server and the Agent, compact status dots; then the Git branch and the Problems counts (ADR 0049).
 // Right: view-appropriate essentials only (hides text/JSON metadata in visual modes;
 // keeps encoding, LF/CRLF, cursor, and clickable Language Mode selector in code/text views).
 import { Icon } from "./Icon";
@@ -307,39 +307,6 @@ export function StatusBar() {
 
 	return (
 		<footer class="statusbar">
-			<Show when={gitStatus()}>
-				<button
-					class="item git-item"
-					title={`On the branch ${branchText()}${changedCount() ? `; ${changedCount()} ${changedCount() === 1 ? "file has" : "files have"} changed since the last commit` : "; nothing has changed since the last commit"}. Show Source control.`}
-					aria-label={`Branch ${gitStatus()!.branch || "none"}${gitStatus()!.ahead ? `, ${gitStatus()!.ahead} ahead` : ""}${gitStatus()!.behind ? `, ${gitStatus()!.behind} behind` : ""}, ${changedCount()} changed ${changedCount() === 1 ? "file" : "files"}. Show Source control.`}
-					onClick={() => showPanel("git")}
-				>
-					<span class="codicon-glyph" aria-hidden="true">
-						{"\uec6f"}
-					</span>
-					{branchText()}
-					<Show when={changedCount()}>
-						<span class="git-count">{changedCount()}</span>
-					</Show>
-				</button>
-			</Show>
-			<button
-				class="item"
-				disabled={!state.workspace}
-				title={state.workspace ? `Show Problems${problemsKeys() ? ` (${problemsKeys()})` : ""}` : "Problems: open a folder first"}
-				aria-label={state.workspace ? `${problemCount(counts().errors, "error")}, ${problemCount(counts().warnings, "warning")}. Show Problems.` : "Problems: open a folder first."}
-				onClick={() => {
-					if (!state.workspace) return;
-					setState((s) => {
-						s.bottomView = "problems";
-						s.settings.layout.bottom = true;
-					});
-				}}
-			>
-				<span class="problem-counts" aria-hidden="true">
-					<Icon name="error" /> {counts().errors} <Icon name="warning" /> {counts().warnings}
-				</span>
-			</button>
 			<button
 				class={["item", "status-service", { warn: lsp().tone === "warn", err: lsp().tone === "error" }]}
 				disabled={!lsp().actionable}
@@ -377,6 +344,39 @@ export function StatusBar() {
 			>
 				<span class={`status-dot ${agentInfo().tone}`} aria-hidden="true" />
 				<span>{agentInfo().label}</span>
+			</button>
+			<Show when={gitStatus()}>
+				<button
+					class="item git-item"
+					title={`On the branch ${branchText()}${changedCount() ? `; ${changedCount()} ${changedCount() === 1 ? "file has" : "files have"} changed since the last commit` : "; nothing has changed since the last commit"}. Show Source control.`}
+					aria-label={`Branch ${gitStatus()!.branch || "none"}${gitStatus()!.ahead ? `, ${gitStatus()!.ahead} ahead` : ""}${gitStatus()!.behind ? `, ${gitStatus()!.behind} behind` : ""}, ${changedCount()} changed ${changedCount() === 1 ? "file" : "files"}. Show Source control.`}
+					onClick={() => showPanel("git")}
+				>
+					<span class="codicon-glyph" aria-hidden="true">
+						{"\uec6f"}
+					</span>
+					{branchText()}
+					<Show when={changedCount()}>
+						<span class="git-count">{changedCount()}</span>
+					</Show>
+				</button>
+			</Show>
+			<button
+				class="item"
+				disabled={!state.workspace}
+				title={state.workspace ? `Show Problems${problemsKeys() ? ` (${problemsKeys()})` : ""}` : "Problems: open a folder first"}
+				aria-label={state.workspace ? `${problemCount(counts().errors, "error")}, ${problemCount(counts().warnings, "warning")}. Show Problems.` : "Problems: open a folder first."}
+				onClick={() => {
+					if (!state.workspace) return;
+					setState((s) => {
+						s.bottomView = "problems";
+						s.settings.layout.bottom = true;
+					});
+				}}
+			>
+				<span class="problem-counts" aria-hidden="true">
+					<Icon name="error" /> {counts().errors} <Icon name="warning" /> {counts().warnings}
+				</span>
 			</button>
 			<span class="spacer" />
 			<Show when={sizeWarning()}>

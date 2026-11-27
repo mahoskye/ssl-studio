@@ -59,6 +59,7 @@ import { FileMark } from "../FileMark";
 import { gitStatus } from "../git";
 import { Icon } from "../Icon";
 import { Menu, type MenuItem } from "../Menu";
+import { FilterBox, filterToggle } from "../FilterBox";
 import { docs, isMarkdown } from "../project";
 import {
 	addRegistryRowForTicket,
@@ -224,6 +225,8 @@ export function MarkdownInspector() {
 	const [sqlSourceOpen, setSqlSourceOpen] = createSignal(true);
 	const [schemaUsagesOpen, setSchemaUsagesOpen] = createSignal(false);
 	const [usageFilter, setUsageFilter] = createSignal("");
+	// The usages' filter is out of sight until its button asks for it (ADR 0050).
+	const usageFilterBox = filterToggle(usageFilter, setUsageFilter);
 	const [usageGroupFold, setUsageGroupFold] = createSignal<Partial<Record<SchemaUsageCategory, boolean>>>({});
 	const [usageGroupShowAll, setUsageGroupShowAll] = createSignal<Partial<Record<SchemaUsageCategory, boolean>>>({});
 	const [usageExpandedFiles, setUsageExpandedFiles] = createSignal<Record<string, boolean>>({});
@@ -330,7 +333,7 @@ export function MarkdownInspector() {
 			setLinkedTicketsOpen(true);
 			setSqlSourceOpen(true);
 			setSchemaUsagesOpen(false);
-			setUsageFilter("");
+			usageFilterBox.clear();
 			setUsageGroupFold({});
 			setUsageGroupShowAll({});
 			setUsageExpandedFiles({});
@@ -2534,6 +2537,21 @@ export function MarkdownInspector() {
 										{usages().timedOut ? "+" : ""}
 									</span>
 								</button>
+								<Show when={usages().totalFiles > 4 || usages().groups.length > 1}>
+									<button
+										type="button"
+										class={["md-insp-mini-btn", { on: usageFilterBox.shown() }]}
+										title="Filter these uses by file or snippet"
+										aria-label="Filter the uses"
+										aria-pressed={usageFilterBox.shown() ? "true" : "false"}
+										onClick={() => {
+											setSchemaUsagesOpen(true);
+											usageFilterBox.open();
+										}}
+									>
+										<Icon name={usageFilter() ? "filter-filled" : "filter"} />
+									</button>
+								</Show>
 								<button
 									type="button"
 									class="md-insp-mini-btn"
@@ -2548,15 +2566,16 @@ export function MarkdownInspector() {
 								<Show when={usages().timedOut}>
 									<p class="md-insp-empty">{unfinishedSearchNote(true, usages().totalFiles, "uses")}</p>
 								</Show>
-								<Show when={usages().totalFiles > 4 || usages().groups.length > 1}>
+								<Show when={(usages().totalFiles > 4 || usages().groups.length > 1) && usageFilterBox.shown()}>
 									<div class="md-usage-filter">
 										<Icon name="search" class="md-usage-filter-icon" />
-										<input
-											type="text"
+										<FilterBox
+											toggle={usageFilterBox}
+											class=""
 											value={usageFilter()}
 											placeholder="Filter files or snippets…"
-											aria-label="Filter code and registry usages"
-											onInput={(e) => setUsageFilter(e.currentTarget.value)}
+											label="Filter code and registry usages"
+											onInput={setUsageFilter}
 										/>
 										<Show when={isFiltering()}>
 											<button
@@ -2564,7 +2583,7 @@ export function MarkdownInspector() {
 												class="md-usage-filter-clear"
 												title="Clear filter"
 												aria-label="Clear filter"
-												onClick={() => setUsageFilter("")}
+												onClick={() => usageFilterBox.clear()}
 											>
 												<Icon name="close" />
 											</button>

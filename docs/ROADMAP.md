@@ -897,7 +897,58 @@ which supersedes one point of ADR 0009.
 - **Where the text cannot be kept, the old question is asked.** Closing a
   single tab still asks, as before.
 
+## Filters, marks and the status bar (2026-11-27)
+
+- **A filter is out of sight until it is asked for**
+  ([ADR 0050](adr/0050-a-filter-is-out-of-sight-until-it-is-asked-for.md)).
+  The Explorer's Outline, the Document panel, Docs, Health, the table view
+  and the Markdown inspector's list of uses show their filter box only when
+  their menu (or Ctrl+F in the list) asks for it, or while it holds text.
+  Docs' and Health's state pills are checked items in a filter menu; one
+  that is on shows as a chip that turns it off. The plan's and the call
+  graph's finders are a search button until used.
+- **Docs marks each document by its kind**
+  ([ADR 0051](adr/0051-the-docs-panel-marks-a-document-by-its-kind.md)): a
+  catalog, a ticket, a spec, a decision, a question and the rest each have
+  their own mark, not one Markdown mark for all.
+- **The status bar starts with the services**
+  ([ADR 0049](adr/0049-the-status-bar-starts-with-the-services.md)): LSP,
+  Agent, the Git branch, then Problems.
+- **Docs' state dots line up.** In a narrow panel the dot for work under
+  way has a ring; the others now keep the same room, so all three sit in
+  one column.
+- **A table's row checkbox can be hit.** The selection column was drawn
+  32px wide, not the 56px meant, since the wider rule was in a stylesheet
+  that loads first and lost; the row number left each checkbox under 3px
+  wide. The column is now 60px, set in one place, and each checkbox has a
+  24px target.
+- **Ticking a row no longer moves the rows.** The bar of actions for the
+  ticked rows came in above the table and pushed every row down, so the
+  next click meant for a checkbox could land on the bar's Delete. It is
+  under the rows now.
+
 ## Planned
+
+- **Review each panel not yet reviewed (2026-11-27).** Each gets an
+  adversarial review of its own, as the editor had from 2026-11-25 to
+  2026-11-27: try to break it as a developer would by accident, fix what is
+  broken, add what is missing, and look at it at a narrow and a wide width
+  in both themes.
+  - **Explorer:** files, the scoped folder, the Outline section, moves and
+    drops.
+  - **Docs:** the groups, a ticket's bundle, bulk changes, catalogs.
+  - **Document panel:** Info and Outline for Markdown, a plan's Procedures.
+  - **Palette:** templates, callouts, plan shapes, the call graph's
+    controls.
+  - **Reference:** the list, an entry's detail, inserting a name.
+  - **Search:** find and replace across files, scopes, safe docs.
+  - **Source control:** changes, staging, the commit.
+  - **History:** local snapshots and Git commits, comparing and restoring.
+  - **Agent:** sessions, models, attaching files, what a failed turn says.
+  - **Health:** the project's checks, citations, the style profile.
+  - **Output:** the bottom panel's log.
+  - **The Settings dialog:** each section, its search, the keys page, and
+    what a change does at once.
 
 - **Document export to Confluence and PDF (2026-11-22).** Convert project
   documents across their formats (Markdown notes, tickets, specs, CSV

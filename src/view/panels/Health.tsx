@@ -23,6 +23,8 @@ import { symbols } from "./Objects";
 import { SeverityMark, SEVERITY } from "./Problems";
 import { focusRowsBelow, IconButton, Row, Rows, type Point } from "./Rows";
 import { chooseFromMenu, type RowMenuEntry } from "./RowMenu";
+import { Menu } from "../Menu";
+import { FilterBox, filterKey, filterMenuItem, filterToggle } from "../FilterBox";
 import { serverDown, serverSilent } from "./server";
 import { openStyleProfile } from "../StyleProfile";
 import { docs, setUpProject } from "../project";
@@ -194,6 +196,8 @@ export function Health() {
 	// Compact Health filter bar (All / Active ticket / Warnings + text search).
 	const [healthMode, setHealthMode] = createSignal<"all" | "ticket" | "warnings">("all");
 	const [healthQuery, setHealthQuery] = createSignal("");
+	// The text filter is out of sight until the filter menu or Ctrl+F asks for it (ADR 0050).
+	const filterBox = filterToggle(healthQuery, setHealthQuery);
 	const activeTicketKey = () => state.settings.activeTicket?.trim() || "";
 	createEffect(
 		() => !activeTicketKey() && healthMode() === "ticket",
@@ -930,9 +934,36 @@ export function Health() {
 	};
 	const fileState = (file: { exists: boolean; untouched?: boolean }) => (!file.exists ? "missing" : file.untouched ? "still the template text" : "written");
 	return (
-		<div class="panel-body health" data-panel="health">
+		<div class="panel-body health" data-panel="health" onKeyDown={(e) => filterKey(e, filterBox)}>
 			<div class="panel-title">
 				<span>Health</span>
+				<Menu
+					floating
+					class={isFiltering() ? "docs-filter-menu on" : "docs-filter-menu"}
+					label={isFiltering() ? "Filter Health: a filter is on" : "Filter Health"}
+					title={isFiltering() ? "Filter: a filter is on. Filter by text, ticket or warnings" : "Filter by text, ticket or warnings"}
+					items={() => [
+						filterMenuItem(filterBox, undefined, "Filter by Text…"),
+						"separator",
+						{ label: "Everything", checked: healthMode() === "all", run: () => setHealthMode("all") },
+						...(activeTicketKey() ? [{ label: `Active ticket (${activeTicketKey()})`, checked: healthMode() === "ticket", run: () => setHealthMode("ticket") }] : []),
+						{ label: "Warnings only", checked: healthMode() === "warnings", run: () => setHealthMode("warnings") },
+						...(isFiltering()
+							? [
+									"separator" as const,
+									{
+										label: "Clear Filters",
+										run: () => {
+											filterBox.clear();
+											setHealthMode("all");
+										},
+									},
+								]
+							: []),
+					]}
+				>
+					<Icon name={isFiltering() ? "filter-filled" : "filter"} />
+				</Menu>
 				<IconButton
 					label="Export Traceability Matrix (RTM)"
 					title="Export Traceability Matrix (RTM)…"
@@ -942,40 +973,33 @@ export function Health() {
 				<IconButton label="Copy Health report as Markdown" title="Copy Health report (Markdown)" icon="copy" onClick={() => void copyHealthReport()} />
 				<IconButton label="Style profile" title="Open the style profile" icon="gear" onClick={() => openStyleProfile()} />
 			</div>
-			<div class="health-filter-bar">
-				<input
-					class="filter"
-					type="search"
-					aria-label="Filter Health findings, tasks, citations, and attachments"
-					placeholder="Filter health"
-					value={healthQuery()}
-					onInput={(e) => setHealthQuery(e.currentTarget.value)}
-					onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
-				/>
-				<div class="docs-filter-pills" role="group" aria-label="Health filter mode">
-					<button type="button" class={{ on: healthMode() === "all" }} onClick={() => setHealthMode("all")}>
-						All
-					</button>
-					<Show when={activeTicketKey()}>
-						<button
-							type="button"
-							class={{ on: healthMode() === "ticket" }}
-							title={`Show only Health items for ${activeTicketKey()} and its linked work`}
-							onClick={() => setHealthMode("ticket")}
-						>
-							Active ticket
-						</button>
+			<Show when={filterBox.shown() || healthMode() !== "all"}>
+				{/* Out of sight until the filter menu or Ctrl+F asks for it; a filter by kind is shown as a chip that clears it (ADR 0050). */}
+				<div class="health-filter-bar">
+					<FilterBox
+						toggle={filterBox}
+						label="Filter Health findings, tasks, citations, and attachments"
+						placeholder="Filter health"
+						value={healthQuery()}
+						onInput={setHealthQuery}
+						onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
+						onDismiss={(box) => focusRowsBelow(box)}
+					/>
+					<Show when={healthMode() !== "all"}>
+						<div class="docs-filter-chips" role="group" aria-label="Filters that are on">
+							<button
+								type="button"
+								class="docs-tag-active"
+								title={healthMode() === "ticket" ? `Showing only Health items for ${activeTicketKey()} and its linked work. Click to show all.` : "Showing only warning-level checks and citations. Click to show all."}
+								onClick={() => setHealthMode("all")}
+							>
+								<span>{healthMode() === "ticket" ? `Ticket ${activeTicketKey()}` : "Warnings"}</span>
+								<Icon name="close" />
+							</button>
+						</div>
 					</Show>
-					<button
-						type="button"
-						class={{ on: healthMode() === "warnings" }}
-						title="Show only warning-level checks and citations"
-						onClick={() => setHealthMode("warnings")}
-					>
-						Warnings
-					</button>
 				</div>
-			</div>
+			</Show>
 			<div class="health-scroll">
 				<section>
 				<h3>Project</h3>

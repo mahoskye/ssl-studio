@@ -178,6 +178,8 @@ export function Menu(props: {
 		}
 	};
 
+	// In a menu where some items carry a tick, every item keeps the tick's room, so their words start in one column.
+	const anyTicks = (all: MenuItem[]) => all.some((item) => item !== "separator" && item.checked !== undefined);
 	const renderPopup = (all: () => MenuItem[]) => (
 		<div
 			class={["menu-pop", { "menu-pop-floating": isFloating() }]}
@@ -208,7 +210,7 @@ export function Menu(props: {
 								item.run();
 							}}
 						>
-							<Show when={item.checked !== undefined}>
+							<Show when={item.checked !== undefined || anyTicks(all())}>
 								<span class="menu-check" aria-hidden="true">
 									<Show when={item.checked}>
 										<Icon name="check" />
