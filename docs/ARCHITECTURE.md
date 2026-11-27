@@ -59,7 +59,8 @@ milestone M0.
   gives up after its two seconds tells the session, so the notice and the
   status bar turn together. The status bar item reads "LSP not answering"
   and restarts the server; the Outline, Procedures, Reference, Problems,
-  Health and Blocks say so in place of "Reading…" or of nothing found.
+  Health, Blocks and the call graph say so in place of "Reading…" or of
+  nothing found.
   Requests are not failed when the time is up: an answer that comes late is
   delivered, and ends the silence, as a restart does.
 

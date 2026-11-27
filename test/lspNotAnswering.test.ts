@@ -9,6 +9,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { flush, snapshot } from "solid-js";
 import { lspIndicator } from "../src/shared/statusBar";
 import { staleNotice, staleReason } from "../src/view/blocks/model";
+import { graphIdle } from "../src/view/graph/model";
 import {
 	LspClient,
 	PROCEDURE,
@@ -22,6 +23,7 @@ import {
 	files,
 	formatOnSaveWait,
 	handshake,
+	loadGraph,
 	lsp,
 	lspAnswering,
 	openChanged,
@@ -275,6 +277,47 @@ describe("what the blocks view says when a change cannot be made", () => {
 	});
 });
 
+describe("what the graph view says of it", () => {
+	const SILENT_HINT = "Restart it here or from the status bar.";
+	const running = { workspace: true, lsp: "running", answering: true, failed: "", nodes: null };
+
+	test("running and not answering, nothing read yet: said in place of “Reading the workspace…”, with the restart", () => {
+		// Answering, and the calls not yet given: nothing is said under the bar, which reads "Reading the workspace…".
+		expect(graphIdle({ ...running, waiting: true })).toBeNull();
+		expect(graphIdle({ ...running, answering: false, waiting: true })).toEqual({
+			text: "The language server is not answering, so there are no calls to show: the graph is read from it.",
+			hint: `${SILENT_HINT} If it is only busy, the calls appear when it answers.`,
+			restart: true,
+		});
+	});
+
+	test("with calls read before the silence: they stay, said to be as they were last read", () => {
+		const stale = graphIdle({ ...running, answering: false, nodes: 12 });
+		expect(stale).toEqual({ text: "The language server is not answering. These are the calls as they were last read.", hint: SILENT_HINT, restart: true });
+		// Nothing is being asked for, so an answer brings nothing: that is promised only while the calls are waited for.
+		expect(stale!.hint).not.toContain("busy");
+		expect(graphIdle({ ...running, answering: false, waiting: true, nodes: 12 })!.hint).toContain("If it is only busy, the calls appear when it answers.");
+		// A read that failed before the silence is not what is spoken of while the server says nothing.
+		expect(graphIdle({ ...running, answering: false, failed: "Could not read the calls from the language server: boom" })!.text).toStartWith("The language server is not answering");
+	});
+
+	test("only a running server can be not answering, and the rest is said as it was", () => {
+		expect(graphIdle({ ...running, workspace: false, answering: false })).toEqual({ text: "Open a folder to see the calls between its procedures." });
+		for (const lsp of ["starting", "restarting", "stopped", "failed"]) expect(graphIdle({ ...running, lsp, answering: false })).toEqual(graphIdle({ ...running, lsp }));
+		expect(graphIdle({ ...running, lsp: "starting" })).toEqual({ text: "The language server is starting. The graph is read from it, and appears when it is ready." });
+		expect(graphIdle({ ...running, lsp: "restarting", nodes: 3 })).toEqual({ text: "The language server is starting. These are the calls as they were last read." });
+		expect(graphIdle({ ...running, lsp: "failed", lspMessage: "exited with code 2" })).toEqual({
+			text: "The language server is not running, so there are no calls to show: the graph is read from it. It said: exited with code 2",
+			hint: "Restart it here or from the status bar. If it does not start, Settings has where to find it, under Language server program.",
+			restart: true,
+		});
+		expect(graphIdle({ ...running, lsp: "stopped", nodes: 3 })!.text).toBe("The language server is not running. These are the calls as they were last read.");
+		expect(graphIdle({ ...running, failed: "Could not read the calls from the language server: boom" })).toEqual({ text: "Could not read the calls from the language server: boom", hint: "Refresh tries again." });
+		expect(graphIdle({ ...running, nodes: 0 })).toEqual({ text: "The language server found no procedures in this folder." });
+		expect(graphIdle({ ...running, nodes: 12 })).toBeNull();
+	});
+});
+
 describe("a language server that runs and does not answer is shown as not answering", () => {
 	const SAVE_NOTICE = "The language server is not answering: files are saved without formatting until it does.";
 	const SILENT_SENTENCE = "The language server is not answering. Click “LSP not answering” in the status bar to restart it.";
@@ -468,6 +511,46 @@ describe("a language server that runs and does not answer is shown as not answer
 		expect(serverSilent()).toBe("");
 		expect(item()).toMatchObject({ tone: "error", label: "LSP" });
 		expect(sslOutlineEmpty(unread)).toBe("The language server has failed (starlims-lsp exited with code 2). Click “LSP” in the status bar to restart it. This file's outline comes from it.");
+	});
+
+	test("the graph's calls: asked and left unanswered, the view says so; an answer that comes late brings them", async () => {
+		const withCallGraph = { ...handshake, capabilities: { ...handshake.capabilities, experimental: { ssl: { callGraph: 1 } } } };
+		await serverRuns((request) => (request.method === "initialize" ? withCallGraph : SILENT));
+		await session.waitReady();
+		/** What the view says under its bar, made as the component makes it. */
+		const says = (nodes: number | null, waiting: boolean) => (flush(), graphIdle({ workspace: true, lsp: snapshot(state).lsp.state, lspMessage: snapshot(state).lsp.message, answering: lspAnswering(), waiting, failed: "", nodes }));
+
+		// The view reads the workspace's calls, as it does when it opens.
+		let read: any = "not answered";
+		void loadGraph(() => {}).then(
+			(graph) => (read = graph),
+			(e) => (read = e),
+		);
+		await until(() => asked("ssl/callGraph").length === 1);
+		expect(says(null, true)).toBeNull();
+
+		await until(() => !session.answering);
+		expect(says(null, true)).toEqual({
+			text: "The language server is not answering, so there are no calls to show: the graph is read from it.",
+			hint: "Restart it here or from the status bar. If it is only busy, the calls appear when it answers.",
+			restart: true,
+		});
+		// The read is not failed: it is still asked.
+		expect(read).toBe("not answered");
+
+		// The server answers at last: the calls are there, and nothing more is said.
+		const at = { uri: "file:///ws/Demo.ssl", range: { start: { line: 0, character: 0 }, end: { line: 2, character: 9 } } };
+		answer(asked("ssl/callGraph")[0]!.id!, {
+			nodes: [
+				{ id: "s", kind: "script", name: "Demo", location: at },
+				{ id: "p", kind: "procedure", name: "RuleFor", container: at.uri, location: at },
+			],
+			edges: [],
+		});
+		await until(() => read !== "not answered");
+		expect(read.nodes.map((n: { name: string; path: string }) => `${n.path}: ${n.name}`)).toEqual(["/ws/Demo.ssl: RuleFor"]);
+		expect(session.answering).toBe(true);
+		expect(says(read.nodes.length, false)).toBeNull();
 	});
 
 	test("a save that gives up says so to the session: the status bar turns with the notice, not seconds after it", async () => {

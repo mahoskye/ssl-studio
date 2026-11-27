@@ -326,6 +326,7 @@ export const { answerWait, LspClient } = await import("../src/view/lsp/client");
 export const { lspAnswering, session } = await import("../src/view/lsp/session");
 export const { documents, formatOnSaveWait, openFile, save, saveAll, setState, state } = await import("../src/view/state");
 export const { serverDown, serverSilent, sslOutlineEmpty } = await import("../src/view/panels/server");
+export const { loadGraph } = await import("../src/view/graph/load");
 
 export const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 export const until = async (ok: () => boolean) => {
@@ -510,6 +511,8 @@ export function resetAll() {
 			return null;
 		}
 		if (method === "lspRestart") files.restarts++;
+		// The sizes of the scripts in a call graph: none are on this disk.
+		if (method === "sizes") return {};
 		return null;
 	};
 	setState((s) => {

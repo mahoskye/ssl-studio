@@ -807,3 +807,34 @@ export function ticketSubgraphFilter(
 
 	return keep;
 }
+
+/** Why the graph view has nothing to show, or shows what it last read, and what to do about it. */
+export type GraphIdle = { text: string; hint?: string; restart?: boolean };
+
+/**
+ * What the graph view says in place of the calls, or above the calls it last read; null when there is nothing to
+ * say. The server comes first: the graph is read from it. `answering` is false while the server runs and leaves
+ * what it was asked unanswered: the view once read "Reading the workspace…" for as long as such a server ran.
+ * `nodes` is how many procedures the graph that was read has, null when none has been read. `waiting` says the
+ * calls have been asked for and not yet given: only then does an answer bring them.
+ */
+export function graphIdle(o: { workspace: boolean; lsp: string; lspMessage?: string; answering: boolean; waiting?: boolean; failed: string; nodes: number | null }): GraphIdle | null {
+	if (!o.workspace) return { text: "Open a folder to see the calls between its procedures." };
+	const stale = o.nodes ? " These are the calls as they were last read." : "";
+	if (o.lsp === "starting" || o.lsp === "restarting") return { text: `The language server is starting.${stale || " The graph is read from it, and appears when it is ready."}` };
+	if (o.lsp !== "running")
+		return {
+			text: `The language server is not running${stale ? `.${stale}` : ", so there are no calls to show: the graph is read from it."}${o.lspMessage ? ` It said: ${o.lspMessage}` : ""}`,
+			hint: "Restart it here or from the status bar. If it does not start, Settings has where to find it, under Language server program.",
+			restart: true,
+		};
+	if (!o.answering)
+		return {
+			text: `The language server is not answering${stale ? `.${stale}` : ", so there are no calls to show: the graph is read from it."}`,
+			hint: `Restart it here or from the status bar.${o.waiting ? " If it is only busy, the calls appear when it answers." : ""}`,
+			restart: true,
+		};
+	if (o.failed) return { text: o.failed, hint: "Refresh tries again." };
+	if (o.nodes === 0) return { text: "The language server found no procedures in this folder." };
+	return null;
+}
