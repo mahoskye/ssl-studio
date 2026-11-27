@@ -1,6 +1,9 @@
 # ADR 0009: Nothing is lost or destroyed without a say
 
-**Status:** Accepted
+**Status:** Accepted; one point superseded by
+[ADR 0042](0042-closing-keeps-unsaved-work-and-asks-nothing.md)
+(closing the window and opening another folder no longer ask: the unsaved
+text is kept)
 **Date:** 2026-11-18
 **Decided by:** the user asked for every recommendation of the 2026-11-18
 review to be implemented (2026-11-18). The review found five ways to lose

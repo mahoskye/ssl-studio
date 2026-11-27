@@ -38,7 +38,7 @@ import { MenuBar } from "./MenuBar";
 import { useNavigation } from "./navigation";
 import { StatusBar } from "./StatusBar";
 import { applyFonts, applyTheme, resolveTheme } from "./themes/themes";
-import { activePath, dismiss, focusEditor, focusRequest, isTabsReady, keepForFolder, markdownMode, notify, openFolder, planMode, rememberTabs, rememberViews, setHouseIndentEverywhere, setState, state, tableTextMode, unsavedPaths, type PanelId } from "./state";
+import { activePath, dismiss, focusEditor, focusRequest, isTabsReady, keepForFolder, keepUnsavedSoon, markdownMode, notify, openFolder, planMode, rememberTabs, rememberViews, setHouseIndentEverywhere, setState, state, tableTextMode, unsavedPaths, type PanelId } from "./state";
 import { focusPanel, getOutlineMemory, getPlanPaletteMemory, isPanelAvailable, isPlanChartActive, isShown, lastShown, loadOutlineMemory, loadPlanPaletteMemory, movePanel, narrowHosted, narrowPanels, panelOn, PANELS, recordOutlineActive, recordPlanPaletteActive, setCrowded, setNarrowHosted, setNarrowPanels, setOutlineMemory, setPlanPaletteMemory, sideOf, togglePanel } from "./panels/registry";
 import { transitionOutlineAvailability, transitionPanelAvailability } from "./panels/outlineState";
 import { isPlanPath } from "./plan/model";
@@ -550,12 +550,21 @@ export function App() {
 			rememberViews();
 		},
 	);
-	// The app is told how much is unsaved, so that it can refuse to close its window until the user has been asked.
+	// The app is told how much is unsaved, so that it does not close its window before that text has been kept.
 	const unsavedCount = createMemo(() => unsavedPaths().length);
 	createEffect(
 		() => unsavedCount(),
 		(count) => {
 			void backend.unsavedChanged(count).catch(() => undefined);
+		},
+	);
+	// When other files are unsaved than before (one saved, discarded, closed, renamed), what is kept of them follows
+	// at once: the text of one that is no longer unsaved is not to come back the next time (ADR 0042).
+	const unsavedFiles = createMemo(() => unsavedPaths().join("\n"));
+	createEffect(
+		() => unsavedFiles(),
+		() => {
+			keepUnsavedSoon(0);
 		},
 	);
 	// A review takes the editors' place: one opened while the call graph is showing must not open behind it.

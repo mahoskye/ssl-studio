@@ -882,6 +882,20 @@ walkthrough of the baseline UI ([UI-DESIGN.md](UI-DESIGN.md),
   sticky first column in Table View, and explicit `Side-by-Side | Inline`
   layout switching in Diff Review.
 
+## Closing keeps unsaved work (2026-11-26)
+
+Under [ADR 0042](adr/0042-closing-keeps-unsaved-work-and-asks-nothing.md),
+which supersedes one point of ADR 0009.
+
+- **Closing the window, and opening another folder, ask nothing.** The
+  unsaved text of every open document is kept in the app's state folder,
+  within a second of being typed and once more as the folder is left.
+- **The folder opens with what was left unsaved:** the same documents, still
+  unsaved, a document with no file among them. A file that changed on disk
+  meanwhile is marked and saving asks; one that is gone is put back by saving.
+- **Where the text cannot be kept, the old question is asked.** Closing a
+  single tab still asks, as before.
+
 ## Planned
 
 - **Document export to Confluence and PDF (2026-11-22).** Convert project

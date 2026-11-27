@@ -1707,8 +1707,56 @@ describe("SolidJS 2.0.3 audit — state.ts & recentTabs.ts", () => {
 		expect(state.settings.wordWrap).toBe(false);
 	});
 
-	// Pass 3: the question about unsaved changes is asked before the folder is chosen and opened, which takes a while.
-	test("a folder is not opened over what was typed while it was being opened", async () => {
+	// Pass 3: what is unsaved is seen to before the folder is chosen and opened, which takes a while. Since ADR 0042
+	// it is kept, not asked about: what is typed in that while is kept too, for the folder being left.
+	test("what is typed while another folder is being opened is kept for the folder that is left, and the folder opens", async () => {
+		const file = "/ws/a.ssl";
+		const opened: unknown[] = [];
+		const keeps: unknown[][] = [];
+		let letGo!: () => void;
+		const held = new Promise<void>((resolve) => (letGo = resolve));
+		let asked!: () => void;
+		const asking = new Promise<void>((resolve) => (asked = resolve));
+		rpcHandler = async (method, args) => {
+			if (method === "read") return { text: ":RETURN 1;\n", mtime: 1, encoding: "utf-8" };
+			if (method === "settings") return { effective: DEFAULT_SETTINGS };
+			if (method === "themes") return [];
+			if (method === "info") return { app: "0.1.0", selftest: true };
+			if (method === "lspState") return { state: "stopped" };
+			if (method === "unsavedKeep") keeps.push(args);
+			if (method === "openFolder") {
+				opened.push(args[0]);
+				if (args[0] === "/other") {
+					asked();
+					await held;
+				}
+				return { root: String(args[0]), name: String(args[0]).slice(1) };
+			}
+			return null;
+		};
+		let questions = 0;
+		chooseHandler = () => (questions++, null);
+		await openFile(file, { keep: true });
+		flush();
+		const model = documents.get(file)!.model as any;
+
+		const switching = openFolder("/other");
+		await asking;
+		// Nothing was unsaved when the folder was asked for. This is typed while the backend opens it.
+		model.pushEditOperations([], [{ range: new FakeRange(1, 1, 1, 1), text: "x" }], () => null);
+		letGo();
+		await switching;
+		flush();
+
+		// Kept under the folder it belongs to, though the backend is in the other by then; nothing asked, and the folder is open.
+		expect(keeps).toEqual([["/ws", [{ path: file, text: "x:RETURN 1;\n", saved: { text: ":RETURN 1;\n", mtime: 1 } }], []]]);
+		expect(questions).toBe(0);
+		expect(opened).toEqual(["/other"]);
+		expect(snapshot(state).workspace?.root).toBe("/other");
+		expect(documents.has(file)).toBe(false);
+	});
+
+	test("where that text cannot be kept, the folder is not opened over it", async () => {
 		const file = "/ws/a.ssl";
 		const opened: unknown[] = [];
 		let letGo!: () => void;
@@ -1717,6 +1765,7 @@ describe("SolidJS 2.0.3 audit — state.ts & recentTabs.ts", () => {
 		const asking = new Promise<void>((resolve) => (asked = resolve));
 		rpcHandler = async (method, args) => {
 			if (method === "read") return { text: ":RETURN 1;\n", mtime: 1, encoding: "utf-8" };
+			if (method === "unsavedKeep") throw new Error("ENOSPC: no space left on device");
 			if (method === "openFolder") {
 				opened.push(args[0]);
 				if (args[0] === "/other") {
@@ -1747,15 +1796,17 @@ describe("SolidJS 2.0.3 audit — state.ts & recentTabs.ts", () => {
 		expect(model.isDisposed()).toBe(false);
 		expect(model.getValue()).toBe("x:RETURN 1;\n");
 		expect(snapshot(state).dirty[file]).toBe(true);
-		expect(snapshot(state).messages.some((m) => /other was not opened: .*a\.ssl changed while it was being opened/.test(m.text))).toBe(true);
+		expect(snapshot(state).messages.some((m) => /other was not opened: .*a\.ssl changed while it was being opened, and the changes could not be kept/.test(m.text))).toBe(true);
 	});
 
+	// The question is asked only where the text cannot be kept (ADR 0042): that is the case here.
 	test("changes the user chose to discard do not call the folder off; typing in such a file afterwards does", async () => {
 		const file = "/ws/a.ssl";
 		const opened: unknown[] = [];
 		const gates: (() => void)[] = [];
 		rpcHandler = async (method, args) => {
 			if (method === "read") return { text: ":RETURN 1;\n", mtime: 1, encoding: "utf-8" };
+			if (method === "unsavedKeep") throw new Error("ENOSPC: no space left on device");
 			if (method === "settings") return { effective: DEFAULT_SETTINGS };
 			if (method === "themes") return [];
 			if (method === "info") return { app: "0.1.0", selftest: true };

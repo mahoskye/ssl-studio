@@ -179,6 +179,24 @@ export type NameIn = { path: string; line: number; column: number; name: string 
 export type ManifestFile = { path: string; kind: string; bytes: number; lines: number; sha256: string };
 
 export type Snapshot = { id: string; time: number; size: number };
+
+/**
+ * A document's text that is not on disk, as the app keeps it while its folder is not open (ADR 0042), so that
+ * closing the window loses nothing and asks nothing.
+ */
+export type KeptText = {
+	/** The file, or `untitled:Name` for a document that has no file yet. */
+	path: string;
+	/** The document's text. */
+	text: string;
+	/**
+	 * The file as these edits found it: its text and its date. What tells, when the folder is opened again,
+	 * whether the file has changed on disk since. Not there for a document that has no file yet.
+	 */
+	saved?: { text: string; mtime: number };
+	/** The language of a document that has no file yet. */
+	language?: string;
+};
 export type GitCommit = { sha: string; shortSha: string; time: number; author: string; subject: string; path: string };
 export type TicketGitCommit = { sha: string; shortSha: string; time: number; author: string; subject: string; files: { status: string; path: string; repoPath?: string; inWorkspace?: boolean }[] };
 export type GitBlameLine = { sha: string; shortSha: string; author: string; date: string; summary: string; ticket?: string; filename?: string };
@@ -469,16 +487,28 @@ export interface BackendApi {
 	setupPreview(): Promise<string[]>;
 	/** Takes back the last "Set up project": removes what it wrote and nobody has changed since. */
 	setupUndo(): Promise<{ removed: string[]; kept: string[] }>;
-	/** How many open files have edits that are not on disk, so the app can ask before its window closes. */
+	/**
+	 * How many open files have edits that are not on disk. With any, the app does not close its window at once: it
+	 * has the view keep their text first (`closeRequested`), which takes a moment and asks nothing (ADR 0042).
+	 */
 	unsavedChanged(count: number): Promise<void>;
 	/**
 	 * Whether a view is open that may hold text still being typed (a table's open cell, a field of a plan step).
-	 * Such text is in no document yet, so no count of unsaved files has it: the app then asks the view before its
-	 * window closes, and the view puts the text in its document and counts.
+	 * Such text is in no document yet, so no count of unsaved files has it: the app then goes to the view before its
+	 * window closes, and the view puts the text in its document and keeps it.
 	 */
 	typingChanged(held: boolean): Promise<void>;
-	/** Closes the app whatever is unsaved: the user has just said what to do with it. */
+	/** Closes the app whatever is unsaved: its text has been kept, or the user has just said what to do with it. */
 	closeWindow(): Promise<void>;
+	/**
+	 * Keeps the text of documents that is not on disk, and forgets what was kept for the paths in `drop`: those
+	 * saved since, discarded, or closed (ADR 0042). `root` is the folder the documents belong to: the open one, or
+	 * one that was open in this run, since what is typed while another folder is being opened still belongs to the
+	 * folder being left. Done when all of it is written; fails when a text could not be.
+	 */
+	unsavedKeep(root: string, keep: KeptText[], drop: string[]): Promise<void>;
+	/** The unsaved text kept for the open folder, to be shown again as it was left. */
+	unsavedKept(): Promise<KeptText[]>;
 	/** README.md, AGENTS.md and project.toml, then the Markdown and plans in the project's docs and plans folders. */
 	docs(options?: { templatesFolder?: string }): Promise<DocFile[]>;
 	/** Folders whose doc listing exceeded the deterministic cap, with exact total file counts. */
@@ -583,7 +613,8 @@ export type BackendEvents = {
 	agent: { type: string; data: unknown };
 	/**
 	 * The window was asked to close while files had unsaved edits, or while a view may hold text still being typed:
-	 * the view puts that text in its document, and asks what to do where anything is then unsaved.
+	 * the view puts that text in its document, has what is unsaved kept (`unsavedKeep`), and closes the app. It
+	 * asks what to do only where the text could not be kept (ADR 0042).
 	 */
 	closeRequested: Record<string, never>;
 	/**
