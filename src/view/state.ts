@@ -319,14 +319,26 @@ export const KEEP_AFTER = 1000;
  * Which text of each document the backend was last given to keep, as the document's version then, with the file
  * as those edits found it: for the open folder. What is asked to be kept is only what has changed since, and what
  * was kept for a document that is no longer unsaved is asked to be forgotten. The version is one document's own:
- * a file closed and opened again is another document, whose versions count from the start again.
+ * a file closed and opened again is another document, whose versions count from the start again. `language` is
+ * the language mode kept with a document that has no file yet: its name says nothing of what it is.
  */
-const keptVersions = new Map<string, { model: monaco.editor.ITextModel; version: number }>();
-/** Whether the backend has this document's text as it is now. */
+type KeptVersion = { model: monaco.editor.ITextModel; version: number; language?: string };
+const keptVersions = new Map<string, KeptVersion>();
+/** A document's text as it is now, to put on record as kept: with its language mode where it has no file yet. */
+const versionNow = (doc: Doc): KeptVersion => ({
+	model: doc.model,
+	version: doc.model.getAlternativeVersionId(),
+	...(isUntitled(doc.path) ? { language: doc.model.getLanguageId() } : {}),
+});
+/**
+ * Whether the backend has this document as it is now: its text, and for a document that has no file yet its
+ * language mode too. A mode chosen anew changes no text, and was lost with the window until it was typed in again.
+ */
 const isKept = (path: string) => {
 	const doc = docs.get(path);
 	const was = keptVersions.get(path);
-	return Boolean(doc && was && was.model === doc.model && was.version === doc.model.getAlternativeVersionId());
+	if (!doc || !was || was.model !== doc.model || was.version !== doc.model.getAlternativeVersionId()) return false;
+	return !isUntitled(path) || was.language === doc.model.getLanguageId();
 };
 const keptBases = new Map<string, { text: string; mtime: number }>();
 /** Counts the folders opened: what a keep learned of one folder is not put on record for the next. */
@@ -355,7 +367,7 @@ function unsavedToKeep(skip?: (path: string) => boolean) {
 	const root = cur.workspace?.root;
 	if (!root) return null;
 	const keep: KeptText[] = [];
-	const versions = new Map<string, { model: monaco.editor.ITextModel; version: number }>();
+	const versions = new Map<string, KeptVersion>();
 	const bases = new Map<string, { text: string; mtime: number }>();
 	for (const path of snapshotUnsavedPaths()) {
 		const doc = docs.get(path);
@@ -363,7 +375,7 @@ function unsavedToKeep(skip?: (path: string) => boolean) {
 		const base = keptBases.get(path);
 		const sameBase = isUntitled(path) || (base !== undefined && base.mtime === doc.mtime && base.text === doc.savedText);
 		if (isKept(path) && sameBase) continue;
-		versions.set(path, { model: doc.model, version: doc.model.getAlternativeVersionId() });
+		versions.set(path, versionNow(doc));
 		const text = doc.model.getValue();
 		if (isUntitled(path)) keep.push({ path, text, language: doc.model.getLanguageId() });
 		else {
@@ -1202,7 +1214,7 @@ function attachUntitledKept(kept: KeptText): boolean {
 	if (docs.has(kept.path)) return true;
 	if (!kept.text) return false;
 	const doc = attachUntitled(kept.path, kept.text, kept.language || "plaintext");
-	keptVersions.set(kept.path, { model: doc.model, version: doc.model.getAlternativeVersionId() });
+	keptVersions.set(kept.path, versionNow(doc));
 	setState((s) => {
 		s.dirty[kept.path] = true;
 	});
@@ -2402,6 +2414,9 @@ export function setDocumentLanguage(path: string, languageId: string, chosen = t
 	else session.untrack(doc.model);
 	if (languageId === "ssl") setHouseIndent(doc.model);
 	else doc.validatorDispose = attachValidator(doc.model, doc.path, languageId);
+	// The mode of a document that has no file yet is kept with its unsaved text (ADR 0042), and this changes none of
+	// that text: the keep is asked for here.
+	if (isUntitled(doc.path)) keepUnsavedSoon();
 	setState((s) => {
 		s.kindVersion += 1;
 	});

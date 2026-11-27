@@ -100,16 +100,20 @@ async function main() {
 	 * workspace, and its own files are kept between the two.
 	 *
 	 * First: the view leaves a file and a document with no file yet unsaved. Their text has to be kept as it was
-	 * typed, with nothing closed. Then one more line is typed and the window's close button pressed at once: the
-	 * app has to close by itself, ask nothing, and leave the file on disk as it was.
+	 * typed, with nothing closed. Then the document with no file is given a language mode, one more line is typed
+	 * in the file and the window's close button pressed at once: the app has to close by itself, ask nothing, and
+	 * leave the file on disk as it was.
 	 *
-	 * Again: both documents have to be back, unsaved, with every line they were left with. The file is saved, which
+	 * Again: both documents have to be back, unsaved, with every line they were left with, and the one with no file
+	 * in the language mode it was given. The file is saved, which
 	 * has to put it on disk and end what was kept of it; and the window closes once more over what is still unsaved.
 	 */
 	async function closeCheck(): Promise<number> {
 		const MARK = "selftest: an edit left unsaved";
 		const MARK_LATE = "selftest: typed just before the close";
 		const UNTITLED = "selftest: a document with no file yet";
+		/** The language mode the view chooses for that document once its text is kept (CLOSE_LANGUAGE). */
+		const LANGUAGE = "ssl";
 		const problems: string[] = [];
 		const check = (ok: unknown, what: string) => ok || problems.push(what);
 		const read = () => {
@@ -122,12 +126,13 @@ async function main() {
 		/** The texts the app keeps for the workspace, as they are in its state folder now. */
 		const kept = () => {
 			const base = join(scratch, "state", "ssl-studio", "unsaved");
-			const texts: { untitled: boolean; text: string }[] = [];
+			const texts: { untitled: boolean; text: string; language: string }[] = [];
 			try {
 				for (const dir of readdirSync(base)) {
 					for (const name of readdirSync(join(base, dir)).filter((n) => n.endsWith(".json"))) {
 						try {
-							texts.push({ untitled: name.startsWith("u-"), text: String(JSON.parse(readFileSync(join(base, dir, name), "utf8")).text ?? "") });
+							const stored = JSON.parse(readFileSync(join(base, dir, name), "utf8"));
+							texts.push({ untitled: name.startsWith("u-"), text: String(stored.text ?? ""), language: String(stored.language ?? "") });
 						} catch {
 							// Being written just now.
 						}
@@ -140,6 +145,7 @@ async function main() {
 		};
 		const keptFile = () => kept().find((each) => !each.untitled)?.text ?? "";
 		const keptUntitled = () => kept().find((each) => each.untitled)?.text ?? "";
+		const keptLanguage = () => kept().find((each) => each.untitled)?.language ?? "";
 		const within = async (ms: number, ok: () => unknown) => {
 			for (const end = Date.now() + ms; Date.now() < end; await Bun.sleep(200)) if (ok()) return true;
 			return Boolean(ok());
@@ -204,6 +210,7 @@ async function main() {
 			check(readFileSync(file, "utf8") === original, "the file on disk was changed by the close");
 			check(keptFile().includes(MARK_LATE) && keptFile().includes(MARK), `the line typed just before the close was not kept (kept: ${JSON.stringify(keptFile().slice(0, 120))})`);
 			check(keptUntitled().includes(UNTITLED), "the document with no file yet was not kept");
+			check(keptLanguage() === LANGUAGE, `the language mode chosen for the document with no file yet was not kept (kept: ${JSON.stringify(keptLanguage())})`);
 		});
 		if (file) rmSync(`${file}.selftest-kept`, { force: true });
 
@@ -215,6 +222,7 @@ async function main() {
 				check((restored.unsaved ?? []).length === 2, `unsaved after the restart: ${JSON.stringify(restored.unsaved)}`);
 				check(String(restored.fileText ?? "").includes(MARK) && String(restored.fileText ?? "").includes(MARK_LATE), `the file came back with: ${JSON.stringify(restored.fileText)}`);
 				check(String(restored.untitledText ?? "").includes(UNTITLED), `the document with no file came back with: ${JSON.stringify(restored.untitledText)}`);
+				check(restored.untitledLanguage === LANGUAGE, `the document with no file came back in the language mode: ${JSON.stringify(restored.untitledLanguage)}`);
 				check((restored.unsaved ?? []).every((path: string) => (restored.tabs ?? []).includes(path)), `the tabs after the restart: ${JSON.stringify(restored.tabs)}`);
 				check(!(restored.conflicts ?? []).length, `a file that had not changed on disk came back as changed: ${JSON.stringify(restored.conflicts)}`);
 				check(!restored.asked, `the app asked as it started: ${restored.asked}`);
@@ -232,6 +240,7 @@ async function main() {
 				check(await app.closed(20_000), `the app did not close by itself the second time${read().asked ? `: it asked “${read().asked}”` : ""}`);
 				check(!read().asked, `the app asked before it closed the second time: ${read().asked}`);
 				check(keptUntitled().includes(UNTITLED), "the document with no file yet was not kept by the second close");
+				check(keptLanguage() === LANGUAGE, `the second close kept the document with no file yet in the language mode: ${JSON.stringify(keptLanguage())}`);
 			});
 		}
 		console.log(JSON.stringify({ close: read() }));

@@ -2,15 +2,17 @@
 // Windows). The runner (scripts/selftest.ts --close) starts the app twice on one copy of the workspace, with the
 // app's own files kept between the two.
 //
-// The first time the view edits a file, writes in a document that has no file yet, and leaves both unsaved. The
+// The first time the view edits a file, writes in a document that has no file yet, and leaves both unsaved. Once
+// their text is kept it chooses a language mode for the document with no file, and types nothing more in it. The
 // runner presses the window's close button from outside, and the app has to close by itself and ask nothing. The
-// second time both documents have to be back, unsaved, with the text they were left with; the file is then saved,
-// and the runner closes the window once more, over the document that still has no file.
+// second time both documents have to be back, unsaved, with the text they were left with, and the one with no
+// file in the mode chosen for it; the file is then saved, and the runner closes the window once more, over the
+// document that still has no file.
 //
 // Each stage is written to the report, which the runner reads while this runs.
 import { backend } from "./backend";
 import { monaco } from "./editor/monaco";
-import { activePath, documents, newUntitled, openFile, save, state, unsavedPaths } from "./state";
+import { activePath, documents, newUntitled, openFile, save, setDocumentLanguage, state, unsavedPaths } from "./state";
 
 /** The line the first edit adds: kept as it is typed, a second after. */
 export const CLOSE_MARK = "/* selftest: an edit left unsaved;";
@@ -20,6 +22,8 @@ export const CLOSE_MARK_LATE = "/* selftest: typed just before the close;";
 export const CLOSE_TOLD = ".selftest-kept";
 /** What is written in the document that has no file yet. */
 export const CLOSE_UNTITLED = "selftest: a document with no file yet\n";
+/** The language mode chosen for it after its text was kept: a script, which its name does not say. */
+export const CLOSE_LANGUAGE = "ssl";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(get: () => T | undefined | null | false, ms = 30_000): Promise<T> {
@@ -62,6 +66,8 @@ export async function selftestClose() {
 
 		// The runner waits for both texts to be kept as they were typed, and says so by a file it puts beside this one.
 		await toldToGoOn(path, "the text was kept as it was typed");
+		// The document with no file is made a script, and nothing is typed in it: its mode has to be kept all the same.
+		if (!setDocumentLanguage(untitled, CLOSE_LANGUAGE)) throw new Error("the document with no file yet did not take a language mode");
 		// One more line, and no time for it to be kept as typed: the close has to keep it.
 		doc.model.applyEdits([{ range: new monaco.Range(1, 1, 1, 1), text: `${CLOSE_MARK_LATE}\n` }]);
 		await note("typed");

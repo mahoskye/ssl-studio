@@ -323,7 +323,7 @@ mock.module(resolve(import.meta.dir, "../src/view/dialogs.tsx"), () => ({
 
 const { connect } = await import("../src/view/backend");
 const { closeReview, review } = await import("../src/view/editor/Review");
-const { closeTab, commitPendingEdits, documents, forgetKeptRecord, holdsPendingEdit, KEEP_AFTER, keepUnsaved, loadSettings, newUntitled, notSavedText, openFile, openFolder, restoreTabs, save, saveAllUnasked, saveSetting, setState, state } =
+const { closeTab, commitPendingEdits, documents, forgetKeptRecord, holdsPendingEdit, KEEP_AFTER, keepUnsaved, loadSettings, newUntitled, notSavedText, openFile, openFolder, restoreTabs, save, saveAllUnasked, saveSetting, setDocumentLanguage, setState, state } =
 	await import("../src/view/state");
 const { resetRecentTabs } = await import("../src/view/recentTabs");
 const { resetTidy } = await import("../src/view/agent/tidy");
@@ -1073,6 +1073,38 @@ describe("ADR 0042: unsaved text is kept, and comes back when the folder is open
 		expect(textOf(A)).toBe("aone\n");
 	});
 
+	test("a language mode chosen for a document with no file yet is kept, though no text of it changed", async () => {
+		const { keeps } = backendOf({ [A]: { text: "one\n", mtime: 1 } });
+		const untitled = newUntitled();
+		typeInto(untitled, "draft");
+		await openFile(A, { keep: true });
+		typeInto(A, "a");
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps).toEqual([{ root: "/ws", keep: [{ path: untitled, text: "draft", language: "plaintext" }, { path: A, text: "aone\n", saved: { text: "one\n", mtime: 1 } }], drop: [] }]);
+
+		// Made a script by its language mode, with no key typed: kept within the second, as typing is, with the mode.
+		// It once came back as plain text: the mode is kept with the text, and the text was kept already.
+		expect(setDocumentLanguage(untitled, "ssl")).toBe(true);
+		expect(keeps.length).toBe(1);
+		await sleep(KEEP_AFTER + 100);
+		expect(keeps.slice(1)).toEqual([{ root: "/ws", keep: [{ path: untitled, text: "draft", language: "ssl" }], drop: [] }]);
+		// And once: the backend has it as it is now.
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps.length).toBe(2);
+
+		// The mode it has already is no change, and a file's mode is not kept: its name says what it is.
+		expect(setDocumentLanguage(untitled, "ssl")).toBe(false);
+		expect(setDocumentLanguage(A, "plaintext")).toBe(true);
+		await sleep(KEEP_AFTER + 100);
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps.length).toBe(2);
+
+		// Chosen and the folder left at once, before the second is up: what is asked to be kept then has the mode.
+		expect(setDocumentLanguage(untitled, "sql")).toBe(true);
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps[2]).toEqual({ root: "/ws", keep: [{ path: untitled, text: "draft", language: "sql" }], drop: [] });
+	});
+
 	test("the folder opens with what was left unsaved: the kept text, unsaved, each in a tab, and nothing said", async () => {
 		const { keeps } = backendOf({ [A]: { text: "one\n", mtime: 1 } }, [
 			{ path: A, text: "edited\n", saved: { text: "one\n", mtime: 1 } },
@@ -1093,6 +1125,11 @@ describe("ADR 0042: unsaved text is kept, and comes back when the folder is open
 		// The backend has these texts: they are not sent to it again until they change.
 		expect(await keepUnsaved()).toBeNull();
 		expect(keeps).toEqual([]);
+		// The document that came back is given another language mode: that is a change, and is kept.
+		expect(setDocumentLanguage("untitled:Untitled-1", "sql")).toBe(true);
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps).toEqual([{ root: "/ws", keep: [{ path: "untitled:Untitled-1", text: "draft\n", language: "sql" }], drop: [] }]);
+		keeps.length = 0;
 		// A new document with no file does not take the name of the one that came back.
 		expect(newUntitled()).toBe("untitled:Untitled-2");
 		// The file was touched meanwhile (another date, the same text): it has not changed under the edits, and a save is a save.
