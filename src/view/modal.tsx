@@ -138,6 +138,12 @@ export function Modal(props: {
 	class: string;
 	/** Near the top of the window, as the quick pick is, not centred. */
 	top?: boolean;
+	/**
+	 * Asked of the person: a question or a pick. It is drawn over the notices, and only its shade under them, so no
+	 * notice covers it and a notice beside it is still read and dismissed. A sheet the person works in (Settings, the
+	 * style profile) is not asked: it stays under the notices, since one raised from it must not be lost behind it.
+	 */
+	asked?: boolean;
 	/** The id of the visible title; or `label` when there is none. */
 	labelledBy?: string;
 	label?: string;
@@ -184,24 +190,38 @@ export function Modal(props: {
 
 	const DialogTag = dynamic(() => (props.onSubmit ? "form" : "div") as "div");
 
-	const renderOverlay = () => (
-		<div class={["overlay", { top: props.top }]} ref={overlay} onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
-			<DialogTag
-				ref={(el: HTMLElement) => {
-					dialog = el;
-				}}
-				class={props.class}
-				role="dialog"
-				aria-modal="true"
-				aria-labelledby={props.labelledBy}
-				aria-label={props.labelledBy ? undefined : props.label}
-				tabindex="-1"
-				onSubmit={(e: SubmitEvent) => props.onSubmit?.(e)}
-			>
-				{props.children}
-			</DialogTag>
-		</div>
+	const renderDialog = () => (
+		<DialogTag
+			ref={(el: HTMLElement) => {
+				dialog = el;
+			}}
+			class={props.class}
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby={props.labelledBy}
+			aria-label={props.labelledBy ? undefined : props.label}
+			tabindex="-1"
+			onSubmit={(e: SubmitEvent) => props.onSubmit?.(e)}
+		>
+			{props.children}
+		</DialogTag>
 	);
+
+	// What is asked comes in two layers with the notices between them: the shade, which takes the click that closes,
+	// and over the notices the place the dialog stands in, which lets a click through to whatever is beside the dialog.
+	// The two share a wrapper that is given no position and no layer of its own, so each takes its own place among the
+	// app's layers; it is the wrapper that the rest of the app is made inert around.
+	const renderOverlay = () =>
+		props.asked ? (
+			<div class="overlay-asked" ref={overlay}>
+				<div class="overlay-shade" onMouseDown={() => props.onClose()} />
+				<div class={["overlay", "asked", { top: props.top }]}>{renderDialog()}</div>
+			</div>
+		) : (
+			<div class={["overlay", { top: props.top }]} ref={overlay} onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
+				{renderDialog()}
+			</div>
+		);
 
 	return typeof document !== "undefined" && document.body ? <Portal mount={document.body}>{renderOverlay()}</Portal> : renderOverlay();
 }

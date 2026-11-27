@@ -594,7 +594,7 @@ function Picker(props: { mode: QuickMode }) {
 		setSelected(index);
 	};
 	return (
-		<Modal class="quickpick" top label={TITLES[mode()]} onClose={close}>
+		<Modal class="quickpick" top asked label={TITLES[mode()]} onClose={close}>
 			<input
 				data-autofocus
 				role="combobox"
