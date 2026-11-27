@@ -1837,24 +1837,64 @@ export const historyChanged = (() => {
 	};
 })();
 
-/** Format on save formats only the lines changed since the last save (ARCHITECTURE). */
+/**
+ * How long a save waits for the language server to format its changed lines, in milliseconds. The server is the only
+ * formatter (ADR 0003) and a save does not depend on it: when the time is up the file is written as it was typed.
+ * `silent` is the wait while an earlier save is still owed its answer, so that "Save all" over a server that says
+ * nothing does not wait the long time once for every file. (An object, so that a test can shorten the waits.)
+ */
+export const formatOnSaveWait = { answering: 2000, silent: 250 };
+/** A save went on without the server's formatting, and no save has had an answer since: it has been said. */
+let formatUnanswered = false;
+
+/**
+ * Format on save formats only the lines changed since the last save (ARCHITECTURE), and holds the save no longer
+ * than `formatOnSaveWait`: a server that runs and does not answer once kept Ctrl+S from writing the file at all.
+ */
 async function formatChanged(doc: Doc) {
 	if (doc.model.isDisposed()) return;
 	const eol = doc.model.getEOL();
 	const version = doc.model.getAlternativeVersionId();
-	let ranges = changedRanges(doc.savedText.split(/\r?\n/), doc.model.getValue().split(eol));
+	const ranges = changedRanges(doc.savedText.split(/\r?\n/), doc.model.getValue().split(eol));
 	if (!ranges.length) return;
-	try {
+	// Set when the save has gone on without the answer: one that comes later is not put into a file already written.
+	let left = false;
+	const wanted = () => !left && !doc.model.isDisposed() && doc.model.getAlternativeVersionId() === version;
+	const answered = (async () => {
 		// A lone line formats without its block's indentation: widen each range
 		// to the procedure the server says it is in.
-		ranges = widenToProcedures(ranges, await session.documentSymbols(doc.model).catch(() => []));
-		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== version) return;
-		const edits = await session.formatRanges(doc.model, ranges, doc.model.getOptions());
-		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== version) return;
-		if (edits.length) doc.model.pushEditOperations([], edits, () => null);
-	} catch (e: any) {
-		log(`format on save skipped: ${e?.message ?? e}`);
-	}
+		const widened = widenToProcedures(ranges, await session.documentSymbols(doc.model).catch(() => []));
+		if (!wanted()) return;
+		const edits = await session.formatRanges(doc.model, widened, doc.model.getOptions());
+		if (wanted() && edits.length) doc.model.pushEditOperations([], edits, () => null);
+	})().then(
+		() => "answered" as const,
+		(e: any) => {
+			if (!left) log(`format on save skipped: ${e?.message ?? e}`);
+			return "answered" as const;
+		},
+	);
+	// Any answer ends the silence: a late one, and a refusal too (a restart refuses what was asked of the old server).
+	void answered.then(() => {
+		formatUnanswered = false;
+	});
+	const wait = formatUnanswered ? formatOnSaveWait.silent : formatOnSaveWait.answering;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const waited = new Promise<"waited">((resolve) => {
+		timer = setTimeout(() => resolve("waited"), wait);
+	});
+	const outcome = await Promise.race([answered, waited]);
+	clearTimeout(timer);
+	if (outcome === "answered") return;
+	left = true;
+	log(`format on save skipped: the language server did not answer in ${wait / 1000} s`);
+	// Said once for a silence, not at every save of it: Output has each.
+	if (formatUnanswered) return;
+	formatUnanswered = true;
+	notify("The language server is not answering: files are saved without formatting until it does.", "info", {
+		label: "Restart",
+		run: () => (notify("Restarting the language server."), void restartLsp()),
+	});
 }
 
 const PROCEDURE_KINDS = new Set([monaco.languages.SymbolKind.Function, monaco.languages.SymbolKind.Method, monaco.languages.SymbolKind.Constructor]);

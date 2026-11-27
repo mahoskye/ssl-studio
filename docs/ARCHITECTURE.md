@@ -49,7 +49,9 @@ milestone M0.
 - **Formatting edits** from the server replace the whole range; the client
   trims them to the changed lines so the cursor and markers stay put. Format
   on save formats changed ranges: a full format of a 400 KB script takes
-  about a second.
+  about a second. A save waits two seconds for the server at most, then
+  writes the file as typed and says so once; while the server stays silent,
+  later saves wait a quarter of a second. Saving never depends on the server.
 
 ## The language server (ADR 0003)
 
