@@ -68,6 +68,16 @@ describe("this round's smaller fixes, where they are", () => {
 		expect(source("src/view/agent/Agent.tsx")).toContain("edited = setTimeout(() => setContentEdited((n) => n + 1), CONTEXT_SETTLE_MS);");
 		expect(source("src/view/state.ts")).toMatch(/function markDirty\(path: string, dirty: boolean\) \{\n\tif \(snapshot\(state\)\.dirty\[path\] === dirty\) return;/);
 	});
+	test("the Problems item is read out with one error or warning in the singular", () => {
+		const bar = source("src/view/StatusBar.tsx");
+		expect(bar).toContain('export const problemCount = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;');
+		expect(bar).toContain('`${problemCount(counts().errors, "error")}, ${problemCount(counts().warnings, "warning")}. Show Problems.`');
+	});
+	test("in a narrow Problems list a long code goes under the message and leaves it its width", () => {
+		const css = source("src/view/style.css");
+		expect(css).toContain(".problems { container: problems / inline-size; }");
+		expect(css).toMatch(/@container problems \(max-width: 420px\) \{[^}]*\.tree-row\.problem \{ grid-template-columns: [^}]*\}\n\t\.tree-row\.problem \.label \{ grid-column: 2 \/ -1; \}/);
+	});
 	test("the status bar names a file's indentation as VS Code does", async () => {
 		expect(source("src/view/StatusBar.tsx")).toContain("export const indentName = (spaces: boolean, size: number) => (spaces ? `Spaces: ${size}` : `Tab size: ${size}`);");
 	});

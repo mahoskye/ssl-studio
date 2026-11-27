@@ -173,14 +173,15 @@ from the keyboard, and says what it is).
   created, a method called and a class inherited. The graph draws each with
   its own line, names them in its key and its list, and counts them apart
   from calls. The IDE no longer works inheritance out by itself.
-- **Left for the language server** ([LSP-REQUESTS](LSP-REQUESTS.md)): two
-  of the three things running the demo showed the server accepts and
-  STARLIMS does not (L8, mahoskye/starlims-lsp#372). starlims-lsp 0.32.0
-  answered the rest: the required exception to "prefer unannotated
-  procedures" (L7), the first of L8's three, where comments, strings and
-  keywords are (L9), and a range format that keeps to its range (L10). The
-  tables a script uses (L6, #370) was withdrawn on 2026-11-25: that is the
-  IDE's own to find, not the server's.
+- **Left for the language server** ([LSP-REQUESTS](LSP-REQUESTS.md)): three
+  defects the second review of the editor found (L11 to L13,
+  mahoskye/starlims-lsp#378, #379 and #380). starlims-lsp 0.32.0 answered
+  the required exception to "prefer unannotated procedures" (L7), the
+  first of L8's three, where comments, strings and keywords are (L9), and a
+  range format that keeps to its range (L10). 0.33.0 answered the rest of
+  L8, by a rule for one and a decision for the other. The tables a script
+  uses (L6, #370) was withdrawn on 2026-11-25: that is the IDE's own to
+  find, not the server's.
 - **The demo project runs.** `bun scripts/demo-sandbox.ts` runs its tests in
   the SSL sandbox runner (a separate, private compatibility runtime). The
   first run found defects that validation had not.

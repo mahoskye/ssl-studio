@@ -139,7 +139,9 @@ describe("closing the window", () => {
 			Object.assign(dirs, before);
 			rmSync(sandbox, { recursive: true, force: true });
 		}
-	});
+		// The only test here that opens a folder, which starts the language server; the rest runs on the test's own
+		// clock. In the Windows VM, under the whole suite, that start alone took over the default five seconds.
+	}, 30_000);
 });
 
 // A self-test (`hutch run selftest-cycle`) ends by telling the app it is done. Nobody is there to answer a question,

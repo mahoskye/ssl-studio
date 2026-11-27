@@ -114,6 +114,9 @@ function useIndentation() {
 	);
 }
 
+/** "1 warning", "2 warnings": what the Problems item is read out as. */
+export const problemCount = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
+
 /** "Spaces: 4" or "Tab size: 4", as VS Code's status bar has it. */
 export const indentName = (spaces: boolean, size: number) => (spaces ? `Spaces: ${size}` : `Tab size: ${size}`);
 
@@ -324,7 +327,7 @@ export function StatusBar() {
 				class="item"
 				disabled={!state.workspace}
 				title={state.workspace ? `Show Problems${problemsKeys() ? ` (${problemsKeys()})` : ""}` : "Problems: open a folder first"}
-				aria-label={state.workspace ? `${counts().errors} errors, ${counts().warnings} warnings. Show Problems.` : "Problems: open a folder first."}
+				aria-label={state.workspace ? `${problemCount(counts().errors, "error")}, ${problemCount(counts().warnings, "warning")}. Show Problems.` : "Problems: open a folder first."}
 				onClick={() => {
 					if (!state.workspace) return;
 					setState((s) => {

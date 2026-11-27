@@ -224,8 +224,24 @@ are left alone. The same release reports junk after a block keyword
 as `unexpected_token`; both used to pass. The demo project is still clean
 under it.
 
-**Still open** in mahoskye/starlims-lsp#372: the other two rows, and
-`doproc_in_class`. Each waits on a run on STARLIMS itself.
+**The rest is answered in starlims-lsp 0.33.0 (2026-11-27)**, SSL Studio's
+pinned version, after a run of each on STARLIMS 12; #372 is closed:
+
+- **The third row** is the warning `iif_guard_ineffective`, for the shape
+  that fails at run time. `IIf` works out both of its value arguments, so
+  a read the test was meant to guard (`IIf(Empty(aRows), 0, aRows[1, 1])`)
+  raises when the test is true.
+- **The second row has no diagnostic, by decision** (the server's D22). A
+  procedure entered by its three-part name reads the variables declared
+  anywhere up the call stack, so one call site cannot show whether the
+  name is there.
+- **`doproc_in_class` stands.** A bare `DoProc` in such a method does not
+  compile on STARLIMS 12; the runner was wrong to run it.
+
+The same release fails validation on four more `DoProc` shapes
+(`DoProc("Name",)` among them) and a quoted `:INHERIT` parent. The demo
+project is still clean under it. The IDE needed no change: it shows what
+the server reports, and lists no codes of its own.
 
 ## Asked on 2026-11-25
 
@@ -329,6 +345,7 @@ as for STARLIMS. That answer is not applied
 Found by the second review of the editor, and checked against the server's
 own specification at 0.32.0 before they were reported: each answer breaks
 a rule the server's catalog states. Three defects, no feature of the IDE.
+**All three are still open at 0.33.0.**
 
 Other findings of that review were left with the server as they are,
 because its specification calls them intended: a range format keeps its

@@ -449,6 +449,14 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .tree-row.problem .label { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
 .tree-row.problem .code { font-family: var(--code-font); white-space: nowrap; align-self: start; padding-top: 1px; }
 .tree-row.problem .meta { font-family: var(--code-font); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; min-width: 5ch; align-self: start; padding-top: 1px; }
+/* A narrow list: the code and the place go on a line under the message. Beside it, a long code
+   (iif_guard_ineffective) left the message no width at all. */
+@container problems (max-width: 420px) {
+	.tree-row.problem { grid-template-columns: calc(18px * var(--ui-scale)) minmax(0, 1fr) auto; row-gap: 2px; }
+	.tree-row.problem .label { grid-column: 2 / -1; }
+	.tree-row.problem .code { grid-column: 2; grid-row: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+	.tree-row.problem .meta { grid-column: 3; grid-row: 2; }
+}
 /* Reusable vertical section splitter inside side panels (Explorer, Palette, Reference).
    1px zero-net-flow sash overlaid directly on the divider border so mounting/unmounting
    never shifts section spacing while staying visible to assistive tools. */
@@ -656,6 +664,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .review-error { margin: 0; padding: var(--space-3) var(--space-5); font-size: var(--text-md); color: var(--error); background: var(--panel-bg); border-bottom: 1px solid var(--border); }
 
 .problems, .output { overflow: auto; flex: 1; margin: 0; padding: var(--space-2) 0; }
+.problems { container: problems / inline-size; }
 .problems-filter { display: flex; align-items: center; gap: var(--space-2); padding: 0 var(--space-4) var(--space-2); border-bottom: 1px solid var(--border); margin-bottom: var(--space-2); }
 .problems-filter button { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: var(--text-xs); color: var(--muted); background: transparent; border: 1px solid transparent; cursor: pointer; }
 .problems-filter button:hover { color: var(--fg); background: var(--hover); }
