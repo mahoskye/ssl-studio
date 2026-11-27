@@ -1045,10 +1045,13 @@ export function App() {
 				<Show when={state.project && !state.project.configured && !state.setupDismissed && !state.info?.selftest}>
 					<div class="setup-bar" role="status">
 						<span>This folder is not set up as a project. Setting it up adds project settings, a README and an AGENTS file; nothing is overwritten.</span>
-						<button class="primary" onClick={() => void setUpProject()}>
-							Set up project
-						</button>
-						<button onClick={() => setState((s) => { s.setupDismissed = true; })}>Not now</button>
+						{/* The two answers keep together: where the text has too little room beside them, they go under it as a pair. */}
+						<div class="setup-actions">
+							<button class="primary" onClick={() => void setUpProject()}>
+								Set up project
+							</button>
+							<button onClick={() => setState((s) => { s.setupDismissed = true; })}>Not now</button>
+						</div>
 					</div>
 				</Show>
 				<div class={["editors", { "panel-maximized": layout().bottom && Boolean(state.workspace) && isBottomMaximized() }]}>

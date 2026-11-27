@@ -377,6 +377,72 @@ describe("R9A P1 — modal.tsx portaling, stacked isolation, IME safety, and foc
 		}
 	});
 
+	test("what is asked keeps its shade and its dialog live, with the notices, while the rest goes inert", () => {
+		const body = new FakeElement("body");
+		const root = new FakeElement("div");
+		const app = new FakeElement("div", ["app"]);
+		const center = new FakeElement("main", ["center"]);
+		const toasts = new FakeElement("div", ["toasts"]);
+		app.append(center, toasts);
+		root.append(app);
+
+		// A sheet the person works in, and over it a question: the wrapper modal.tsx gives what is asked.
+		const sheetPortal = new FakeElement("div");
+		const sheetOverlay = new FakeElement("div", ["overlay"]);
+		sheetPortal.append(sheetOverlay);
+
+		const askedPortal = new FakeElement("div");
+		const askedWrapper = new FakeElement("div", ["overlay-asked"]);
+		const shade = new FakeElement("div", ["overlay-shade"]);
+		const stage = new FakeElement("div", ["overlay", "asked"]);
+		const dialog = new FakeElement("form", ["dialog"]);
+		stage.append(dialog);
+		askedWrapper.append(shade, stage);
+		askedPortal.append(askedWrapper);
+
+		body.append(root, sheetPortal, askedPortal);
+
+		const prevBody = (globalThis as any).document.body;
+		(globalThis as any).document.body = body;
+		try {
+			const made = isolateOutsideOverlay(askedWrapper as unknown as HTMLElement);
+			expect(center.inert).toBe(true);
+			expect(sheetPortal.inert).toBe(true);
+			// The shade takes the click that closes, the dialog its own, a notice the click that dismisses it.
+			expect(shade.inert).toBe(false);
+			expect(stage.inert).toBe(false);
+			expect(dialog.inert).toBe(false);
+			expect(askedWrapper.inert).toBe(false);
+			expect(toasts.inert).toBe(false);
+			expect(made.length).toBe(2);
+		} finally {
+			(globalThis as any).document.body = prevBody;
+		}
+	});
+
+	test("questions and picks are asked; a sheet the person works in is not", () => {
+		const modal = readSrc("../src/view/modal.tsx");
+		expect(modal).toContain('<div class="overlay-asked" ref={overlay}>');
+		expect(modal).toContain('<div class="overlay-shade" onMouseDown={() => props.onClose()} />');
+		expect(modal).toContain('<div class={["overlay", "asked", { top: props.top }]}>{renderDialog()}</div>');
+		// The sheet's own shape is as it was: one overlay that is its own shade.
+		expect(modal).toContain('<div class={["overlay", { top: props.top }]} ref={overlay} onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>');
+
+		const opens = (src: string) => src.match(/<Modal\b[^>]*>/g) ?? [];
+		const dialogs = opens(readSrc("../src/view/dialogs.tsx"));
+		expect(dialogs.length).toBe(5);
+		for (const open of dialogs) expect(open).toMatch(/\sasked\s/);
+		const picks = opens(readSrc("../src/view/QuickPick.tsx"));
+		expect(picks.length).toBe(1);
+		for (const open of picks) expect(open).toMatch(/\sasked\s/);
+		// Each of these raises notices of its own while it stands, and one behind it would be lost.
+		for (const file of ["../src/view/Settings.tsx", "../src/view/StyleProfile.tsx", "../src/view/editor/CsvFormatDialog.tsx"]) {
+			const sheets = opens(readSrc(file));
+			expect(sheets.length).toBeGreaterThan(0);
+			for (const open of sheets) expect(open).not.toMatch(/\sasked\s/);
+		}
+	});
+
 	test("modal.tsx portals to document.body, guards IME, syncs isolation, and restores focus to underlying modal", () => {
 		const src = readSrc("../src/view/modal.tsx");
 		expect(src).toContain("Portal");

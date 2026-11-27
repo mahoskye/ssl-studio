@@ -125,8 +125,9 @@ describe("R9C CSS syntax, custom properties & --accent-fg contract", () => {
 			"--z-lightbox:",
 			"--z-menu:",
 			"--z-modal:",
-			"--z-row-menu:",
 			"--z-toast:",
+			"--z-asked:",
+			"--z-row-menu:",
 		]) {
 			expect(rootBlock).toContain(token);
 		}
@@ -243,9 +244,11 @@ describe("R9C strict Z-index hierarchy across all stylesheets, cmTheme.ts & cmCo
 		const zLightbox = zIndexOf(cmLiveCss, /^\.md-lightbox-modal\s*\{/m);
 		const zMenuFloating = zIndexOf(styleCss, /^\.menu-pop-floating\s*\{/m);
 		const zOverlay = zIndexOf(styleCss, /^\.overlay\s*\{/m);
+		const zAskedShade = zIndexOf(styleCss, /^\.overlay-shade\s*\{/m);
+		const zToasts = zIndexOf(styleCss, /^\.toasts\s*\{/m);
+		const zAsked = zIndexOf(styleCss, /^\.overlay\.asked\s*\{/m);
 		const zRowMenuShade = zIndexOf(styleCss, /^\.row-menu-shade\s*\{/m);
 		const zRowMenuHost = zIndexOf(styleCss, /^\.row-menu-host\s*\{/m);
-		const zToasts = zIndexOf(styleCss, /^\.toasts\s*\{/m);
 
 		// Tier 1-20: Editor overlays & sticky bars
 		expect(zPlanControls).toBe(6);
@@ -285,9 +288,11 @@ describe("R9C strict Z-index hierarchy across all stylesheets, cmTheme.ts & cmCo
 		expect(zMenuFloating).toBe(70);
 		expect(zOverlay).toBe(80);
 		expect(zLightbox).toBe(80);
+		expect(zAskedShade).toBe(80);
+		expect(zToasts).toBe(82);
+		expect(zAsked).toBe(83);
 		expect(zRowMenuShade).toBe(84);
 		expect(zRowMenuHost).toBe(85);
-		expect(zToasts).toBe(95);
 
 		// Strictly monotonic chain across all tiers
 		expect(zCmPanelsTop).toBeLessThan(zGraphFind);
@@ -296,29 +301,57 @@ describe("R9C strict Z-index hierarchy across all stylesheets, cmTheme.ts & cmCo
 		expect(zTableCellPicker).toBeLessThan(zMenuFloating);
 		expect(zMenuFloating).toBeLessThan(zOverlay);
 		expect(zLightbox).toBe(zOverlay);
-		expect(zOverlay).toBeLessThan(zRowMenuShade);
+		// The notices stand over a sheet the person works in and over the shade of what is asked; what is asked stands
+		// over the notices; a menu opened in a dialog stands over them all.
+		expect(zAskedShade).toBe(zOverlay);
+		expect(zOverlay).toBeLessThan(zToasts);
+		expect(zToasts).toBeLessThan(zAsked);
+		expect(zAsked).toBeLessThan(zRowMenuShade);
 		expect(zRowMenuShade).toBeLessThan(zRowMenuHost);
-		expect(zRowMenuHost).toBeLessThan(zToasts);
 	});
 
-	test("no stylesheet, cmTheme.ts, or cmCompletion.ts declares any z-index above the 95 toast ceiling", () => {
+	test("no stylesheet, cmTheme.ts, or cmCompletion.ts declares any z-index above the row menu's 85", () => {
 		for (const file of CSS_FILES) {
 			const src = read(file);
 			for (const m of src.matchAll(/z-index:\s*(\d+)/g)) {
-				expect(Number(m[1])).toBeLessThanOrEqual(95);
+				expect(Number(m[1])).toBeLessThanOrEqual(85);
 			}
 		}
 		for (const src of [cmThemeTs, cmCompletionTs]) {
 			for (const m of src.matchAll(/zIndex:\s*["']?(\d+)["']?/g)) {
-				expect(Number(m[1])).toBeLessThanOrEqual(95);
+				expect(Number(m[1])).toBeLessThanOrEqual(85);
 			}
 		}
+	});
+
+	test("what is asked lets a click through beside its dialog, to a notice or to the shade that closes it", () => {
+		const asked = blockOf(styleCss, /^\.overlay\.asked\s*\{/m);
+		expect(asked).toContain("pointer-events: none;");
+		expect(asked).toContain("background: none;");
+		expect(blockOf(styleCss, /^\.overlay\.asked > \*\s*\{/m)).toContain("pointer-events: auto;");
+		expect(blockOf(styleCss, /^\.overlay-shade\s*\{/m)).toContain("background: var(--overlay);");
 	});
 
 	test(".toasts positions above the scaled status bar using calc(var(--status-height) + var(--space-5))", () => {
 		const toasts = blockOf(styleCss, /\.toasts\s*\{/);
 		expect(toasts).toContain("bottom: calc(var(--status-height) + var(--space-5));");
 		expect(toasts).not.toContain("bottom: 36px");
+	});
+});
+
+describe("The set-up offer in a narrow window", () => {
+	test("its two answers go under the text as a pair, rather than leave the text a word to a line", () => {
+		const bar = blockOf(styleCss, /^\.setup-bar\s*\{/m);
+		expect(bar).toContain("flex-wrap: wrap;");
+		expect(bar).toContain("justify-content: flex-end;");
+		// The text asks for a measure it can be read at; with less than that beside the answers, they wrap.
+		expect(blockOf(styleCss, /^\.setup-bar span\s*\{/m)).toContain("flex: 1 1 calc(260px * var(--ui-scale));");
+		expect(blockOf(styleCss, /^\.setup-actions\s*\{/m)).toContain("flex: none;");
+		// One group, so "Not now" never drops to a row of its own under "Set up project".
+		const app = read("src/view/App.tsx");
+		const group = /<div class="setup-actions">([\s\S]*?)<\/div>/.exec(app)?.[1] ?? "";
+		expect(group).toContain("Set up project");
+		expect(group).toContain("Not now");
 	});
 });
 
