@@ -4,6 +4,10 @@ A desktop IDE for STARLIMS SSL, built on Bun. Code can be read and edited as
 text or as visual blocks, and the two stay in step because the text is always
 the source of truth.
 
+Write-ups of the work on it are at
+[mahoskye.github.io/ssl-studio](https://mahoskye.github.io/ssl-studio/),
+published from `site/`.
+
 - **Text mode:** a full editor backed by
   [`starlims-lsp`](https://github.com/mahoskye/starlims-lsp): completion,
   hover, diagnostics, formatting, navigation, and semantic highlighting: the

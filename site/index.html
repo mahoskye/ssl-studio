@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSL Studio Writing</title>
+<meta name="description" content="Write-ups of the work on SSL Studio, a desktop IDE for STARLIMS SSL.">
+<style>
+:root {
+	--bg: #fbf8f3;
+	--surface: #ffffff;
+	--fg: #23201c;
+	--muted: #6b645a;
+	--rule: #e6dfd3;
+	--accent: #a4471d;
+	--accent-soft: #f6e6db;
+	--code-bg: #f1ece4;
+	--good: #2f6f3e;
+	--good-soft: #e3f0e4;
+	--warn: #8a5a00;
+	--warn-soft: #f8edd3;
+	--shadow: 0 1px 2px rgba(40, 30, 20, .06), 0 4px 16px rgba(40, 30, 20, .05);
+	color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme="light"]) {
+		--bg: #1b1916;
+		--surface: #24211d;
+		--fg: #ece6dc;
+		--muted: #a49b8e;
+		--rule: #38332c;
+		--accent: #e88a5a;
+		--accent-soft: #3a2a20;
+		--code-bg: #2c2823;
+		--good: #8fcf9c;
+		--good-soft: #1f3324;
+		--warn: #e2b55c;
+		--warn-soft: #3a2f18;
+		--shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 16px rgba(0, 0, 0, .25);
+		color-scheme: dark;
+	}
+}
+:root[data-theme="dark"] {
+	--bg: #1b1916;
+	--surface: #24211d;
+	--fg: #ece6dc;
+	--muted: #a49b8e;
+	--rule: #38332c;
+	--accent: #e88a5a;
+	--accent-soft: #3a2a20;
+	--code-bg: #2c2823;
+	--good: #8fcf9c;
+	--good-soft: #1f3324;
+	--warn: #e2b55c;
+	--warn-soft: #3a2f18;
+	--shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 16px rgba(0, 0, 0, .25);
+	color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 17px/1.65 Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif; }
+.ui { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif; }
+a { color: var(--accent); text-underline-offset: 2px; }
+.wrap { max-width: 720px; margin: 0 auto; padding: 0 16px; }
+header { padding: 56px 0 28px; border-bottom: 1px solid var(--rule); }
+.kicker { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); font-weight: 600; margin: 0 0 14px; }
+h1 { font-size: clamp(30px, 5.4vw, 44px); line-height: 1.12; letter-spacing: -.01em; margin: 0 0 16px; font-weight: 700; }
+.dek { font-size: 20px; line-height: 1.5; color: var(--muted); margin: 0; }
+main { padding: 32px 0 8px; }
+.posts { list-style: none; margin: 0; padding: 0; display: grid; gap: 16px; }
+.post { display: block; padding: 20px 22px; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; box-shadow: var(--shadow); color: inherit; text-decoration: none; }
+.post:hover { border-color: var(--accent); }
+.post:focus-visible, a:focus-visible, .theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.post .when { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
+.post h2 { font-size: 23px; line-height: 1.25; margin: 0 0 8px; color: var(--fg); }
+.post p.about { margin: 0; color: var(--muted); font-size: 16.5px; line-height: 1.55; }
+footer { margin: 48px 0 0; padding: 24px 0 56px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 14px; }
+footer p { margin: 0 0 .6em; }
+.theme-toggle { position: absolute; top: 12px; right: 12px; padding: 6px 12px; border: 1px solid var(--rule); border-radius: 999px; background: var(--surface); color: var(--fg); font-size: 13px; cursor: pointer; box-shadow: var(--shadow); }
+.theme-toggle:hover { border-color: var(--accent); }
+@media (max-width: 480px) { body { font-size: 16.5px; } .dek { font-size: 18px; } header { padding-top: 52px; } .post { padding: 16px; } }
+</style>
+</head>
+<body>
+<button class="theme-toggle ui" type="button" aria-label="Switch between light and dark">Theme</button>
+<div class="wrap">
+<header>
+	<p class="kicker ui">SSL Studio · Writing</p>
+	<h1>Notes from building SSL Studio</h1>
+	<p class="dek">SSL Studio is a desktop IDE for STARLIMS SSL, built on Bun, with a code editor, visual blocks, a call graph and flowchart plans that all stay in step with the text. These are write-ups of the work on it.</p>
+</header>
+<main>
+	<ol class="posts" reversed>
+		<li>
+			<a class="post" href="editor-work-log/">
+				<p class="when ui">26–27 November 2026</p>
+				<h2>An editor that behaves like VS Code, types like Sublime Text, and says what it cannot do</h2>
+				<p class="about">Two days of adversarial review and repair on the code editor: completion that knows where it is, Sublime Text's keys, formatting you can trust, a language server whose silence is said out loud, and a last round on filters, marks and a checkbox you can hit.</p>
+			</a>
+		</li>
+	</ol>
+</main>
+<footer class="ui">
+	<p><a href="https://github.com/mahoskye/ssl-studio">The repository</a> · <a href="https://github.com/mahoskye/starlims-lsp">starlims-lsp</a>, the language server it is built on</p>
+</footer>
+</div>
+<script>
+(() => {
+	const root = document.documentElement;
+	const button = document.querySelector(".theme-toggle");
+	let saved = null;
+	try { saved = localStorage.getItem("blog-theme"); } catch {}
+	if (saved === "light" || saved === "dark") root.dataset.theme = saved;
+	const current = () => root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+	const label = () => { button.textContent = current() === "dark" ? "Light" : "Dark"; };
+	label();
+	button.addEventListener("click", () => {
+		const next = current() === "dark" ? "light" : "dark";
+		root.dataset.theme = next;
+		try { localStorage.setItem("blog-theme", next); } catch {}
+		label();
+	});
+	matchMedia("(prefers-color-scheme: dark)").addEventListener("change", label);
+})();
+</script>
+</body>
+</html>
