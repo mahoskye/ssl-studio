@@ -323,3 +323,43 @@ stays, because one case still reaches past the line asked for, and rightly:
 a statement with no `;` at all runs on into the next line, for the server
 as for STARLIMS. That answer is not applied
 (`test/pass4Regressions.test.ts` asks the pinned server both).
+
+## Reported on 2026-11-27
+
+Found by the second review of the editor, and checked against the server's
+own specification at 0.32.0 before they were reported: each answer breaks
+a rule the server's catalog states. Three defects, no feature of the IDE.
+
+Other findings of that review were left with the server as they are,
+because its specification calls them intended: a range format keeps its
+first line's indentation (formatting A2, so the IDE takes a selection's
+lines from a whole-document format, ADR 0043); Ctrl+Space after `oObj:Pre`
+gives the full list; a `:` after a space gives keywords; workspace symbols
+match by substring. `DoProc("X")` reaching a procedure of an `:INCLUDE`d
+script is a request the IDE has not made.
+
+| Request | Issue |
+| --- | --- |
+| L11 | mahoskye/starlims-lsp#378 |
+| L12 | mahoskye/starlims-lsp#379 |
+| L13 | mahoskye/starlims-lsp#380 |
+
+### L11: no rename of `.T.`, `.F.`, `.AND.`, `.OR.` or `.NOT.`
+
+Prepare-rename on `.T.` offers `T` as a name, and the rename then turns
+every `.T.` in the file into `.Z.` (or whatever was typed). The catalog
+says prepare-rename must refuse literals and operators. The IDE applies
+what the server answers, so it has nothing to guard here.
+
+### L12: one unit for columns and token lengths
+
+With non-ASCII text in a string (`°`, `µ`, `é`), signature help counts
+the wrong argument for a few characters after the next comma, and a
+SQL placeholder's hover can come back empty. The server compares character
+columns with `len` of a token's text, which counts bytes.
+
+### L13: `Me:` lists the class's own members
+
+In a class written in the workspace, `Me:` offers nothing; the catalog's
+A4 says the enclosing class's members are listed. The server looks only
+among the built-in classes.

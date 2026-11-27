@@ -40,6 +40,11 @@ which made a save take its changed lines from a format of the whole document.
   selection give the lines the same text.
 - A selection costs a format of the whole document: a few tenths of a second
   for a script of the largest size that is formatted so.
-- The server's range format is still used for the largest scripts; its
-  indentation of a selection from the first line is a defect of the server's,
-  to be reported there.
+- The server's range format is still used for the largest scripts. Its
+  keeping of a selection's base indentation from the first line is what its
+  own specification asks of a range format (formatting, A2: "the block's
+  base indentation is preserved"), so it is not a defect of the server's.
+
+**Corrected on 2026-11-27:** the last point said the server's behaviour was
+a defect, to be reported to starlims-lsp. Its specification calls it
+intended; the app taking the lines from a whole-document format is the fix.
