@@ -193,7 +193,7 @@ export const MENU_BAR: BarMenu[] = [
 			forFolder("Go to file…", "quick-open"),
 			forFolder("Go to symbol in the workspace…", "symbols"),
 			forFile("Go to symbol in file…", "quick-outline"),
-			text("Go to line…", "editor.action.gotoLine"),
+			{ label: "Go to line…", command: "go-to-line", needs: "text" },
 			"separator",
 			forFolder("Switch active working ticket…", "switch-active-ticket"),
 			forFolder("Open active ticket to side", "open-active-ticket-side"),
@@ -223,7 +223,6 @@ export const MENU_BAR: BarMenu[] = [
 		entries: [
 			{ label: "All commands…", command: "command-palette" },
 			{ label: "Keyboard shortcuts…", command: "keyboard-shortcuts" },
-			{ label: "The text editor's commands…", command: "editor-commands", needs: "text" },
 			"separator",
 			{ label: "About SSL Studio", command: "about" },
 		],

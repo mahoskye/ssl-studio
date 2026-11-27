@@ -402,8 +402,10 @@ export interface BackendApi {
 	/**
 	 * Writes a file's text, in the encoding it has. Text is not written over a file that is not text, unless
 	 * `asText` says the text is the file's own, read as text and edited: an editor saving what it opened.
+	 * `encoding` is the one the text was read in (`FileText.encoding`), which it is written in again; without one,
+	 * the file's is worked out from its bytes on disk.
 	 */
-	write(path: string, text: string, asText?: boolean): Promise<{ mtime: number }>;
+	write(path: string, text: string, asText?: boolean, encoding?: string): Promise<{ mtime: number }>;
 	create(path: string, kind: "file" | "dir"): Promise<void>;
 	rename(from: string, to: string): Promise<void>;
 	/** Keeps a file as it is on disk now in its local history, where it is text: before something is about to write over it. */

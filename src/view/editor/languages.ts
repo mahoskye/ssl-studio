@@ -20,6 +20,8 @@ import { LANGUAGES, languageFor, languageName, type LanguageDef } from "../../sh
 import { isDataSourceName } from "../../shared/lexicalTokens";
 import { splitAtLine } from "../../shared/sqlDataSource";
 import { backend } from "../backend";
+import { selectedLines } from "../lsp/edits";
+import { linesFromFormatted } from "../lsp/session";
 import { monaco } from "./monaco";
 import "monaco-editor/languages/definitions/markdown/register";
 import "monaco-editor/languages/definitions/sql/register";
@@ -486,6 +488,18 @@ for (const languageId of FORMATTABLE_NON_SSL_LANGUAGES) {
 			if (model.isDisposed() || model.getVersionId() !== version) return [];
 			if (!res.ok || !res.changed) return [];
 			return [{ range: model.getFullModelRange(), text: res.text }];
+		},
+	});
+	// Format Selection: the selected lines as "Format document" leaves them (ADR 0043). With no provider for a range,
+	// the editor's action did nothing and said nothing.
+	monaco.languages.registerDocumentRangeFormattingEditProvider(languageId, {
+		async provideDocumentRangeFormattingEdits(model, range, options) {
+			if (model.isDisposed()) return [];
+			const version = model.getVersionId();
+			const res = await computeNonSslFormat(model, options);
+			if (model.isDisposed() || model.getVersionId() !== version) return [];
+			if (!res.ok || !res.changed) return [];
+			return (linesFromFormatted(model, res.text, selectedLines(range)) ?? []).map((e) => ({ range: e.range, text: e.text ?? "" }));
 		},
 	});
 }

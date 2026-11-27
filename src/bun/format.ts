@@ -31,7 +31,11 @@ import {
 	type SqlDialect,
 	type SqlKeywordCase,
 	isSqlLanguage,
+	sqlDialectFor,
+	sqlDialectInfo,
+	sqlTokenLost,
 } from "../shared/format";
+import { keepCodeBlockSpaces } from "../shared/fencedFormat";
 
 const pluginXml: Plugin = ((pluginXmlModule as { default?: Plugin }).default ?? pluginXmlModule) as Plugin;
 
@@ -408,7 +412,8 @@ export async function formatDocument(
 		}
 		const defaultDialect: SqlDialect =
 			languageId === "pgsql" ? "postgresql" : languageId === "mysql" ? "mysql" : DEFAULT_SQL_DIALECT;
-		const language: SqlLanguage = isSqlDialect(req.sqlDialect) ? req.sqlDialect : defaultDialect;
+		const dialect = sqlDialectFor(path, isSqlDialect(req.sqlDialect) ? req.sqlDialect : defaultDialect);
+		const language: SqlLanguage = dialect;
 		const keywordCase = normalizeKeywordCase(req.sqlKeywordCase);
 		const rc = loadProjectPrettierConfig(path, workspaceRoot);
 		const rcTabWidth =
@@ -425,6 +430,13 @@ export async function formatDocument(
 				linesBetweenQueries: 1,
 				expressionWidth: Math.max(40, Math.min(printWidth, 60)),
 			});
+			const lost = sqlTokenLost(text, formattedBody);
+			if (lost) {
+				return {
+					ok: false,
+					error: `formatting it as ${sqlDialectInfo(dialect).label} would break up “${lost}”, so nothing was changed. If it is written for another database, choose that one under SQL dialect in Settings.`,
+				};
+			}
 			const normalized = formattedBody.replace(/\r?\n/g, eol) + eol;
 			return { ok: true, text: normalized, changed: normalized !== text, formatter: "sql-formatter" };
 		} catch (err) {
@@ -483,7 +495,7 @@ export async function formatDocument(
 				const effectiveEol =
 					options.endOfLine === "crlf" ? "\r\n" : options.endOfLine === "cr" ? "\r" : options.endOfLine === "lf" ? "\n" : eol;
 				const cleanHeader = header.replace(/(?:\r?\n[ \t]*)+$/, "\n").replace(/\r?\n/g, effectiveEol);
-				const formatted = `${cleanHeader}${formattedRest}`;
+				const formatted = keepCodeBlockSpaces(text, `${cleanHeader}${formattedRest}`);
 				return { ok: true, text: formatted, changed: formatted !== text, formatter: "prettier" };
 			}
 		}
@@ -493,7 +505,8 @@ export async function formatDocument(
 			const formatted = marked.mark ? printed.split(marked.mark).join("") : printed;
 			return { ok: true, text: formatted, changed: formatted !== text, formatter: "prettier" };
 		}
-		const formatted = await prettier.format(text, options);
+		const printed = await prettier.format(text, options);
+		const formatted = parser === "markdown" ? keepCodeBlockSpaces(text, printed) : printed;
 		return { ok: true, text: formatted, changed: formatted !== text, formatter: "prettier" };
 	} catch (err) {
 		return { ok: false, error: conciseError(err) };

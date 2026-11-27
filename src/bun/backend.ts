@@ -307,12 +307,12 @@ export function createBackend(host: Host, initial?: string) {
 			}
 			return out;
 		},
-		write: async (path, text, asText) => {
+		write: async (path, text, asText, encoding) => {
 			const ws = need();
 			const hist = history!;
 			const full = ws.inside(path);
 			return ws.alone(full, async (writeNow) => {
-				const result = await writeNow(text, asText);
+				const result = await writeNow(text, asText, encoding);
 				await keepWritten(hist, full, text);
 				return result;
 			});

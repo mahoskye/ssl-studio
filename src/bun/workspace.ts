@@ -36,7 +36,7 @@ import {
 import { createFileFilter } from "../shared/fileGlob";
 import { replaceSafeInText } from "../shared/menuBar";
 import { renameReplacing } from "./atomic";
-import { decode, encode, encodingOf, looksBinary, textOf, type Encoding } from "./encoding";
+import { decode, encode, encodingOf, isEncoding, looksBinary, textOf, type Encoding } from "./encoding";
 import { imageType, sizeText, SNIFF_BYTES } from "../shared/fileKind";
 import { UNLISTED } from "../shared/paths";
 import { Serial } from "./serial";
@@ -343,9 +343,9 @@ export class WorkspaceFiles {
 	 * they were asked for: asked for at once (Ctrl+S twice), they used to share the temporary file, and one failed
 	 * or the file was left with the older text.
 	 */
-	async write(path: string, text: string, asText = false) {
+	async write(path: string, text: string, asText = false, encoding?: string) {
 		const full = this.inside(path);
-		return writes.run(fileKey(full), () => this.writeNow(full, text, asText));
+		return writes.run(fileKey(full), () => this.writeNow(full, text, asText, encoding));
 	}
 
 	/**
@@ -365,9 +365,9 @@ export class WorkspaceFiles {
 	 * and writing it as one step (a replace across files), renaming it, throwing it away. The work is given the
 	 * write itself: `write` here would wait for the work it is part of.
 	 */
-	async alone<T>(path: string, work: (write: (text: string, asText?: boolean) => Promise<{ mtime: number }>) => Promise<T> | T): Promise<T> {
+	async alone<T>(path: string, work: (write: (text: string, asText?: boolean, encoding?: string) => Promise<{ mtime: number }>) => Promise<T> | T): Promise<T> {
 		const full = this.inside(path);
-		return this.held([full], () => work((text, asText = false) => this.writeNow(full, text, asText)));
+		return this.held([full], () => work((text, asText = false, encoding) => this.writeNow(full, text, asText, encoding)));
 	}
 
 	/**
@@ -538,7 +538,7 @@ export class WorkspaceFiles {
 		}
 	}
 
-	private async writeNow(full: string, text: string, asText: boolean) {
+	private async writeNow(full: string, text: string, asText: boolean, wanted?: string) {
 		// Re-check containment inside the serialized lock (blocks symlinks pointing outside root).
 		this.inside(full);
 		// A picture by its name is never text, even if the file does not exist yet.
@@ -583,7 +583,11 @@ export class WorkspaceFiles {
 		if (bytesNow && looksBinary(bytesNow) && !asText) {
 			throw new Error(`${relative(this.root, full)} is not text: it is not written over from here.`);
 		}
-		if (bytesNow) encoding = encodingOf(bytesNow);
+		// In the encoding the text was read in, where the editor says which: VS Code keeps a file's too. Worked out
+		// again from the bytes on disk, a Windows-1252 file that a save had left plain ASCII was written as UTF-8 at
+		// the next, its "µ" two bytes, while the editor still said Windows-1252.
+		if (isEncoding(wanted)) encoding = wanted;
+		else if (bytesNow) encoding = encodingOf(bytesNow);
 		let bytes: Uint8Array;
 		try {
 			bytes = encode(text, encoding);

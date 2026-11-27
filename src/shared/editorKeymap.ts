@@ -77,6 +77,13 @@ const LISTED = new Set(EDITOR_COMMANDS.map((command) => command.id));
 export const isEditorCommand = (id: string | undefined): boolean => Boolean(id && LISTED.has(id));
 export const editorCommandLabel = (id: string): string => EDITOR_COMMANDS.find((command) => command.id === id)?.label ?? id;
 
+/**
+ * "Go to Bracket", as the editor names a command, written as this app writes a command's name: "Go to bracket". A
+ * word after punctuation ("(Error, Warning, Info)") is a list of names, and stays as it is; so does a word written
+ * another way ("IntelliSense").
+ */
+export const sentenceCase = (label: string) => label.replace(/(?<=[A-Za-z] )([A-Z])([a-z]+)\b/g, (_, first: string, rest: string) => first.toLowerCase() + rest);
+
 /** One key of the editor's with what is held with it, as the editor reports its own keys. */
 export type EditorChord = { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean; keyLabel: string | null };
 

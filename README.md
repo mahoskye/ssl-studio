@@ -133,7 +133,8 @@ edits the file in the editor, and you save it.
 | Ctrl+N | New untitled file |
 | Ctrl+O | Open folder |
 | Ctrl+P, Ctrl+T | Go to file, go to symbol |
-| Ctrl+Shift+P | All commands |
+| Ctrl+Shift+P, F1 | All commands, the text editor's too |
+| Ctrl+G | Go to a line of the open file |
 | Ctrl+S, Ctrl+Alt+S | Save (formats the changed procedures), save all |
 | Ctrl+W, Ctrl+Shift+T | Close tab, reopen the last closed tab |
 | Ctrl+PageDown, Ctrl+PageUp | Next tab, previous tab |
@@ -145,7 +146,6 @@ edits the file in the editor, and you save it.
 | Ctrl+B, Ctrl+J | Side bar, bottom panel |
 | Ctrl+Shift+H | Ask the agent about the selection |
 | Ctrl+=, Ctrl+-, Ctrl+Shift+0 | Interface size: larger, smaller, reset |
-| F1 | The text editor's own commands |
 
 Every shortcut can be changed in Settings (Ctrl+,). The lists and trees, the
 editor tabs, Blocks, the plan chart and the call graph all work with the arrow

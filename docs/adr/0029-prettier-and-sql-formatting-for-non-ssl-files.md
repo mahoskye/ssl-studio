@@ -46,3 +46,4 @@ Under [ADR 0002](0002-text-is-the-source-of-truth.md),
 - Standalone SQL, HTML5 Form code, XML/XFD definitions, configs, and docs format cleanly with zero frontend bundle growth and full desktop bundle compatibility.
 - Teams with a `.prettierrc.json` get consistent formatting automatically, while STARLIMS projects without one get sensible SQL Server / Prettier defaults out of the box.
 - SQL formatting inside SSL string literals remains exclusively `starlims-lsp`'s responsibility.
+- Since [ADR 0045](0045-a-format-never-changes-what-code-says.md) a Markdown code block keeps the spaces at its lines' ends, an Oracle package is formatted as Oracle's, and a SQL format that would cut up an operator or a bound name is refused.

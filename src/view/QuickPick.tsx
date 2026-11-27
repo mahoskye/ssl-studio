@@ -6,7 +6,7 @@ import { FileMark } from "./FileMark";
 import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
 import { createAsyncQuery } from "./asyncQuery";
 import { backend } from "./backend";
-import { commands, keysShownFor, recentCommands, runCommand } from "./commands";
+import { commands, editorCommands, keysShownFor, recentCommands, runCommand } from "./commands";
 import { jumpToTableColumn } from "./editor/liveBridge";
 import { mdOutline } from "./editor/mdOutline";
 import { monaco } from "./editor/monaco";
@@ -407,7 +407,8 @@ function Picker(props: { mode: QuickMode }) {
 
 		if (mode() === "commands") {
 			// Recently used first, then the alphabet; a query matches words in any order.
-			const { list, recent } = orderCommands(commands, recentCommands());
+			// The app's, and the open text editor's (ADR 0044).
+			const { list, recent } = orderCommands([...commands, ...editorCommands()], recentCommands());
 			const searching = Boolean(query().trim());
 			return filterCommands(query(), list).map((c, i) => ({
 				label: c.label,

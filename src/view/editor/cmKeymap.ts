@@ -77,7 +77,7 @@ import { listEnter } from "../../shared/markdownText";
 import { backend } from "../backend";
 import { docs } from "../project";
 import { showPanel } from "../panels/registry";
-import { canonical, notify, state as appState } from "../state";
+import { canonical, notify, openLinePicker, state as appState } from "../state";
 import { focusLiveWidgetAt, historyFallbackFacet, rawEditBlockField, type HistoryFallback } from "./cmLiveShared";
 import { IMAGE_FILE_RE, saveImageAttachment } from "./imageResolve";
 import {
@@ -1106,7 +1106,8 @@ export const LIVE_COMMANDS: Readonly<Partial<Record<string, Command>>> = {
 	"editor.action.startFindReplaceAction": (view) => openFind(view, true),
 	"editor.action.nextMatchFindAction": findNext,
 	"editor.action.previousMatchFindAction": findPrevious,
-	"editor.action.gotoLine": gotoLine,
+	// The app's box at the top of the window, as in the code editor (ADR 0044).
+	"editor.action.gotoLine": () => (openLinePicker(), true),
 	"editor.fold": foldCode,
 	"editor.unfold": unfoldCode,
 	"editor.foldAll": foldAll,

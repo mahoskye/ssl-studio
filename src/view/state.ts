@@ -12,7 +12,7 @@ import { isDataSourceName } from "../shared/lexicalTokens";
 import { sqlBodyStart } from "../shared/sqlDataSource";
 import { getPath, SERVER_DEFAULTS } from "../shared/styleProfile";
 import { session } from "./lsp/session";
-import { changedRanges, minimalReplace } from "./lsp/edits";
+import { changedRanges, FORMAT_WHOLE_UP_TO, minimalReplace } from "./lsp/edits";
 import { ask, choose } from "./dialogs";
 import { closeComparison, closeReview, openReview } from "./editor/Review";
 import { syncWorkspaceThreads } from "./agent/store";
@@ -118,7 +118,7 @@ const [state, setStore] = createStore({
 	cursor: { line: 1, column: 1 },
 	/** Bumped when the tree should reload a folder. */
 	treeVersion: 0,
-	quickPick: null as null | "files" | "commands" | "symbols" | "outline",
+	quickPick: null as null | "files" | "commands" | "symbols" | "outline" | "line",
 	/** Counts up when an open file turns out to be text where it was not, or the other way round, or a picture changed on disk: what shows it looks again. */
 	kindVersion: 0,
 });
@@ -1152,6 +1152,18 @@ export function setHouseIndentEverywhere() {
 	for (const doc of docs.values()) setHouseIndent(doc.model);
 }
 
+/**
+ * "Go to line" in the box at the top of the window, as VS Code has it, for every editor and from anywhere (ADR 0044):
+ * the code editor's own box opened inside the editor, unlike every other list of the app's.
+ */
+export function openLinePicker() {
+	const doc = activeDoc();
+	if (!doc || doc.binary) return notify(doc ? "The open file is not text: it has no lines to go to." : "Open a file to go to a line of it.");
+	setState((s) => {
+		s.quickPick = "line";
+	});
+}
+
 /** Opens a floating untitled buffer (Untitled-1, Untitled-2, ...) that stays in memory until saved. */
 export function newUntitled(group = snapshot(state).activeGroup, language = "plaintext"): string {
 	const cur = snapshot(state);
@@ -2157,7 +2169,7 @@ export async function save(
 		const text = doc.model.getValue();
 		const created = await guarded(async () => {
 			await backend.create(target, "file").catch(() => undefined);
-			return backend.write(target, text, true);
+			return backend.write(target, text, true, doc.encoding);
 		});
 		if (!created) return false;
 		if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
@@ -2233,7 +2245,7 @@ export async function save(
 	// "It was read as text": a file that holds a zero byte the user typed is still theirs to save.
 	let result: { mtime: number };
 	try {
-		result = await backend.write(path, text, true);
+		result = await backend.write(path, text, true, doc.encoding);
 	} catch (e: any) {
 		// Said as a notice, as every failure is, and told to whoever cannot see one.
 		const message = String(e?.message ?? e);
@@ -2267,12 +2279,6 @@ export const historyChanged = (() => {
 		listen: (l: (path: string) => void) => (listeners.add(l), () => listeners.delete(l)),
 	};
 })();
-
-/**
- * The size, in characters, up to which a save formats the whole document to take the changed lines from. The
- * server formats a script of this size in a few tenths of a second; a larger one is asked for its ranges alone.
- */
-const FORMAT_WHOLE_UP_TO = 400_000;
 
 /**
  * How long a save waits for the language server to format its changed lines, in milliseconds. The server is the only

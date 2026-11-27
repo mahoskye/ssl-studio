@@ -19,12 +19,11 @@ import { countHistoryEntries, type SizeReport } from "../shared/houseStyle";
 import { encodingName, eolName } from "../shared/fileKind";
 import { agent } from "./agent/store";
 import { useDocAudit } from "./docAudit";
-import { activeLiveEditor } from "./editor/liveBridge";
 import { pickLanguageMode } from "./editor/languagePicker";
 import { languageName } from "./editor/languages";
 import { monaco } from "./editor/monaco";
 import { review } from "./editor/Review";
-import { measure } from "./editor/textmate";
+import { measureKept } from "./editor/textmate";
 import { branchText, changedCount, gitStatus } from "./git";
 import { lspAnswering } from "./lsp/session";
 import { counts } from "./panels/Problems";
@@ -32,7 +31,7 @@ import { showPanel } from "./panels/registry";
 import { chooseFromMenu } from "./panels/RowMenu";
 import { isPlanPath } from "./plan/model";
 import { isMarkdown, isTable } from "./project";
-import { activeDoc, activePath, displayName, markdownMode, notify, planMode, restartLsp, setState, state, tableTextMode } from "./state";
+import { activeDoc, activePath, displayName, markdownMode, notify, openLinePicker, planMode, restartLsp, setState, state, tableTextMode } from "./state";
 
 const [size, setSize] = createSignal<SizeReport | null>(null);
 export { size };
@@ -51,7 +50,7 @@ function useSizeMeter() {
 			const update = () => {
 				if (doc.model.isDisposed()) return;
 				const text = doc.model.getValue();
-				const { codeLines, bannerLines } = measure(text);
+				const { codeLines, bannerLines } = measureKept(doc.model, text);
 				setSize({ bytes: new TextEncoder().encode(text).length, codeLines, historyEntries: countHistoryEntries(bannerLines) });
 			};
 			update();
@@ -67,18 +66,9 @@ function useSizeMeter() {
 	);
 }
 
-/** Opens the text editor's "go to line". Works in both CodeMirror Live Preview and Monaco. */
+/** Opens "go to line": the app's box at the top of the window, for every editor (ADR 0044). */
 async function goToLine() {
-	const live = activeLiveEditor();
-	if (live) {
-		live.runAction("editor.action.gotoLine");
-		return;
-	}
-	const { activeEditor } = await import("./editor/EditorGroup");
-	const editor = activeEditor();
-	if (!editor) return;
-	editor.focus();
-	await editor.getAction("editor.action.gotoLine")?.run();
+	openLinePicker();
 }
 
 /** The open file's line ends, as the editor has them now: they change with the text, and by hand. */

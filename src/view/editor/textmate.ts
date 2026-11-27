@@ -133,25 +133,78 @@ export function applyTokenTheme(theme: IRawTheme): monaco.editor.ITokenThemeRule
  * comment; the banner is the run of comment and blank lines the file opens with.
  */
 export function measure(text: string): { codeLines: number; bannerLines: string[] } {
+	return measureKept(null, text);
+}
+
+/** One line read by the grammar: whether it holds code, and the state the next line starts in. */
+function readLine(active: IGrammar, line: string, stack: StateStack): { code: boolean; stack: StateStack } {
+	const result = active.tokenizeLine2(line, stack, 500);
+	for (let i = 0; i < result.tokens.length; i += 2) {
+		const start = result.tokens[i]!;
+		const end = i + 2 < result.tokens.length ? result.tokens[i + 2]! : line.length;
+		if (TOKEN_TYPE(result.tokens[i + 1]!) !== COMMENT_TOKEN && line.slice(start, end).trim()) return { code: true, stack: result.ruleStack };
+	}
+	return { code: false, stack: result.ruleStack };
+}
+
+/** What the meter last read of a document: its lines, the state after each, and which hold code. */
+type Read = { grammar: IGrammar; lines: string[]; after: StateStack[]; code: Uint8Array };
+const reads = new WeakMap<object, Read>();
+
+/**
+ * `measure`, for a document that is measured again as it is written in (`owner`, its model): only the lines that
+ * changed are read again, and those after them until the grammar is in the state it was in there before. Read
+ * whole after each pause in typing, a script of 6,500 lines held the page for a tenth of a second, and one of
+ * 52,000 lines for three quarters of one.
+ */
+export function measureKept(owner: object | null, text: string): { codeLines: number; bannerLines: string[] } {
 	const active = grammar;
 	if (!active) return { codeLines: 0, bannerLines: [] };
-	let stack = INITIAL;
+	const lines = text.split(/\r?\n/);
+	const was = owner ? reads.get(owner) : undefined;
+	const old = was && was.grammar === active ? was : undefined;
+	const after: StateStack[] = new Array(lines.length);
+	const code = new Uint8Array(lines.length);
+	// The lines the same at the start, and at the end, as when last read.
+	let same = 0;
+	if (old) {
+		const most = Math.min(old.lines.length, lines.length);
+		while (same < most && old.lines[same] === lines[same]) same++;
+		for (let i = 0; i < same; i++) {
+			after[i] = old.after[i]!;
+			code[i] = old.code[i]!;
+		}
+	}
+	const shift = old ? lines.length - old.lines.length : 0;
+	let tail = 0;
+	if (old) {
+		const most = Math.min(old.lines.length, lines.length) - same;
+		while (tail < most && old.lines[old.lines.length - 1 - tail] === lines[lines.length - 1 - tail]) tail++;
+	}
+	let stack = same ? after[same - 1]! : INITIAL;
+	for (let i = same; i < lines.length; i++) {
+		// Past what changed, a line that starts in the state it started in before reads as it did, and so does every
+		// line after it.
+		if (old && i >= lines.length - tail && stack.equals(i - shift > 0 ? old.after[i - shift - 1]! : INITIAL)) {
+			for (let k = i; k < lines.length; k++) {
+				after[k] = old.after[k - shift]!;
+				code[k] = old.code[k - shift]!;
+			}
+			break;
+		}
+		const read = readLine(active, lines[i]!, stack);
+		stack = read.stack;
+		after[i] = stack;
+		code[i] = read.code ? 1 : 0;
+	}
+	if (owner) reads.set(owner, { grammar: active, lines, after, code });
 	let codeLines = 0;
 	let bannerEnd = -1;
-	const lines = text.split(/\r?\n/);
-	lines.forEach((line, index) => {
-		const result = active.tokenizeLine2(line, stack, 500);
-		stack = result.ruleStack;
-		for (let i = 0; i < result.tokens.length; i += 2) {
-			const start = result.tokens[i]!;
-			const end = i + 2 < result.tokens.length ? result.tokens[i + 2]! : line.length;
-			if (TOKEN_TYPE(result.tokens[i + 1]!) !== COMMENT_TOKEN && line.slice(start, end).trim()) {
-				codeLines++;
-				if (bannerEnd < 0) bannerEnd = index;
-				break;
-			}
-		}
-	});
+	for (let i = 0; i < code.length; i++) {
+		if (!code[i]) continue;
+		codeLines++;
+		if (bannerEnd < 0) bannerEnd = i;
+	}
 	return { codeLines, bannerLines: lines.slice(0, bannerEnd < 0 ? lines.length : bannerEnd) };
 }
 

@@ -5,7 +5,7 @@ import { monaco } from "../editor/monaco";
 import { LEGEND, onSemanticThemeChange, refreshSemanticTokens, translateTokens } from "../editor/semantic";
 import { backend, on } from "../backend";
 import { LspClient } from "./client";
-import { applyTextEdits, formattedParts, smallEdits, trimEdit, typedLead } from "./edits";
+import { applyTextEdits, FORMAT_WHOLE_UP_TO, formattedParts, selectedLines, smallEdits, trimEdit, typedLead } from "./edits";
 import { decodeNameTokens, isDataSourceName, type LexToken, type NameToken } from "../../shared/lexicalTokens";
 import { isSqlLanguage } from "../../shared/format";
 import { baseName } from "../../shared/paths";
@@ -618,25 +618,7 @@ export class LspSession {
 		})) ?? []) as { range: Range; newText: string }[];
 		if (model.isDisposed() || model.getVersionId() !== version) return [];
 		if (!answer.length) return [];
-		const oldLines = model.getLinesContent();
-		const parts = formattedParts(oldLines, applyTextEdits(oldLines.join("\n"), answer).split(/\r?\n/), ranges);
-		if (!parts) return null;
-		const eol = model.getEOL();
-		const lineCount = oldLines.length;
-		return parts.flatMap((part): monaco.editor.IIdentifiedSingleEditOperation[] => {
-			const first = part.start + 1;
-			const last = part.start + part.oldLines.length;
-			// The formatter has none of these lines any more: they go, with a line break, so no empty line is left.
-			if (!part.newLines.length) {
-				if (last < lineCount) return [{ range: new monaco.Range(first, 1, last + 1, 1), text: "" }];
-				if (first > 1) return [{ range: new monaco.Range(first - 1, model.getLineMaxColumn(first - 1), last, model.getLineMaxColumn(last)), text: "" }];
-				return [{ range: new monaco.Range(first, 1, last, model.getLineMaxColumn(last)), text: "" }];
-			}
-			return smallEdits(part.oldLines, part.newLines).map((small) => ({
-				range: new monaco.Range(first + small.startLine, small.startColumn + 1, first + small.endLine, small.endColumn + 1),
-				text: small.text.replace(/\n/g, eol),
-			}));
-		});
+		return linesFromFormatted(model, applyTextEdits(model.getLinesContent().join("\n"), answer), ranges);
 	}
 
 	/**
@@ -818,6 +800,33 @@ export const renameFailure = (err: unknown) => {
 };
 
 /**
+ * The edits that leave the given line ranges (0-based, inclusive) of a document as they are in `formatted`, a format
+ * of the whole of it, and touch nothing else: the lines are taken from the formatted text (`formattedParts`), as the
+ * smallest edits that make the change. Null where the two texts cannot be set side by side.
+ */
+export function linesFromFormatted(model: monaco.editor.ITextModel, formatted: string, ranges: [number, number][]): monaco.editor.IIdentifiedSingleEditOperation[] | null {
+	const oldLines = model.getLinesContent();
+	const parts = formattedParts(oldLines, formatted.split(/\r?\n/), ranges);
+	if (!parts) return null;
+	const eol = model.getEOL();
+	const lineCount = oldLines.length;
+	return parts.flatMap((part): monaco.editor.IIdentifiedSingleEditOperation[] => {
+		const first = part.start + 1;
+		const last = part.start + part.oldLines.length;
+		// The formatter has none of these lines any more: they go, with a line break, so no empty line is left.
+		if (!part.newLines.length) {
+			if (last < lineCount) return [{ range: new monaco.Range(first, 1, last + 1, 1), text: "" }];
+			if (first > 1) return [{ range: new monaco.Range(first - 1, model.getLineMaxColumn(first - 1), last, model.getLineMaxColumn(last)), text: "" }];
+			return [{ range: new monaco.Range(first, 1, last, model.getLineMaxColumn(last)), text: "" }];
+		}
+		return smallEdits(part.oldLines, part.newLines).map((small) => ({
+			range: new monaco.Range(first + small.startLine, small.startColumn + 1, first + small.endLine, small.endColumn + 1),
+			text: small.text.replace(/\n/g, eol),
+		}));
+	});
+}
+
+/**
  * Puts the language server behind the editor's own features for SSL: completion, hover, going to a definition,
  * rename and the rest.
  *
@@ -829,6 +838,9 @@ export function registerProviders(tell: (text: string) => void = () => {}) {
 		async provideCompletionItems(model, position, context) {
 			if (!isServed(model)) return { suggestions: [] };
 			const result = await quiet(session.request("textDocument/completion", { ...doc(model), position: toPosition(position), context: completionContext(context) }), null);
+			// Closed while the server was asked (its tab shut, a scratch copy let go): there is no list to show, and
+			// reading the document now raised "Something went wrong".
+			if (model.isDisposed()) return { suggestions: [] };
 			const items = (result?.items ?? result ?? []) as any[];
 			const word = model.getWordUntilPosition(position);
 			const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
@@ -944,7 +956,7 @@ export function registerProviders(tell: (text: string) => void = () => {}) {
 			} catch (err: any) {
 				return { range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column), text: "", rejectReason: String(err?.message ?? "Nothing to rename here.") };
 			}
-			if (!result) return { range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column), text: "", rejectReason: "Nothing to rename here." };
+			if (!result || model.isDisposed()) return { range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column), text: "", rejectReason: "Nothing to rename here." };
 			const range = toRange(result.range ?? result);
 			const text = result.placeholder ?? model.getValueInRange(range);
 			renaming = { uri: model.uri.toString(), name: text };
@@ -979,6 +991,14 @@ export function registerProviders(tell: (text: string) => void = () => {}) {
 		async provideDocumentRangeFormattingEdits(model, range, options) {
 			if (!isServed(model) || model.isDisposed()) return [];
 			const version = model.getVersionId();
+			// The selected lines as "Format document" leaves them, as a save takes its changed lines (ADR 0037, ADR 0043).
+			// The server's range format indents what it is given from its first line: two lines of an :IF, the first
+			// at the wrong depth, both came back at that depth, the right one taken out of its block.
+			if (model.getValueLength() <= FORMAT_WHOLE_UP_TO) {
+				const whole = await quiet(session.formatRangesAsDocument(model, selectedLines(range), options), null);
+				if (model.isDisposed() || model.getVersionId() !== version) return [];
+				if (whole) return whole.map((e) => ({ range: e.range, text: e.text ?? "" }));
+			}
 			const edits = await quiet(
 				session.request("textDocument/rangeFormatting", {
 					...doc(model),

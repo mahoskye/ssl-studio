@@ -6,7 +6,8 @@ import { ask, browseWorkspaceFile, choose, quickPick, type QuickPickOption } fro
 import { activeEditor, lastActiveMarkdownPath } from "./editor/EditorGroup";
 import { formatFenceInModel, formatNonSslModel, hadRecentFormatError, languageName } from "./editor/languages";
 import { pickLanguageMode } from "./editor/languagePicker";
-import { editorTakesKey, liveTakesKey, markdownKeysNow } from "./editor/editorKeys";
+import { displayEditorKey, editorKeysOf, editorTakesKey, liveTakesKey, markdownKeysNow } from "./editor/editorKeys";
+import { editorCommandLabel, isEditorCommand, LIVE_EDITOR_COMMANDS, sentenceCase } from "../shared/editorKeymap";
 import { activeLiveEditor, isInMarkdownTextEditor, saveMarkdownSyncAnchor } from "./editor/liveBridge";
 import { linkWritten } from "../shared/docLinks";
 import { folderParts } from "../shared/docSections";
@@ -97,6 +98,7 @@ import {
 	notify,
 	openFile,
 	openFolder,
+	openLinePicker,
 	openToSide,
 	previousTab,
 	reopenClosedTab,
@@ -306,7 +308,8 @@ export const commands: Command[] = [
 	{ id: "quick-open", label: "Go to file…", run: () => setState((s) => { s.quickPick = "files"; }) },
 	{ id: "quick-outline", label: "Go to symbol in file…", detail: "Procedures, regions, headings, or sections in the active file", run: () => (activePathNow() ? setState((s) => { s.quickPick = "outline"; }) : notify("Open a file first.")) },
 	{ id: "symbols", label: "Go to symbol…", detail: "Anywhere in the workspace", run: () => setState((s) => { s.quickPick = "symbols"; }) },
-	{ id: "command-palette", label: "Show all commands", run: () => setState((s) => { s.quickPick = "commands"; }) },
+	{ id: "command-palette", label: "Show all commands", detail: "The app's, and the open text editor's", run: () => setState((s) => { s.quickPick = "commands"; }) },
+	{ id: "go-to-line", label: "Go to line…", detail: "In the open file", run: () => openLinePicker() },
 	{ id: "new-untitled", label: "New untitled file", detail: "A floating buffer that stays in memory until saved", run: () => void newUntitled() },
 	{ id: "new-file", label: "New file or folder…", detail: "In the Explorer's folder, or beside the open file", run: () => void explorerNewFile() },
 	{ id: "rename-file", label: "Rename…", detail: "The Explorer's file, or the open one", run: () => void explorerRename() },
@@ -374,7 +377,6 @@ export const commands: Command[] = [
 	{ id: "wrap-region", label: "Wrap in region…", detail: "The selected lines", run: () => void wrapInRegion() },
 	{ id: "insert-banner", label: "Insert file banner", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "banner")!) },
 	{ id: "insert-procedure", label: "Insert procedure", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "procedure")!) },
-	{ id: "editor-commands", label: "Show editor commands…", detail: "The text editor's own list", run: () => (activeLiveEditor() ? setState((s) => { s.quickPick = "commands"; }) : activeEditor()?.trigger("app", "editor.action.quickCommand", null)) },
 	// The project
 	{ id: "setup-project", label: "Set up project", detail: "Settings, README, AGENTS", run: () => void setUpProject() },
 	{ id: "undo-setup-project", label: "Undo set up project", detail: "Removes what it created and nobody has changed since", run: () => void undoSetUp() },
@@ -513,6 +515,62 @@ export const commands: Command[] = [
 ];
 
 /** The commands run from the command list this session, newest first (ten are kept). */
+/** What the palette calls one of the text editor's commands, so that it is not taken for one of the app's. */
+export const EDITOR_PREFIX = "editor:";
+
+/**
+ * The editor's commands that the app has a command of its own for, or that are this list: they would be in it twice.
+ * The editor's theme switch is not for an app with themes of its own.
+ */
+const NOT_LISTED_FROM_THE_EDITOR = new Set([
+	"editor.action.quickCommand",
+	"editor.action.gotoLine",
+	"editor.action.quickOutline",
+	"editor.action.formatDocument",
+	"editor.action.toggleHighContrast",
+	"editor.action.inspectTokens",
+]);
+
+/**
+ * The open text editor's commands, for the command list beside the app's own (ADR 0044): what VS Code lists in its
+ * one palette, and what F1 opened in a list of its own here, which Ctrl+Shift+P did not have. Named as Settings and
+ * the menus name them, with the keys they have now. Empty with no text editor open.
+ */
+export function editorCommands(): Command[] {
+	const live = activeLiveEditor();
+	const editor = live ? null : activeEditor();
+	const own = new Set(commands.map((c) => c.label.toLowerCase()));
+	const entry = (id: string, label: string, run: () => void): Command | null => {
+		if (NOT_LISTED_FROM_THE_EDITOR.has(id)) return null;
+		const name = isEditorCommand(id) ? editorCommandLabel(id) : sentenceCase(label);
+		if (!name || own.has(name.toLowerCase())) return null;
+		return { id: EDITOR_PREFIX + id, label: name, run };
+	};
+	if (live) return LIVE_EDITOR_COMMANDS.map((id) => entry(id, editorCommandLabel(id), () => (live.focus(), live.runAction(id)))).filter((c): c is Command => Boolean(c));
+	if (!editor) return [];
+	return editor
+		.getSupportedActions()
+		.filter((action) => action.label && action.isSupported())
+		.map((action) =>
+			entry(action.id, action.label, () => {
+				editor.focus();
+				void action.run();
+			}),
+		)
+		.filter((c): c is Command => Boolean(c));
+}
+
+/** One of the editor's commands' keys as the palette shows them: as Settings has them, or as the editor has them. */
+function editorKeysShown(id: string): string {
+	if (isEditorCommand(id)) return editorKeysOf(id, { map: keymap(), chosen: state.settings.keys ?? {} }).map(displayEditorKey).join(", ");
+	const service = (activeEditor() as unknown as { _standaloneKeybindingService?: { lookupKeybinding(id: string): { getLabel(): string | null } | undefined } } | null)?._standaloneKeybindingService;
+	try {
+		return service?.lookupKeybinding(id)?.getLabel() ?? "";
+	} catch {
+		return "";
+	}
+}
+
 let recent: string[] = [];
 export const recentCommands = () => recent;
 
@@ -565,7 +623,7 @@ async function formatActiveDocument() {
 
 /** Runs a command by id. `remember` puts it among the recently used, for the command list. */
 export function runCommand(id: string, options: { remember?: boolean } = {}) {
-	const command = commands.find((c) => c.id === id);
+	const command = commands.find((c) => c.id === id) ?? (id.startsWith(EDITOR_PREFIX) ? editorCommands().find((c) => c.id === id) : undefined);
 	if (!command) return;
 	if (options.remember) recent = noteUsed(recent, id);
 	command.run();
@@ -1797,7 +1855,8 @@ const KEYS: Record<string, string> = {
 	"ctrl+shift++": "zoom-in",
 	"ctrl+-": "zoom-out",
 	"ctrl+shift+0": "zoom-reset",
-	f1: "editor-commands",
+	f1: "command-palette",
+	"ctrl+g": "go-to-line",
 	f10: "menu-bar",
 };
 
@@ -1833,7 +1892,8 @@ export const keysFor = (id: string) => keysOf(id, keymap()).map(displayKey).join
  * The keys to show beside a command in a list of commands to run: its shortcuts, and for one of Markdown's
  * commands the keys it has while a document is edited (ADR 0041), which are the ones a writer presses.
  */
-export const keysShownFor = (id: string) => [...new Set([...keysOf(id, keymap()), ...keysOf(id, markdownKeysNow())])].map(displayKey).join(", ");
+export const keysShownFor = (id: string) =>
+	id.startsWith(EDITOR_PREFIX) ? editorKeysShown(id.slice(EDITOR_PREFIX.length)) : [...new Set([...keysOf(id, keymap()), ...keysOf(id, markdownKeysNow())])].map(displayKey).join(", ");
 
 /** Resolves a keydown press against `map`, preserving macOS Cmd+- as Zoom Out independently of Go Back overrides. */
 export function resolveCommandKey(
@@ -1861,6 +1921,10 @@ let editorChordAt = 0;
 
 export function installKeys() {
 	setFocusFallback(focusEditor);
+	// The code editor's own command list and "go to line" are the app's boxes at the top of the window, on the
+	// editor's keys too, as in VS Code (ADR 0044). A command registered again under its id is the one the editor runs.
+	monaco.editor.addCommand({ id: "editor.action.quickCommand", run: () => runCommand("command-palette") });
+	monaco.editor.addCommand({ id: "editor.action.gotoLine", run: () => runCommand("go-to-line") });
 	installRecentTabs();
 	window.addEventListener(
 		"keydown",

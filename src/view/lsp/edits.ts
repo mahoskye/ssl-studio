@@ -23,6 +23,22 @@ export function trimEdit(oldLines: string[], newLines: string[]): LineEdit | nul
 }
 
 /**
+ * The size, in characters, up to which a document is formatted whole to take some of its lines from (a save's
+ * changed lines, a selection). The server formats a script of this size in a few tenths of a second; a larger one
+ * is asked for its ranges alone.
+ */
+export const FORMAT_WHOLE_UP_TO = 400_000;
+
+/**
+ * The lines a selection covers, 0-based and inclusive, as Format Selection takes them: every line it touches, but
+ * not the line it ends at the very start of. An empty selection is its own line.
+ */
+export function selectedLines(range: { startLineNumber: number; endLineNumber: number; endColumn: number }): [number, number][] {
+	const last = range.endLineNumber > range.startLineNumber && range.endColumn === 1 ? range.endLineNumber - 1 : range.endLineNumber;
+	return [[range.startLineNumber - 1, last - 1]];
+}
+
+/**
  * The ranges of `after` (0-based, inclusive line pairs) that differ from
  * `before`, by a longest-common-subsequence diff over lines. Big files fall
  * back to the single trimmed range between the first and last change.

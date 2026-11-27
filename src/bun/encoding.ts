@@ -8,6 +8,10 @@ import { looksBinary as sharedLooksBinary, SNIFF_BYTES } from "../shared/fileKin
 
 export type Encoding = "utf-8" | "utf-8-bom" | "utf-16le" | "utf-16be" | "windows-1252";
 
+const ENCODINGS: readonly string[] = ["utf-8", "utf-8-bom", "utf-16le", "utf-16be", "windows-1252"];
+/** Whether a name is one of the encodings a file is read and written in here: what the view hands back on a save. */
+export const isEncoding = (name: unknown): name is Encoding => typeof name === "string" && ENCODINGS.includes(name);
+
 const isUtf32Bom = (bytes: Uint8Array) =>
 	bytes.length >= 4 &&
 	((bytes[0] === 0xff && bytes[1] === 0xfe && bytes[2] === 0x00 && bytes[3] === 0x00) ||

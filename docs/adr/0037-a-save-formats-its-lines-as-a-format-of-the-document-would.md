@@ -43,3 +43,5 @@ Under [ADR 0003](0003-the-language-server-owns-ssl.md).
   passes, and "Format document" may change those lines again.
 - Where the formatter's text cannot be set beside the document's (the two
   differ in too many lines), the range format is used for that save.
+- Since [ADR 0043](0043-format-selection-takes-its-lines-from-a-whole-format.md)
+  "Format Selection" takes its lines the same way.

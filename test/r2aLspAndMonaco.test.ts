@@ -149,6 +149,8 @@ function makeFakeModel(text: string, uriStr = "file:///ws/test.ssl", eol = "\n")
 		getEOL: () => eol,
 		getValue: () => value,
 		getLineCount: () => lines().length,
+		getLinesContent: () => lines(),
+		getValueLength: () => value.length,
 		getLineMaxColumn: (lineNumber: number) => (lines()[lineNumber - 1]?.length ?? 0) + 1,
 		validateRange: (r: MockRange) => {
 			const ls = lines();
@@ -816,6 +818,83 @@ describe("The code editor's everyday editing: completion ranges, format on save,
 		expect(whole("a;\nb;", "a;\n\nb;", "added").out).toBe("a;\n\nb;");
 		expect(whole("a;\n\n\nb;", "a;\nb;", "taken").out).toBe("a;\nb;");
 		expect(whole("a;\nb;", "a;\nb;", "same").edits).toEqual([]);
+	});
+
+	test("a completion for a document closed while the server was asked gives nothing, and raises nothing", async () => {
+		const { registerProviders, session: shared } = await import("../src/view/lsp/session");
+		const { monaco } = await import("../src/view/editor/monaco");
+		let provider: any;
+		const languages = monaco.languages as any;
+		const registered = languages.registerCompletionItemProvider;
+		languages.registerCompletionItemProvider = (_language: string, given: any) => ((provider = given), { dispose() {} });
+		registerProviders();
+		languages.registerCompletionItemProvider = registered;
+		const request = shared.request;
+		const model = makeFakeModel("Le", "file:///ws/closing.ssl");
+		// The tab is closed while the server works out its answer: the document is gone when the answer comes.
+		(shared as any).request = async () => (model.dispose(), { items: [{ label: "Len", kind: 3, insertText: "Len" }] });
+		// What read it then: a closed document's text raises, as Monaco's does ("TextModelPart is disposed!").
+		model.getWordUntilPosition = () => {
+			if (model.isDisposed()) throw new Error("TextModelPart is disposed!");
+			return { word: "Le", startColumn: 1, endColumn: 3 };
+		};
+		try {
+			expect(await provider.provideCompletionItems(model, { lineNumber: 1, column: 3 }, { triggerKind: 0 })).toEqual({ suggestions: [] });
+		} finally {
+			(shared as any).request = request;
+		}
+	});
+
+	test("Format Selection gives the selected lines as a format of the whole document leaves them, and only those", async () => {
+		const { registerProviders, session: shared } = await import("../src/view/lsp/session");
+		const { monaco } = await import("../src/view/editor/monaco");
+		let provider: any;
+		const languages = monaco.languages as any;
+		const registered = languages.registerDocumentRangeFormattingEditProvider;
+		languages.registerDocumentRangeFormattingEditProvider = (_language: string, given: any) => ((provider = given), { dispose() {} });
+		registerProviders();
+		languages.registerDocumentRangeFormattingEditProvider = registered;
+		// Line 4 is at the wrong depth, line 5 at the right one; line 2 is wrong too, and is not selected.
+		const text = ":PROCEDURE A;\n:PARAMETERS x;\n\t:IF x > 1;\ny := 1;\n\t\tz := 3;\n\t:ENDIF;\n:ENDPROC;";
+		const formatted = ":PROCEDURE A;\n\t:PARAMETERS x;\n\t:IF x > 1;\n\t\ty := 1;\n\t\tz := 3;\n\t:ENDIF;\n:ENDPROC;";
+		const request = shared.request;
+		const asked: string[] = [];
+		const answers: Record<string, unknown> = {
+			"textDocument/formatting": [{ range: { start: { line: 0, character: 0 }, end: { line: 6, character: 9 } }, newText: formatted }],
+			// What the server's range format gives for lines 4 and 5: both from the first one's depth.
+			"textDocument/rangeFormatting": [{ range: { start: { line: 3, character: 0 }, end: { line: 4, character: 9 } }, newText: "y := 1;\nz := 3;" }],
+		};
+		(shared as any).request = async (method: string) => (asked.push(method), answers[method] ?? null);
+		const select = async (startLine: number, endLine: number, endColumn: number) => {
+			const model = makeFakeModel(text, "file:///ws/select.ssl");
+			const edits = await provider.provideDocumentRangeFormattingEdits(model, new MockRange(startLine, 1, endLine, endColumn), { tabSize: 4, insertSpaces: false });
+			const out = model.applyEdits(edits.map((e: any) => ({ range: new MockRange(e.range.startLineNumber, e.range.startColumn, e.range.endLineNumber, e.range.endColumn), text: e.text })));
+			model.dispose();
+			return out.split("\n");
+		};
+		try {
+			const lines = await select(4, 5, 9);
+			expect(lines[3]).toBe("\t\ty := 1;");
+			expect(lines[4]).toBe("\t\tz := 3;");
+			// What was not selected is as it was.
+			expect(lines[1]).toBe(":PARAMETERS x;");
+			expect(asked).toEqual(["textDocument/formatting"]);
+			// A selection that ends at the very start of a line does not take that line in.
+			expect((await select(1, 3, 1))[1]).toBe("\t:PARAMETERS x;");
+			expect((await select(1, 3, 1))[3]).toBe("y := 1;");
+			// With no whole-document format to be had, the range format, as before.
+			asked.length = 0;
+			delete answers["textDocument/formatting"];
+			(shared as any).request = async (method: string) => {
+				asked.push(method);
+				if (method === "textDocument/formatting") throw new Error("not this time");
+				return answers[method] ?? null;
+			};
+			expect((await select(4, 5, 9))[4]).toBe("z := 3;");
+			expect(asked).toEqual(["textDocument/formatting", "textDocument/rangeFormatting"]);
+		} finally {
+			(shared as any).request = request;
+		}
 	});
 
 	test("a completion with no range from the server replaces the punctuation typed before the word, and is still found by it", async () => {

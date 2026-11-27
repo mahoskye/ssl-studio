@@ -16,6 +16,35 @@ export type SqlDialect = (typeof SQL_DIALECTS)[number]["id"];
 
 export const DEFAULT_SQL_DIALECT: SqlDialect = "tsql";
 
+/** Files that are Oracle's whatever dialect is chosen: package specs and bodies, and PL/SQL scripts. */
+export const ORACLE_ONLY_FILE = /\.(pks|pkb|pls)$/i;
+
+/** The dialect a SQL file is formatted in: the one chosen, except that an Oracle package is always Oracle's. */
+export function sqlDialectFor(path: string, chosen: SqlDialect): SqlDialect {
+	return ORACLE_ONLY_FILE.test(path) ? "plsql" : chosen;
+}
+
+/**
+ * What a format of SQL must give back as it found it: an operator of two characters, and a name bound with a colon
+ * (":nId"). A formatter that reads another dialect than the file's cuts them, and what it prints does something
+ * else or nothing: T-SQL's reader made "v_due := SYSDATE" into "v_due: = SYSDATE" and "id = :nId" into
+ * "id =: nId". Only spaces and the case of keywords are a formatter's to change, so neither can be fewer after it.
+ * Null when every one is there still; else the first that is not, as written.
+ */
+export function sqlTokenLost(before: string, after: string): string | null {
+	const count = (text: string, token: string) => text.split(token).length - 1;
+	for (const token of [":=", "=>", "<>", "!=", "<=", ">=", "||", "::"]) if (count(after, token) < count(before, token)) return token;
+	const binds = (text: string) => text.match(/:[A-Za-z_][A-Za-z0-9_$#]*/g) ?? [];
+	const kept = new Map<string, number>();
+	for (const bind of binds(after)) kept.set(bind, (kept.get(bind) ?? 0) + 1);
+	for (const bind of binds(before)) {
+		const left = kept.get(bind) ?? 0;
+		if (!left) return bind;
+		kept.set(bind, left - 1);
+	}
+	return null;
+}
+
 export type SqlKeywordCase = "upper" | "lower" | "preserve";
 
 export const FORMATTABLE_NON_SSL_LANGUAGES = new Set([

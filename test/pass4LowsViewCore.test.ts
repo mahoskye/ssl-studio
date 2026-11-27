@@ -1325,6 +1325,17 @@ describe("B9-5: Save all where nothing can be asked", () => {
 		);
 	});
 
+	test("a file is saved in the encoding it was read in, which the backend is told", async () => {
+		const file = "/ws/Degrees.ssl";
+		const wrote: unknown[][] = [];
+		rpcHandler = (method, args) => (method === "read" ? { text: "/* 37°C ;\n", mtime: 1, encoding: "windows-1252" } : method === "write" ? (wrote.push(args), { mtime: 2 }) : null);
+		await openFile(file, { keep: true });
+		flush();
+		typeInto(file, "/* µL ; */ ");
+		expect(await save(file)).toBe(true);
+		expect(wrote.map((args) => args[3])).toEqual(["windows-1252"]);
+	});
+
 	test("with nothing in the way everything is saved, and the card has nothing to say of files not saved", async () => {
 		const file = "/ws/Fine.ssl";
 		rpcHandler = (method) => (method === "read" ? { text: ":RETURN 1;\n", mtime: 1, encoding: "utf-8" } : method === "write" ? { mtime: 2 } : null);
