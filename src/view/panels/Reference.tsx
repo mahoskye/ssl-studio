@@ -16,7 +16,7 @@ import { docsFolderGlob, searchFor } from "./Search";
 import { SectionSplitter } from "./SectionSplitter";
 import { recall, remember } from "../graph/canvas";
 import { followReplyLink, renderReply } from "../agent/markdown";
-import { serverDown } from "./server";
+import { serverDown, serverSilent } from "./server";
 
 import { matchingProjectDocsForReference } from "../../shared/editorDocHelpers";
 export { matchingProjectDocsForReference };
@@ -172,6 +172,7 @@ export function Reference() {
 	/** Why the list is empty, and whether trying again can help. */
 	const empty = (): { text: string; retry?: boolean } => {
 		if (serverDown()) return { text: `${serverDown()} The reference comes from it.` };
+		if (serverSilent() && !entries().length) return { text: `${serverSilent()} The reference comes from it.` };
 		if ((reference.loading || (state.lsp.state === "running" && lspReadyEpoch() === 0)) && !entries().length) return { text: "Loading the reference…" };
 		if (reference()?.error) return { text: `The reference could not be loaded: ${reference()!.error}`, retry: true };
 		if (!entries().length) return { text: "The language server sent no reference entries.", retry: true };

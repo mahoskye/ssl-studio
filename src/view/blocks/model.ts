@@ -553,11 +553,14 @@ export function openFolds(memory: FoldMemory, path: string, root: Node, lineCoun
  * text it was read from: with the language server starting or stopped there is no such tree, and just after an
  * edit it is still being read.
  */
-export type Stale = "starting" | "stopped" | "reading";
+export type Stale = "starting" | "stopped" | "silent" | "reading";
 
-/** The reason, from the language server's state: with the server running, the tree is merely behind the text. */
-export function staleReason(lspState: string): Stale {
-	if (lspState === "running") return "reading";
+/**
+ * The reason, from the language server's state: with the server running and answering, the tree is merely behind
+ * the text. One that runs and does not answer (`answering` false) will not catch up "in a moment".
+ */
+export function staleReason(lspState: string, answering = true): Stale {
+	if (lspState === "running") return answering ? "reading" : "silent";
 	return lspState === "starting" || lspState === "restarting" ? "starting" : "stopped";
 }
 
@@ -570,10 +573,12 @@ export function staleNotice(reason: Stale, what: "change" | "edit"): string {
 	if (what === "edit") {
 		if (reason === "starting") return "The language server is still starting, so the edit is not made yet. It is kept open: confirm it again in a moment, or press Escape to drop it.";
 		if (reason === "stopped") return "The language server is not running, so the edit is not made yet. It is kept open: restart the server from the status bar and confirm it again, or press Escape to drop it.";
+		if (reason === "silent") return "The language server is not answering, so the edit is not made yet. It is kept open: restart the server from the status bar and confirm it again, or press Escape to drop it.";
 		return "The blocks are still being read from the text, so the edit is not made yet. It is kept open: confirm it again in a moment, or press Escape to drop it.";
 	}
 	if (reason === "starting") return "The language server is still starting, and blocks cannot be changed until it is running. Nothing was changed.";
 	if (reason === "stopped") return "The language server is not running, and blocks cannot be changed without it. Nothing was changed: restart it from the status bar, or switch to Text.";
+	if (reason === "silent") return "The language server is not answering, and blocks cannot be changed without it. Nothing was changed: restart it from the status bar, or switch to Text.";
 	return "The blocks are still being read from the text. Nothing was changed: try again in a moment.";
 }
 

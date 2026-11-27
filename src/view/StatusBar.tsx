@@ -26,6 +26,7 @@ import { monaco } from "./editor/monaco";
 import { review } from "./editor/Review";
 import { measure } from "./editor/textmate";
 import { branchText, changedCount, gitStatus } from "./git";
+import { lspAnswering } from "./lsp/session";
 import { counts } from "./panels/Problems";
 import { showPanel } from "./panels/registry";
 import { chooseFromMenu } from "./panels/RowMenu";
@@ -140,7 +141,7 @@ export function StatusBar() {
 	const [cmds] = createAsyncQuery(() => import("./commands").catch(() => null));
 	const problemsKeys = () => cmds()?.keysFor("problems") ?? "";
 
-	const lsp = createMemo(() => lspIndicator(state.lsp, state.info?.lsp, Boolean(state.workspace)));
+	const lsp = createMemo(() => lspIndicator(state.lsp, state.info?.lsp, Boolean(state.workspace), lspAnswering()));
 	const agentInfo = createMemo(() => agentIndicator(agent.status, state.info?.opencode));
 
 	const surface = createMemo(() => {

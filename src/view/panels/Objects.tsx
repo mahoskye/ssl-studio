@@ -53,7 +53,7 @@ import { MarkdownInspector } from "./MarkdownInspector";
 import { showPanel } from "./registry";
 import { chooseFromMenu, type RowMenuEntry } from "./RowMenu";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows, type Point, type RowsApi } from "./Rows";
-import { serverDown } from "./server";
+import { serverDown, serverSilent, sslOutlineEmpty } from "./server";
 
 registerMarkdownPanelOpener(() => showPanel("objects"));
 
@@ -259,6 +259,7 @@ function Procedures(props: { filter: string }) {
 	const fileOf = (uri: string) => relativeTo(state.workspace?.root, monaco.Uri.parse(uri).fsPath);
 	const empty = () => {
 		if (serverDown()) return `${serverDown()} The workspace's procedures come from it.`;
+		if (serverSilent() && !all()) return `${serverSilent()} The workspace's procedures come from it.`;
 		if ((all.loading || (state.lsp.state === "running" && lspReadyEpoch() === 0)) && !all()) return "Reading the workspace's procedures…";
 		if (all()?.error) return `The language server could not list the workspace's procedures: ${all()!.error}`;
 		if (!procedures().length) return "The language server found no procedures in the workspace.";
@@ -1228,11 +1229,7 @@ export function SymbolOutline(props: { filter?: string; compact?: boolean; label
 		if (doc && hasOutline(language) && !filter()) return `This file has no ${outlineOf[language!] ?? "outline"} yet.`;
 		if (doc && hasOutline(language)) return `Nothing here matches “${filter()}”. Clear the filter to see everything.`;
 		if (!doc || language !== "ssl") return props.compact ? "No outline for this file." : "This kind of file has no outline: SSL, Markdown, CSV, Plan, TOML, INI, JSON, SQL and YAML files do.";
-		if (serverDown()) return `${serverDown()} This file's outline comes from it.`;
-		if (reading() === "failed") return `The language server could not list this file's outline: ${failure()}`;
-		if (reading() !== "read") return "Reading this file's outline…";
-		if (!symbols().length) return props.compact ? "No regions or procedures yet." : "This file has no regions, procedures or public variables yet.";
-		return `Nothing here matches “${filter()}”. Clear the filter to see everything.`;
+		return sslOutlineEmpty({ reading: reading(), failure: failure(), count: symbols().length, filter: filter(), compact: props.compact });
 	};
 	const top = () => sortSymbols(symbols().filter(matches), outlineSort());
 	return (

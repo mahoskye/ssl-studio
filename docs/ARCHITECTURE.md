@@ -52,6 +52,16 @@ milestone M0.
   about a second. A save waits two seconds for the server at most, then
   writes the file as typed and says so once; while the server stays silent,
   later saves wait a quarter of a second. Saving never depends on the server.
+- **A server that runs and does not answer** is one fact, kept by the LSP
+  session (`lspAnswering`): a request has waited five seconds and the server
+  has answered nothing since it was asked. Only an answer counts, a refusal
+  included; what the server sends of its own accord does not. A save that
+  gives up after its two seconds tells the session, so the notice and the
+  status bar turn together. The status bar item reads "LSP not answering"
+  and restarts the server; the Outline, Procedures, Reference, Problems,
+  Health and Blocks say so in place of "Reading…" or of nothing found.
+  Requests are not failed when the time is up: an answer that comes late is
+  delivered, and ends the silence, as a restart does.
 
 ## The language server (ADR 0003)
 

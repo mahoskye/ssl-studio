@@ -1840,12 +1840,13 @@ export const historyChanged = (() => {
 /**
  * How long a save waits for the language server to format its changed lines, in milliseconds. The server is the only
  * formatter (ADR 0003) and a save does not depend on it: when the time is up the file is written as it was typed.
- * `silent` is the wait while an earlier save is still owed its answer, so that "Save all" over a server that says
- * nothing does not wait the long time once for every file. (An object, so that a test can shorten the waits.)
+ * `silent` is the wait while the server is not answering, so that "Save all" over a server that says nothing does
+ * not wait the long time once for every file. Whether it answers is the session's to say (`session.answering`): a
+ * save that gives up tells it, and reads it. (An object, so that a test can shorten the waits.)
  */
 export const formatOnSaveWait = { answering: 2000, silent: 250 };
-/** A save went on without the server's formatting, and no save has had an answer since: it has been said. */
-let formatUnanswered = false;
+/** The silence, by the session's count of them, in which a save last said that files are saved without formatting. */
+let saidUnformatted = 0;
 
 /**
  * Format on save formats only the lines changed since the last save (ARCHITECTURE), and holds the save no longer
@@ -1874,11 +1875,9 @@ async function formatChanged(doc: Doc) {
 			return "answered" as const;
 		},
 	);
-	// Any answer ends the silence: a late one, and a refusal too (a restart refuses what was asked of the old server).
-	void answered.then(() => {
-		formatUnanswered = false;
-	});
-	const wait = formatUnanswered ? formatOnSaveWait.silent : formatOnSaveWait.answering;
+	// A silence ends with any answer, late or a refusal (a restart refuses what was asked of the old server): the
+	// session knows of it, and the long wait and the notice then apply anew.
+	const wait = session.answering ? formatOnSaveWait.answering : formatOnSaveWait.silent;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const waited = new Promise<"waited">((resolve) => {
 		timer = setTimeout(() => resolve("waited"), wait);
@@ -1888,9 +1887,17 @@ async function formatChanged(doc: Doc) {
 	if (outcome === "answered") return;
 	left = true;
 	log(`format on save skipped: the language server did not answer in ${wait / 1000} s`);
+	// The save has waited as long as it will. The session is told, so that the status bar and the panels say what
+	// the notice says, and the saves after this one wait the short time.
+	session.unanswered();
+	if (session.answering) {
+		// It has answered something else since it was asked for this: the server is there, and slow over this file.
+		notify(`${displayName(doc.path)} was saved without formatting: the language server took longer than ${wait / 1000} s over it.`);
+		return;
+	}
 	// Said once for a silence, not at every save of it: Output has each.
-	if (formatUnanswered) return;
-	formatUnanswered = true;
+	if (saidUnformatted === session.silences) return;
+	saidUnformatted = session.silences;
 	notify("The language server is not answering: files are saved without formatting until it does.", "info", {
 		label: "Restart",
 		run: () => (notify("Restarting the language server."), void restartLsp()),
