@@ -2263,30 +2263,76 @@ export const historyChanged = (() => {
 const FORMAT_WHOLE_UP_TO = 400_000;
 
 /**
+ * How long a save waits for the language server to format its changed lines, in milliseconds. The server is the only
+ * formatter (ADR 0003) and a save does not depend on it: when the time is up the file is written as it was typed.
+ * `silent` is the wait while the server is not answering, so that "Save all" over a server that says nothing does
+ * not wait the long time once for every file. Whether it answers is the session's to say (`session.answering`): a
+ * save that gives up tells it, and reads it. (An object, so that a test can shorten the waits.)
+ */
+export const formatOnSaveWait = { answering: 2000, silent: 250 };
+/** The silence, by the session's count of them, in which a save last said that files are saved without formatting. */
+let saidUnformatted = 0;
+
+/**
  * Format on save formats only the lines changed since the last save (ARCHITECTURE), and leaves them as "Format
- * document" would: they are taken from a format of the whole document (`formatRangesAsDocument`).
+ * document" would: they are taken from a format of the whole document (`formatRangesAsDocument`). It holds the
+ * save no longer than `formatOnSaveWait`: a server that runs and does not answer once kept Ctrl+S from writing
+ * the file at all.
  */
 async function formatChanged(doc: Doc) {
 	if (doc.model.isDisposed()) return;
 	const eol = doc.model.getEOL();
 	const version = doc.model.getAlternativeVersionId();
-	let ranges = changedRanges(doc.savedText.split(/\r?\n/), doc.model.getValue().split(eol));
+	const ranges = changedRanges(doc.savedText.split(/\r?\n/), doc.model.getValue().split(eol));
 	if (!ranges.length) return;
-	try {
+	// Set when the save has gone on without the answer: one that comes later is not put into a file already written.
+	let left = false;
+	const wanted = () => !left && !doc.model.isDisposed() && doc.model.getAlternativeVersionId() === version;
+	const answered = (async () => {
 		// A lone line formats without its block's indentation: widen each range
 		// to the procedure the server says it is in.
-		ranges = widenToProcedures(ranges, await session.documentSymbols(doc.model).catch(() => []));
-		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== version) return;
+		const widened = widenToProcedures(ranges, await session.documentSymbols(doc.model).catch(() => []));
+		if (!wanted()) return;
 		// Where the whole document is too large to format on every save, or its formatted text cannot be set beside
 		// it, the ranges are formatted on their own: the server then leaves out its whole-document passes.
-		const whole = doc.model.getValueLength() <= FORMAT_WHOLE_UP_TO ? await session.formatRangesAsDocument(doc.model, ranges, doc.model.getOptions()) : null;
-		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== version) return;
-		const edits = whole ?? (await session.formatRanges(doc.model, ranges, doc.model.getOptions(), true));
-		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== version) return;
-		if (edits.length) applyAsOneStep(doc.model, edits, "format-on-save");
-	} catch (e: any) {
-		log(`format on save skipped: ${e?.message ?? e}`);
+		const whole = doc.model.getValueLength() <= FORMAT_WHOLE_UP_TO ? await session.formatRangesAsDocument(doc.model, widened, doc.model.getOptions()) : null;
+		if (!wanted()) return;
+		const edits = whole ?? (await session.formatRanges(doc.model, widened, doc.model.getOptions(), true));
+		if (wanted() && edits.length) applyAsOneStep(doc.model, edits, "format-on-save");
+	})().then(
+		() => "answered" as const,
+		(e: any) => {
+			if (!left) log(`format on save skipped: ${e?.message ?? e}`);
+			return "answered" as const;
+		},
+	);
+	// A silence ends with any answer, late or a refusal (a restart refuses what was asked of the old server): the
+	// session knows of it, and the long wait and the notice then apply anew.
+	const wait = session.answering ? formatOnSaveWait.answering : formatOnSaveWait.silent;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const waited = new Promise<"waited">((resolve) => {
+		timer = setTimeout(() => resolve("waited"), wait);
+	});
+	const outcome = await Promise.race([answered, waited]);
+	clearTimeout(timer);
+	if (outcome === "answered") return;
+	left = true;
+	log(`format on save skipped: the language server did not answer in ${wait / 1000} s`);
+	// The save has waited as long as it will. The session is told, so that the status bar and the panels say what
+	// the notice says, and the saves after this one wait the short time.
+	session.unanswered();
+	if (session.answering) {
+		// It has answered something else since it was asked for this: the server is there, and slow over this file.
+		notify(`${displayName(doc.path)} was saved without formatting: the language server took longer than ${wait / 1000} s over it.`);
+		return;
 	}
+	// Said once for a silence, not at every save of it: Output has each.
+	if (saidUnformatted === session.silences) return;
+	saidUnformatted = session.silences;
+	notify("The language server is not answering: files are saved without formatting until it does.", "info", {
+		label: "Restart",
+		run: () => (notify("Restarting the language server."), void restartLsp()),
+	});
 }
 
 /**

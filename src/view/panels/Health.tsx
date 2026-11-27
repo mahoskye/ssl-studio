@@ -23,7 +23,7 @@ import { symbols } from "./Objects";
 import { SeverityMark, SEVERITY } from "./Problems";
 import { focusRowsBelow, IconButton, Row, Rows, type Point } from "./Rows";
 import { chooseFromMenu, type RowMenuEntry } from "./RowMenu";
-import { serverDown } from "./server";
+import { serverDown, serverSilent } from "./server";
 import { openStyleProfile } from "../StyleProfile";
 import { docs, setUpProject } from "../project";
 import { checksSummary, docChecks, mendKeepsName, type DocCheck, type LinkMend, type WikiLinkMend } from "../../shared/docChecks";
@@ -1485,7 +1485,7 @@ export function Health() {
 					<h3>
 						Findings <span class="meta">{findings().length}</span>
 					</h3>
-					<Show when={byRule().length} fallback={<p class="hint">{serverDown() ? `${serverDown()} This file is not checked until it runs.` : "No findings in this file."}</p>}>
+					<Show when={byRule().length} fallback={<p class="hint">{serverDown() ? `${serverDown()} This file is not checked until it runs.` : serverSilent() ? `${serverSilent()} This file is not checked until it answers.` : "No findings in this file."}</p>}>
 						<Rows class="health-rows" role="listbox" label="Findings in this file, by rule">
 							<For each={byRule()}>
 								{([rule, entry]) => (

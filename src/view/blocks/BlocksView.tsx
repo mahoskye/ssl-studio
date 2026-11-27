@@ -15,7 +15,7 @@ import { docAuditData } from "../docAudit";
 import { monaco } from "../editor/monaco";
 import { editors } from "../editor/EditorGroup";
 import { regionColor } from "../editor/regions";
-import { session } from "../lsp/session";
+import { lspAnswering, session } from "../lsp/session";
 import { ask, choose, quickPick, type QuickPickOption } from "../dialogs";
 import { docs, isMarkdown } from "../project";
 import { canonical, documents, notify, openFile, setState, state } from "../state";
@@ -451,7 +451,7 @@ export function BlocksView(props: { path: string; group: number }) {
 		// A file that is closed has no blocks to change, and nothing to say.
 		const open = Boolean(model && !model.isDisposed());
 		if (isTreeFresh(model)) return true;
-		if (open) notify(staleNotice(staleReason(state.lsp.state), "change"));
+		if (open) notify(staleNotice(staleReason(state.lsp.state, session.answering), "change"));
 		return false;
 	};
 	/** The text's version as this view's own last edit left it, and when: a tree behind only that is already being read again. */
@@ -665,7 +665,7 @@ export function BlocksView(props: { path: string; group: number }) {
 		// as it was, what was typed was gone without a word whenever the language server was stopped or restarting.
 		// A field nothing was changed in has nothing to keep, and closes; so does one whose file has been closed.
 		const gone = !model || model.isDisposed();
-		if (!isTreeFresh(model)) return void (gone || value.trim() === headerParts(n)?.condition ? setEditing(null) : notify(staleNotice(staleReason(state.lsp.state), "edit")));
+		if (!isTreeFresh(model)) return void (gone || value.trim() === headerParts(n)?.condition ? setEditing(null) : notify(staleNotice(staleReason(state.lsp.state, session.answering), "edit")));
 		setEditing(null);
 		const parts = headerParts(n);
 		const condition = value.trim();
@@ -684,7 +684,7 @@ export function BlocksView(props: { path: string; group: number }) {
 		const gone = !model || model.isDisposed();
 		if (!isTreeFresh(model) || !within(n)) {
 			const unchanged = within(n) && text === lines(n).replace(/\r\n/g, "\n");
-			return void (gone || unchanged ? setEditing(null) : notify(staleNotice(staleReason(state.lsp.state), "edit")));
+			return void (gone || unchanged ? setEditing(null) : notify(staleNotice(staleReason(state.lsp.state, session.answering), "edit")));
 		}
 		setEditing(null);
 		const was = lines(n).replace(/\r\n/g, "\n");
@@ -1219,7 +1219,7 @@ export function BlocksView(props: { path: string; group: number }) {
 			<Show
 				when={tree.root}
 				fallback={
-					<Show when={failed()} fallback={<p class="hint">{state.lsp.state === "running" ? "Reading the structure…" : "Blocks need the language server, which is not running. Restart it from the status bar, or switch to Text."}</p>}>
+					<Show when={failed()} fallback={<p class="hint">{state.lsp.state !== "running" ? "Blocks need the language server, which is not running. Restart it from the status bar, or switch to Text." : lspAnswering() ? "Reading the structure…" : "Blocks need the language server, which is not answering. Restart it from the status bar, or switch to Text."}</p>}>
 						<div class="hint" role="alert">
 							<p>The language server could not give this file's structure: {failed()}</p>
 							<button class="link" onClick={() => (setFailed(null), setVersion((v) => v + 1))}>

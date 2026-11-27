@@ -24,7 +24,12 @@ export type Diagnostic = {
 
 const [diagnostics, setDiagnostics] = createStore<Record<string, Diagnostic[]>>({});
 const [lspReadyEpoch, setLspReadyEpoch] = createSignal(0);
-export { diagnostics, lspReadyEpoch };
+/**
+ * False while the server runs and leaves what it was asked unanswered (the rule is the client's, `answerWait`).
+ * The one source of that fact: the status bar, the panels and format on save all read it here.
+ */
+const [lspAnswering, setLspAnswering] = createSignal(true);
+export { diagnostics, lspAnswering, lspReadyEpoch };
 
 type Range = { start: { line: number; character: number }; end: { line: number; character: number } };
 const toRange = (r: Range) => new monaco.Range(r.start.line + 1, r.start.character + 1, r.end.line + 1, r.end.character + 1);
@@ -126,6 +131,7 @@ export class LspSession {
 		);
 		this.client.onRequest("client/registerCapability", () => null);
 		this.client.onRequest("window/workDoneProgress/create", () => null);
+		this.client.onAnswering((answering) => setLspAnswering(answering));
 		on("lspState", (state) => {
 			if (state.state === "restarting" || state.state === "stopped" || state.state === "failed") {
 				this.handleDown(state.state);
@@ -447,6 +453,25 @@ export class LspSession {
 		} finally {
 			if (this.epoch === myEpoch && this.readyFlag) this.client.notify("textDocument/didClose", { textDocument: { uri } });
 		}
+	}
+
+	/** As `lspAnswering`, read now: for work that is not drawn (a save deciding how long to wait). */
+	get answering(): boolean {
+		return this.client.answering;
+	}
+
+	/** Which silence this is, counted from one: what is said once for a silence remembers the number it was said at. */
+	get silences(): number {
+		return this.client.silences;
+	}
+
+	/**
+	 * A caller that would wait no longer for what it asked says so here (a save waits two seconds, less than the
+	 * session does). If the server has in fact answered nothing since, it counts as not answering from now, so that
+	 * what gave up and what is shown agree.
+	 */
+	unanswered() {
+		this.client.noAnswer();
 	}
 
 	/** Waits until the language server has finished initializing. */

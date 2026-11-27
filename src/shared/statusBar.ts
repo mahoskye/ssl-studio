@@ -17,11 +17,15 @@ export type ServiceIndicator = {
 	actionable: boolean;
 };
 
-/** Compact indicator state for the STARLIMS language server (`● LSP`). */
+/**
+ * Compact indicator state for the STARLIMS language server (`● LSP`). `answering` is false while the server runs
+ * and leaves what it was asked unanswered: its process is there, and nothing it knows reaches the editor.
+ */
 export function lspIndicator(
 	lsp: LspState,
 	info: ToolStatus | undefined,
 	hasWorkspace: boolean,
+	answering = true,
 ): ServiceIndicator {
 	const version = info?.version ? ` ${info.version}` : "";
 	const note = lsp.message ?? info?.message;
@@ -49,6 +53,16 @@ export function lspIndicator(
 	}
 
 	if (lsp.state === "running") {
+		if (!answering) {
+			// Said in words as well as in colour: a running server with a note is orange too, and still works.
+			return {
+				tone: "error",
+				label: "LSP not answering",
+				detail: `Language server${version} is running and not answering: the outline, checks, completions and formatting wait for it.${note ? `\n${note}` : ""}${restartDetail}`,
+				ariaLabel: `Language server${version} not answering.${restartAria}`,
+				actionable: hasWorkspace,
+			};
+		}
 		if (note) {
 			return {
 				tone: "warn",
