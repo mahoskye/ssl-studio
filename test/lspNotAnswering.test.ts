@@ -492,10 +492,11 @@ describe("a language server that runs and does not answer is shown as not answer
 		expect(shownAnswering()).toBe(true);
 		expect(item()).toMatchObject({ tone: "warn", label: "LSP" });
 
-		// A new server that is as silent is found out by the same rule, as a silence of its own.
+		// A new server that is as silent is found out by the same rule, as a silence of its own. (Asked directly: the
+		// session answers a second asking for an unchanged document's symbols with the answer it has.)
 		const before = session.silences;
 		lsp.answers = () => SILENT;
-		void session.documentSymbols(model as any).catch(() => {});
+		void session.request("textDocument/documentSymbol", { textDocument: { uri: (model as any).uri.toString() } }).catch(() => {});
 		await until(() => !session.answering);
 		expect(session.silences).toBe(before + 1);
 		expect(item().label).toBe("LSP not answering");

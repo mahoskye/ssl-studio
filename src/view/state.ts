@@ -1204,9 +1204,7 @@ function attachUntitled(path: string, text: string, language: string): Doc {
 	docs.set(path, doc);
 	model.onDidChangeContent(() => {
 		const dirty = model.getAlternativeVersionId() !== doc.savedVersion && model.getValue() !== doc.savedText;
-		setState((s) => {
-			s.dirty[path] = dirty;
-		});
+		markDirty(path, dirty);
 		keepUnsavedSoon();
 	});
 	// A script not yet saved is the language server's to read as well: it is told of it here, or when the
@@ -1305,6 +1303,18 @@ function attachValidator(model: monaco.editor.ITextModel, path: string, language
 	return stop;
 }
 
+/**
+ * Marks a document unsaved or not, as an edit of it leaves it. Written only when that changes: the store's own
+ * writing of an equal value still set what reads it running, and on every key typed in a script of 1.7 MB that was
+ * a quarter of a second.
+ */
+function markDirty(path: string, dirty: boolean) {
+	if (snapshot(state).dirty[path] === dirty) return;
+	setState((s) => {
+		s.dirty[path] = dirty;
+	});
+}
+
 /** Makes a model the open document for a path, and follows its edits. */
 function attach(path: string, text: string, saved: { text: string; mtime: number }): Doc {
 	const uri = monaco.Uri.file(path);
@@ -1317,9 +1327,7 @@ function attach(path: string, text: string, saved: { text: string; mtime: number
 	docs.set(path, doc);
 	model.onDidChangeContent(() => {
 		const dirty = model.getAlternativeVersionId() !== doc.savedVersion && model.getValue() !== doc.savedText;
-		setState((s) => {
-			s.dirty[path] = dirty;
-		});
+		markDirty(path, dirty);
 		// A file that is being written in is not one that was only looked at: its tab stays. Asked a moment later: a
 		// reload from disk is an edit too, and says the file is unchanged once it is done.
 		if (dirty) queueMicrotask(() => snapshot(state).dirty[path] && keepTab(path));

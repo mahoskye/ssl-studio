@@ -138,6 +138,9 @@ function ensureAgentWorkspace(): boolean {
 	return true;
 }
 
+/** How long the panel waits after a key or a cursor move before it works out its context again. */
+const CONTEXT_SETTLE_MS = 250;
+
 /** Auto-detected ticket (reactive): explicit workspace activeTicket > file-specific ticket > single in-progress ticket. */
 function resolvedAutoTicket(): string {
 	return state.settings.activeTicket?.trim() || ticketForFile(docs(), activePath(), state.workspace?.root) || ticketAtHand();
@@ -1251,9 +1254,21 @@ export function AgentPanel() {
 	createEffect(
 		() => [curDoc(), activeEditor()] as const,
 		([doc, editor]) => {
-			const d1 = doc?.model.onDidChangeContent(() => setContentEdited((n) => n + 1));
-			const d2 = editor?.onDidChangeCursorSelection(() => setSelectionMoved((n) => n + 1));
+			// Told once typing or moving pauses, not at each key: what reads these looks through the whole file (the
+			// tables a script names, the context's size), which on every key of a large script held up the typing.
+			let edited: ReturnType<typeof setTimeout> | undefined;
+			let moved: ReturnType<typeof setTimeout> | undefined;
+			const d1 = doc?.model.onDidChangeContent(() => {
+				clearTimeout(edited);
+				edited = setTimeout(() => setContentEdited((n) => n + 1), CONTEXT_SETTLE_MS);
+			});
+			const d2 = editor?.onDidChangeCursorSelection(() => {
+				clearTimeout(moved);
+				moved = setTimeout(() => setSelectionMoved((n) => n + 1), CONTEXT_SETTLE_MS);
+			});
 			return () => {
+				clearTimeout(edited);
+				clearTimeout(moved);
 				d1?.dispose();
 				d2?.dispose();
 			};

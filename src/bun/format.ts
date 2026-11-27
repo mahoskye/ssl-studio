@@ -39,6 +39,63 @@ import { keepCodeBlockSpaces } from "../shared/fencedFormat";
 
 const pluginXml: Plugin = ((pluginXmlModule as { default?: Plugin }).default ?? pluginXmlModule) as Plugin;
 
+/** An indented code block of a Markdown document, as Prettier's own reader finds it: its first line, and its code. */
+async function indentedCodeBlocks(text: string): Promise<{ line: number; code: string }[] | null> {
+	const reader = (pluginMarkdown as unknown as { parsers?: Record<string, { parse(text: string, options: object): unknown }> }).parsers?.markdown;
+	if (!reader) return null;
+	try {
+		const tree = (await reader.parse(text, { parser: "markdown" })) as { type?: string; value?: string; position?: { start: { line: number } }; children?: unknown[] };
+		const lines = text.split(/\r?\n/);
+		const found: { line: number; code: string }[] = [];
+		const walk = (node: typeof tree) => {
+			if (node.type === "code" && node.position && typeof node.value === "string") {
+				const line = node.position.start.line - 1;
+				// A fenced block opens with its fence; keepCodeBlockSpaces has those.
+				if (!/^[\s>]*(```|~~~)/.test(lines[line] ?? "")) found.push({ line, code: node.value });
+			}
+			for (const child of node.children ?? []) walk(child as typeof tree);
+		};
+		walk(tree);
+		return found;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * keepCodeBlockSpaces for indented code blocks (four spaces, no fence): the spaces at the end of their lines, which
+ * Prettier's printer trims, are put back where the block came out the same but for them (ADR 0045).
+ */
+async function keepIndentedCodeSpaces(before: string, after: string): Promise<string> {
+	const was = await indentedCodeBlocks(before);
+	if (!was?.length) return after;
+	const now = await indentedCodeBlocks(after);
+	if (!now || now.length !== was.length) return after;
+	const eol = after.includes("\r\n") ? "\r\n" : "\n";
+	const lines = after.split(/\r?\n/);
+	const trimEnd = (line: string) => line.replace(/[ \t]+$/, "");
+	let changed = false;
+	now.forEach((block, index) => {
+		const old = was[index]!;
+		if (old.code === block.code) return;
+		const oldLines = old.code.split(/\r?\n/);
+		const newLines = block.code.split(/\r?\n/);
+		if (oldLines.length !== newLines.length || oldLines.some((line, i) => trimEnd(line) !== trimEnd(newLines[i]!))) return;
+		// What stands before the code on a printed line: the block's indent, and a list's or a quote's before it.
+		const first = newLines.findIndex(Boolean);
+		const printedFirst = lines[block.line + Math.max(0, first)] ?? "";
+		const lead = first >= 0 ? printedFirst.slice(0, printedFirst.length - newLines[first]!.length) : "    ";
+		newLines.forEach((line, i) => {
+			if (oldLines[i] === line) return;
+			const at = block.line + i;
+			const printed = lines[at] ?? "";
+			lines[at] = (line ? printed.slice(0, printed.length - line.length) : lead) + oldLines[i];
+			changed = true;
+		});
+	});
+	return changed ? lines.join(eol) : after;
+}
+
 const PRETTIER_PLUGINS: Plugin[] = [
 	pluginBabel as Plugin,
 	pluginEstree as Plugin,
@@ -495,7 +552,7 @@ export async function formatDocument(
 				const effectiveEol =
 					options.endOfLine === "crlf" ? "\r\n" : options.endOfLine === "cr" ? "\r" : options.endOfLine === "lf" ? "\n" : eol;
 				const cleanHeader = header.replace(/(?:\r?\n[ \t]*)+$/, "\n").replace(/\r?\n/g, effectiveEol);
-				const formatted = keepCodeBlockSpaces(text, `${cleanHeader}${formattedRest}`);
+				const formatted = await keepIndentedCodeSpaces(text, keepCodeBlockSpaces(text, `${cleanHeader}${formattedRest}`));
 				return { ok: true, text: formatted, changed: formatted !== text, formatter: "prettier" };
 			}
 		}
@@ -506,7 +563,7 @@ export async function formatDocument(
 			return { ok: true, text: formatted, changed: formatted !== text, formatter: "prettier" };
 		}
 		const printed = await prettier.format(text, options);
-		const formatted = parser === "markdown" ? keepCodeBlockSpaces(text, printed) : printed;
+		const formatted = parser === "markdown" ? await keepIndentedCodeSpaces(text, keepCodeBlockSpaces(text, printed)) : printed;
 		return { ok: true, text: formatted, changed: formatted !== text, formatter: "prettier" };
 	} catch (err) {
 		return { ok: false, error: conciseError(err) };

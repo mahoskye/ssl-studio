@@ -680,7 +680,16 @@ describe("session.ts toMinimalEdits, multi-owner diagnostics, and untrack owner 
 		expect(mockMarkers.get(uri)?.get("starlims-lsp")).toEqual([]);
 		expect(diagnostics[uri]).toBeUndefined();
 
-		// Publish again and verify reset() clears LSP diagnostics and markers.
+		// What the server sends for a document after it was told of the close is not put back.
+		(sess as any).publish({
+			uri,
+			diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, severity: 2, message: "Late" }],
+		});
+		flush();
+		expect(diagnostics[uri]).toBeUndefined();
+
+		// Tracked again, publish again and verify reset() clears LSP diagnostics and markers.
+		sess.track(model);
 		(sess as any).publish({
 			uri,
 			diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, severity: 2, message: "Warn" }],
@@ -818,6 +827,102 @@ describe("The code editor's everyday editing: completion ranges, format on save,
 		expect(whole("a;\nb;", "a;\n\nb;", "added").out).toBe("a;\n\nb;");
 		expect(whole("a;\n\n\nb;", "a;\nb;", "taken").out).toBe("a;\nb;");
 		expect(whole("a;\nb;", "a;\nb;", "same").edits).toEqual([]);
+	});
+
+	test("the session asks once for a document's symbols for each version, leaves out its own scratch copies from a symbol search, and takes no findings for a closed document", async () => {
+		const { session: shared } = await import("../src/view/lsp/session");
+		const request = shared.request;
+		const asked: string[] = [];
+		(shared as any).request = async (method: string) => {
+			asked.push(method);
+			if (method === "textDocument/documentSymbol") return [{ name: "Main", kind: 12, range: { start: { line: 0, character: 0 }, end: { line: 1, character: 0 } }, selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } } }];
+			if (method === "workspace/symbol") return [{ name: "Main", kind: 12, location: { uri: "file:///ws/a.ssl", range: {} } }, { name: "Main", kind: 12, location: { uri: "file:///ws/.ssl-studio/format-3.ssl", range: {} } }];
+			return null;
+		};
+		try {
+			const model = makeFakeModel(":PROCEDURE Main;\n:ENDPROC;", "file:///ws/symbols.ssl");
+			let version = 1;
+			model.getVersionId = () => version;
+			const [one, two] = await Promise.all([shared.documentSymbols(model), shared.documentSymbols(model)]);
+			expect(asked.filter((m) => m === "textDocument/documentSymbol").length).toBe(1);
+			// Each asker has a copy of its own.
+			expect(one).not.toBe(two);
+			expect(one.map((s) => s.name)).toEqual(["Main"]);
+			version = 2;
+			await shared.documentSymbols(model);
+			expect(asked.filter((m) => m === "textDocument/documentSymbol").length).toBe(2);
+			model.dispose();
+
+			expect((await shared.workspaceSymbols("")).map((s) => s.location.uri)).toEqual(["file:///ws/a.ssl"]);
+
+			// What the server found in the edit before a close comes after the close: it is not put back.
+			const { diagnostics } = await import("../src/view/lsp/session");
+			(shared as any).publish({ uri: "file:///ws/closed.ssl", diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, message: "late", severity: 1 }] });
+			expect(Object.keys(diagnostics).some((uri) => uri.includes("closed.ssl"))).toBe(false);
+		} finally {
+			(shared as any).request = request;
+		}
+	});
+
+	test("a symbol search past the server's cap is matched loosely over the open documents' own symbol lists", async () => {
+		const { session: shared, WORKSPACE_SYMBOL_CAP } = await import("../src/view/lsp/session");
+		const request = shared.request;
+		const versions: Map<string, number> = (shared as any).versions;
+		const openUri = "file:///ws/open.ssl";
+		const range = { start: { line: 4, character: 0 }, end: { line: 9, character: 0 } };
+		const symbol = (name: string, uri: string) => ({ name, kind: 12, location: { uri, range } });
+		let total = 3;
+		const asked: string[] = [];
+		(shared as any).request = async (method: string) => {
+			asked.push(method);
+			// Procedures sit in a region, and a procedure's own children are not procedures.
+			if (method === "textDocument/documentSymbol") return [{ name: "Counting", kind: 3, range, children: [{ name: "AddWorkingDays", kind: 12, range, children: [{ name: "nDays", kind: 13, range }] }] }];
+			return Array.from({ length: total }, (_, i) => symbol(`Proc${i}`, `file:///ws/f${i}.ssl`));
+		};
+		const model = makeFakeModel(":PROCEDURE AddWorkingDays;\n:ENDPROC;", openUri);
+		versions.set(openUri, 1);
+		try {
+			const small = await shared.looseSymbols();
+			expect(small.capped).toBe(false);
+			expect(small.loose).toBe(small.all);
+			expect(asked).not.toContain("textDocument/documentSymbol");
+			// At the cap, which symbols the server listed is chance, open documents' too.
+			total = WORKSPACE_SYMBOL_CAP;
+			const large = await shared.looseSymbols();
+			expect(large.capped).toBe(true);
+			expect(large.all.length).toBe(WORKSPACE_SYMBOL_CAP);
+			expect(large.loose).toEqual([{ name: "AddWorkingDays", kind: 12, location: { uri: openUri, range } }]);
+		} finally {
+			versions.delete(openUri);
+			model.dispose();
+			(shared as any).request = request;
+		}
+	});
+
+	test("a format of a script that the server refuses is kept, for \"Format document\" to say why", async () => {
+		const { registerProviders, session: shared, sslFormatFailure } = await import("../src/view/lsp/session");
+		const { monaco } = await import("../src/view/editor/monaco");
+		let provider: any;
+		const languages = monaco.languages as any;
+		const registered = languages.registerDocumentFormattingEditProvider;
+		languages.registerDocumentFormattingEditProvider = (_language: string, given: any) => ((provider = given), { dispose() {} });
+		registerProviders();
+		languages.registerDocumentFormattingEditProvider = registered;
+		const request = shared.request;
+		const model = makeFakeModel(":RETURN 1;", "file:///ws/refused.ssl");
+		try {
+			(shared as any).request = async () => {
+				throw new Error("the document could not be read to its end");
+			};
+			expect(await provider.provideDocumentFormattingEdits(model, { tabSize: 4, insertSpaces: false })).toEqual([]);
+			expect(sslFormatFailure(model)).toBe("the document could not be read to its end");
+			(shared as any).request = async () => [];
+			await provider.provideDocumentFormattingEdits(model, { tabSize: 4, insertSpaces: false });
+			expect(sslFormatFailure(model)).toBeUndefined();
+		} finally {
+			(shared as any).request = request;
+			model.dispose();
+		}
 	});
 
 	test("a completion for a document closed while the server was asked gives nothing, and raises nothing", async () => {

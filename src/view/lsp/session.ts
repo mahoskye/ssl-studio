@@ -47,6 +47,11 @@ const markdown = (value: any) => (value == null ? undefined : typeof value === "
 export type ServerInfo = { name: string; version: string };
 
 const LSP_MARKER_OWNER = "starlims-lsp";
+/** starlims-lsp answers a symbol search with at most this many symbols (`maxSymbolResults`), open documents included. */
+export const WORKSPACE_SYMBOL_CAP = 500;
+export type WorkspaceSymbol = { name: string; kind: number; containerName?: string; location: { uri: string; range: Range } };
+/** The copies the app has the server read for a moment, under `.ssl-studio/`. */
+const isScratchUri = (uri: string) => /\/\.ssl-studio\//.test(decodeURIComponent(uri));
 const diagnosticsByOwner = new Map<string, Map<string, Diagnostic[]>>();
 
 function setOwnerDiagnostics(uri: string, owner: string, list: Diagnostic[] | null) {
@@ -162,6 +167,8 @@ export class LspSession {
 		this.client.rejectAll(reason);
 		this.abortScratchWaiters();
 		this.clearLspDiagnostics();
+		// The next server is asked afresh.
+		this.symbolAnswers.clear();
 	}
 
 	/** Clears session state and LSP diagnostics (e.g. when switching or closing a workspace). */
@@ -549,6 +556,9 @@ export class LspSession {
 			this.scratchWaiters.get(uri)?.(params.diagnostics);
 			return;
 		}
+		// A document the server was told is closed: what it found in the edit just before the close comes after it,
+		// and was put back into Problems for a file no longer open, where nothing took it out again.
+		if (!this.tracked.has(uri) && !this.versions.has(uri)) return;
 		const model = monaco.editor.getModel(parsedUri);
 		const list: Diagnostic[] = params.diagnostics.map((d) => ({
 			uri,
@@ -584,6 +594,14 @@ export class LspSession {
 		return this.client.request<T>(method, params);
 	}
 
+	/** The server's last answer for a document's symbols, by the document and its version. */
+	private symbolAnswers = new Map<string, { model: monaco.editor.ITextModel; version: number; answer: Promise<any[]> }>();
+
+	/**
+	 * A document's symbols. Several ask for them at each change (the outline, the sticky lines at the top of the
+	 * editor, the breadcrumbs, the hovers): the server is asked once for each version of the document, and each asker
+	 * is given its own copy.
+	 */
 	async documentSymbols(model: monaco.editor.ITextModel): Promise<monaco.languages.DocumentSymbol[]> {
 		const convert = (s: any): monaco.languages.DocumentSymbol => ({
 			name: s.name,
@@ -594,11 +612,61 @@ export class LspSession {
 			selectionRange: toRange(s.selectionRange ?? s.location.range),
 			children: (s.children ?? []).map(convert),
 		});
-		return ((await this.request("textDocument/documentSymbol", { textDocument: { uri: model.uri.toString() } })) ?? []).map(convert);
+		return (await this.documentSymbolAnswer(model)).map(convert);
+	}
+
+	/** The server's own answer for a document's symbols, asked once for each version of it. */
+	private documentSymbolAnswer(model: monaco.editor.ITextModel): Promise<any[]> {
+		const uri = model.uri.toString();
+		const version = model.getVersionId();
+		const kept = this.symbolAnswers.get(uri);
+		if (kept && kept.model === model && kept.version === version) return kept.answer;
+		const asked = this.request("textDocument/documentSymbol", { textDocument: { uri } }).then((list) => (list ?? []) as any[]);
+		this.symbolAnswers.set(uri, { model, version, answer: asked });
+		// A failure is not kept: the next asker asks again.
+		asked.catch(() => this.symbolAnswers.get(uri)?.answer === asked && this.symbolAnswers.delete(uri));
+		return asked;
 	}
 
 	async workspaceSymbols(query: string) {
-		return ((await this.request("workspace/symbol", { query })) ?? []) as { name: string; kind: number; containerName?: string; location: { uri: string; range: Range } }[];
+		return (await this.workspaceSymbolAnswer(query)).list;
+	}
+
+	/** The server's answer to a symbol search; `capped` where it stopped at `WORKSPACE_SYMBOL_CAP`. */
+	async workspaceSymbolAnswer(query: string) {
+		const found = ((await this.request("workspace/symbol", { query })) ?? []) as WorkspaceSymbol[];
+		// The copies the app has the server read for a moment (a format, an indent, a check) are not the user's files:
+		// one open while the list was asked for came back in it.
+		const list = found.filter((symbol) => !isScratchUri(symbol.location?.uri ?? ""));
+		return { list, capped: found.length >= WORKSPACE_SYMBOL_CAP };
+	}
+
+	/**
+	 * The procedures a loose match ("awd" for AddWorkingDays) may be made over, with the server's answer for nothing
+	 * typed (`all`). The server matches a part of a name only, and stops at `WORKSPACE_SYMBOL_CAP` symbols taken in no
+	 * set order, those of the open documents included. Under the cap its answer for nothing typed is every procedure
+	 * of the workspace. At the cap a loose match over it found some copies of a name and missed others from one search
+	 * to the next, so the open documents' own symbol lists are used instead, and the files not open are left out.
+	 */
+	async looseSymbols(): Promise<{ all: WorkspaceSymbol[]; loose: WorkspaceSymbol[]; capped: boolean }> {
+		const { list: all, capped } = await this.workspaceSymbolAnswer("");
+		if (!capped) return { all, loose: all, capped };
+		const loose: WorkspaceSymbol[] = [];
+		const collect = (uri: string, symbols: any[]) => {
+			for (const symbol of symbols ?? []) {
+				if (symbol.kind === 12 || symbol.kind === 6) loose.push({ name: symbol.name, kind: symbol.kind, location: { uri, range: symbol.range } });
+				else collect(uri, symbol.children);
+			}
+		};
+		const open = [...this.versions.keys()].filter((uri) => !isScratchUri(uri));
+		await Promise.all(
+			open.map(async (uri) => {
+				const model = monaco.editor.getModel(monaco.Uri.parse(uri));
+				if (!model || model.isDisposed()) return;
+				collect(uri, await this.documentSymbolAnswer(model).catch(() => []));
+			}),
+		);
+		return { all, loose, capped };
 	}
 
 	/**
@@ -790,6 +858,10 @@ export function completionContext(context?: { triggerKind?: number; triggerChara
  * keyword, the name of a built-in function, something that is no name), and gives no reason. Which of its rules
  * said no is not for the app to guess, which knows no SSL: this says what was asked, and that nothing changed.
  */
+/** Why the language server last failed to format a document, by its URI; none once it formats it. */
+const formatFailures = new Map<string, string>();
+export const sslFormatFailure = (model: monaco.editor.ITextModel) => formatFailures.get(model.uri.toString());
+
 export const renameRefusal = (from: string, to: string) =>
 	from ? `The language server would not rename “${from}” to “${to}”. Nothing was changed.` : `The language server would not take “${to}” as the new name. Nothing was changed.`;
 
@@ -982,7 +1054,16 @@ export function registerProviders(tell: (text: string) => void = () => {}) {
 		async provideDocumentFormattingEdits(model, options) {
 			if (!isServed(model) || model.isDisposed()) return [];
 			const version = model.getVersionId();
-			const edits = await quiet(session.request("textDocument/formatting", { ...doc(model), options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces } }), null);
+			const uri = model.uri.toString();
+			let edits: any;
+			try {
+				edits = await session.request("textDocument/formatting", { ...doc(model), options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces } });
+				formatFailures.delete(uri);
+			} catch (e: any) {
+				// Said by "Format document" (commands.ts), which saw only that nothing changed.
+				formatFailures.set(uri, String(e?.message ?? e).trim() || "the language server did not answer");
+				return [];
+			}
 			if (!edits || model.isDisposed() || model.getVersionId() !== version) return [];
 			return toMinimalEdits(model, edits);
 		},

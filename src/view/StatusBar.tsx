@@ -91,28 +91,101 @@ function useLineEnds() {
 	);
 }
 
+/** How the open file is indented, as the editor has it: what Tab writes, and how wide a tab is drawn. */
+const [indent, setIndent] = createSignal<{ spaces: boolean; size: number } | null>(null);
+function useIndentation() {
+	const active = createMemo(
+		() => ({ key: `${activePath() ?? ""}\0${state.kindVersion}`, doc: activeDoc() }),
+		{ equals: (a, b) => a.key === b.key },
+	);
+	createEffect(
+		() => active(),
+		({ doc }) => {
+			const read = () => {
+				if (!doc || doc.binary || doc.model.isDisposed()) return setIndent(null);
+				const options = doc.model.getOptions();
+				setIndent({ spaces: options.insertSpaces, size: options.tabSize });
+			};
+			read();
+			if (!doc || doc.binary || doc.model.isDisposed()) return;
+			const sub = doc.model.onDidChangeOptions(read);
+			return () => sub.dispose();
+		},
+	);
+}
+
+/** "Spaces: 4" or "Tab size: 4", as VS Code's status bar has it. */
+export const indentName = (spaces: boolean, size: number) => (spaces ? `Spaces: ${size}` : `Tab size: ${size}`);
+
+/**
+ * Where a status bar item's menu opens: against the item, or at the top centre, where the command palette was, when
+ * it is asked for from there. A narrow window leaves the item out of the bar, so the palette is the way to it then.
+ */
+function menuPoint(anchor: HTMLElement | undefined, height: number) {
+	const scale = state.settings.uiScale ?? 1;
+	const size = { width: Math.round(280 * scale), height: Math.round(height * scale) };
+	if (!anchor?.isConnected || !anchor.getClientRects().length) return { x: Math.max(8, Math.round((window.innerWidth - size.width) / 2)), y: Math.round(48 * scale) };
+	const box = anchor.getBoundingClientRect();
+	const placed = placeAnchoredMenu({ left: box.left, right: box.right, top: box.top, bottom: box.bottom }, size, { width: window.innerWidth, height: window.innerHeight });
+	return { x: placed.left, y: placed.top };
+}
+
+/** The open file's indentation: tabs or spaces, how wide, turning the one into the other, or worked out from the text. */
+export async function chooseIndentation(anchor?: HTMLElement) {
+	const doc = activeDoc();
+	if (!doc || doc.binary || doc.model.isDisposed()) return;
+	const now = doc.model.getOptions();
+	const { activeEditor } = await import("./editor/EditorGroup");
+	const editor = activeEditor();
+	const shown = editor?.getModel() === doc.model ? editor : null;
+	const at = (height: number) => menuPoint(anchor, height);
+	const choices = [
+		{ label: "Indent using spaces", value: "spaces", checked: now.insertSpaces },
+		{ label: "Indent using tabs", value: "tabs", checked: !now.insertSpaces },
+		{ label: "Change the tab size", value: "size" },
+		// Turning the one into the other is an edit of the text: the code editor makes it.
+		...(shown
+			? [
+					{ label: "Convert indentation to spaces", value: "to-spaces" },
+					{ label: "Convert indentation to tabs", value: "to-tabs" },
+				]
+			: []),
+		{ label: "Detect from the content", value: "detect" },
+	];
+	const picked = await chooseFromMenu(`Indentation of this file, now ${indentName(now.insertSpaces, now.tabSize).toLowerCase()}`, choices, at(36 * choices.length + 4));
+	if (!picked || doc.model.isDisposed()) return;
+	if (picked === "to-spaces" || picked === "to-tabs") {
+		shown?.focus();
+		await shown?.getAction(picked === "to-spaces" ? "editor.action.indentationToSpaces" : "editor.action.indentationToTabs")?.run();
+		return;
+	}
+	if (picked === "detect") {
+		doc.model.detectIndentation(now.insertSpaces, now.tabSize);
+		const found = doc.model.getOptions();
+		notify(`${displayName(doc.path)} is indented with ${found.insertSpaces ? `spaces, ${found.tabSize} to a level` : `tabs, drawn ${found.tabSize} wide`}.`);
+		return;
+	}
+	const sizes = [1, 2, 3, 4, 5, 6, 7, 8].map((size) => ({ label: String(size), value: String(size), checked: size === now.tabSize }));
+	const size = Number(await chooseFromMenu(picked === "size" ? "Tab size" : picked === "spaces" ? "Spaces to a level" : "Tab size", sizes, at(36 * sizes.length + 4)));
+	if (!size || doc.model.isDisposed()) return;
+	doc.model.updateOptions({ insertSpaces: picked === "size" ? now.insertSpaces : picked === "spaces", tabSize: size, indentSize: size });
+}
+
 const LF = "LF: one character, as on Linux and macOS";
 const CRLF = "CRLF: two characters, as on Windows";
 
 /** Changes every line end of the open file to the other kind. It is an edit: it can be undone, and is kept by saving. */
-async function chooseLineEnds(anchor: HTMLElement) {
+export async function chooseLineEnds(anchor?: HTMLElement) {
 	const doc = activeDoc();
 	if (!doc || doc.binary || doc.model.isDisposed()) return;
 	const now = eolName(doc.model.getEOL());
-	const box = anchor.getBoundingClientRect();
-	const scale = state.settings.uiScale ?? 1;
-	const placed = placeAnchoredMenu(
-		{ left: box.left, right: box.right, top: box.top, bottom: box.bottom },
-		{ width: Math.round(280 * scale), height: Math.round(76 * scale) },
-		{ width: window.innerWidth, height: window.innerHeight },
-	);
 	const picked = await chooseFromMenu(
 		`Line ends of this file, now ${now}`,
 		[
 			{ label: LF, value: LF, checked: now === "LF" },
 			{ label: CRLF, value: CRLF, checked: now === "CRLF" },
 		],
-		{ x: placed.left, y: placed.top },
+		menuPoint(anchor, 76),
 	);
 	const want = picked === LF ? "LF" : picked === CRLF ? "CRLF" : null;
 	if (!want || want === now || doc.model.isDisposed()) return;
@@ -125,6 +198,7 @@ async function chooseLineEnds(anchor: HTMLElement) {
 export function StatusBar() {
 	useSizeMeter();
 	useLineEnds();
+	useIndentation();
 	useDocAudit();
 
 	// Loaded dynamically to avoid a static import cycle (commands -> EditorGroup -> StatusBar -> commands).
@@ -355,6 +429,21 @@ export function StatusBar() {
 					<span class="item tier-3" title={`This file is written in ${encoding()}, and is saved in it.`}>
 						{encoding()}
 					</span>
+				)}
+			</Show>
+			<Show when={surface().showTextMeta && indent()}>
+				{(now) => (
+					<button
+						class="item tier-3"
+						aria-haspopup="menu"
+						title={`${now().spaces ? `Indented with spaces, ${now().size} to a level` : `Indented with tabs, drawn ${now().size} wide`}. Click to change it.`}
+						aria-label={`Indentation: ${indentName(now().spaces, now().size)}. Change it.`}
+						onClick={(e) => {
+							void chooseIndentation(e.currentTarget);
+						}}
+					>
+						{indentName(now().spaces, now().size)}
+					</button>
 				)}
 			</Show>
 			<Show when={shownEol()}>

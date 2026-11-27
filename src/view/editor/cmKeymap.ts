@@ -36,6 +36,7 @@ import { findNext, findPrevious, gotoLine, openSearchPanel, search, searchKeymap
 import { Compartment, EditorSelection, Prec, type ChangeSpec, type Extension } from "@codemirror/state";
 import { EditorView, keymap, type Command, type KeyBinding } from "@codemirror/view";
 import { fenced } from "../../shared/catalog";
+import { findMarkdownCodeFences } from "../../shared/fencedFormat";
 import { linkWritten } from "../../shared/docLinks";
 import { liveKeyName } from "../../shared/editorKeymap";
 import { DRAG_TYPE, dropEffectFor } from "../../shared/editorDocHelpers";
@@ -366,6 +367,25 @@ export const cmSmartEnter: Command = (view) => {
 	if (!range.empty) return false;
 	const line = view.state.doc.lineAt(range.head);
 	const col = range.head - line.from;
+	// An opening fence that nothing closes yet: Enter opens a line inside it and puts the closing fence under that,
+	// as Obsidian does. Left open, every line after it in the document read as code until a fence came. Not where a
+	// line of text follows the fence: that is a block being put round lines already written.
+	const after = line.number < view.state.doc.lines ? view.state.doc.line(line.number + 1).text : "";
+	if (col === line.text.length && !after.replace(/^[\s>]*/, "")) {
+		const open = findMarkdownCodeFences(view.state.doc.toString()).find((fence) => fence.openLine === line.number);
+		const fence = open && open.closeLine === null ? /^[\s>]*(`{3,}|~{3,})/.exec(line.text)?.[1] : undefined;
+		if (open && fence) {
+			const prefix = open.linePrefix;
+			const insert = `\n${prefix}\n${prefix}${fence}`;
+			view.dispatch({
+				changes: { from: line.to, insert },
+				selection: EditorSelection.cursor(line.to + 1 + prefix.length),
+				scrollIntoView: true,
+				userEvent: "input.enter",
+			});
+			return true;
+		}
+	}
 	// Never continue Markdown lists/blockquotes inside fenced code blocks.
 	if (fenced(view.state.doc.toString()).some(([from, to]) => range.head >= from && range.head <= to)) return false;
 

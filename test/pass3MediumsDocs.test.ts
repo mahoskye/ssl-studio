@@ -655,13 +655,14 @@ describe("7. quick pick: the workspace symbols listed are the ones of what is ty
 		expect(symbolsFor(forGet, "get sam").map((s) => s.name)).toEqual(["GetSample"]);
 		// Nothing typed asks for nothing in particular: rows held for another question are not shown for it.
 		expect(symbolsFor(forGet, "")).toEqual([]);
-		expect(symbolsFor(forGet, "Get ").map((s) => s.name)).toEqual(["GetSample", "GetUser", "TargetList"]);
+		// Ranked as file search is: a name that starts with it before one that has it inside, the shorter first.
+		expect(symbolsFor(forGet, "Get ").map((s) => s.name)).toEqual(["GetUser", "GetSample", "TargetList"]);
 		expect(symbolsFor(undefined, "Get")).toEqual([]);
 	});
 
 	test("the list is kept with its question, and Enter waits where no row answers (source read: the picker is a component)", () => {
 		const src = readSrc("../src/view/QuickPick.tsx");
-		expect(src).toContain("return { query: q, list: seq === symbolSeq ? list : [] };");
+		expect(src).toContain("return { query: q, list: seq === symbolSeq ? list : [], capped: all.capped };");
 		expect(src).toContain("symbolsFor(symbols(), query()).slice(0, 150)");
 		expect(src).toContain("else if (loading()) setPendingEnter(true);");
 	});

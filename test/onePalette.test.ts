@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { sentenceCase } from "../src/shared/editorKeymap";
 import { MENU_BAR } from "../src/shared/menuBar";
+import { rankSymbols } from "../src/view/quickRank";
 
 const source = (path: string) => readFileSync(join(import.meta.dir, "..", path), "utf8");
 
@@ -44,5 +45,42 @@ describe("one command palette", () => {
 		const entries = MENU_BAR.flatMap((menu) => menu.entries).filter((entry) => entry !== "separator");
 		expect(entries.find((entry) => entry.label === "Go to line…")).toEqual({ label: "Go to line…", command: "go-to-line", needs: "text" });
 		expect(entries.some((entry) => "command" in entry && entry.command === "editor-commands")).toBe(false);
+	});
+});
+
+describe("symbol search matches loosely, as VS Code's does", () => {
+	const names = ["AddWorkingDays", "WorkCalendar", "IsWorkingDay", "SetSampleDueDates", "AddDays"].map((name) => ({ name }));
+	const ranked = (query: string) => rankSymbols(query, names).map((s) => s.name);
+	test("the starts of a name's words, its letters in order, and the name itself first", () => {
+		expect(ranked("awd")).toEqual(["AddWorkingDays"]);
+		// The name itself first; a name with the letters in order still found, after it.
+		expect(ranked("adddays")).toEqual(["AddDays", "AddWorkingDays"]);
+		expect(ranked("add")).toEqual(["AddDays", "AddWorkingDays", "SetSampleDueDates"]);
+		expect(ranked("working day")).toEqual(["IsWorkingDay", "AddWorkingDays"]);
+		expect(ranked("zz")).toEqual([]);
+	});
+});
+
+describe("this round's smaller fixes, where they are", () => {
+	test("Ctrl+. says there is nothing to fix; the outline works out the cursor's procedure once; the Agent panel waits for a pause", () => {
+		expect(source("src/view/editor/languages.ts")).toContain('monaco.languages.registerCodeActionProvider("*", { provideCodeActions: () => ({ actions: [], dispose() {} }) });');
+		expect(source("src/view/panels/Objects.tsx")).toContain("const here = createMemo(() => {");
+		expect(source("src/view/agent/Agent.tsx")).toContain("edited = setTimeout(() => setContentEdited((n) => n + 1), CONTEXT_SETTLE_MS);");
+		expect(source("src/view/state.ts")).toMatch(/function markDirty\(path: string, dirty: boolean\) \{\n\tif \(snapshot\(state\)\.dirty\[path\] === dirty\) return;/);
+	});
+	test("the status bar names a file's indentation as VS Code does", async () => {
+		expect(source("src/view/StatusBar.tsx")).toContain("export const indentName = (spaces: boolean, size: number) => (spaces ? `Spaces: ${size}` : `Tab size: ${size}`);");
+	});
+	test("a narrow window leaves indentation and line ends out of the status bar, so the palette has them", () => {
+		const commands = source("src/view/commands.ts");
+		expect(commands).toContain('{ id: "change-indentation", label: "Change Indentation…"');
+		expect(commands).toContain('{ id: "change-line-ends", label: "Change End of Line Sequence…"');
+		// From the palette there is no item to open against: the menu opens where the palette was.
+		expect(source("src/view/StatusBar.tsx")).toContain("if (!anchor?.isConnected || !anchor.getClientRects().length) return { x: Math.max(8, Math.round((window.innerWidth - size.width) / 2))");
+	});
+	test("a scrolling tree clips what its rows hold out of sight, so nothing in it makes the page taller than the window", () => {
+		const css = source("src/view/style.css");
+		expect(css).toContain(".panel-body .tree { position: relative; overflow: auto;");
+		expect(css).toContain(".explorer-outline-body .tree { position: relative;");
 	});
 });

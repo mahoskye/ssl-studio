@@ -5,7 +5,7 @@
 // comes from the language server and the formatter's grammar (ADR 0003).
 // Non-SSL formatting runs through the backend's Prettier + XML + sql-formatter
 // pipeline (ADR 0015, ADR 0029).
-import { canFormatNonSsl, DEFAULT_SQL_DIALECT, FORMATTABLE_NON_SSL_LANGUAGES, type SqlDialect, type SqlKeywordCase } from "../../shared/format";
+import { canFormatNonSsl, DEFAULT_SQL_DIALECT, FORMATTABLE_NON_SSL_LANGUAGES, linesInFile, type SqlDialect, type SqlKeywordCase } from "../../shared/format";
 import {
 	fenceAtLine,
 	fenceFormatTarget,
@@ -19,6 +19,7 @@ import { formatJson, jsonOpenedOut } from "../../shared/jsonFormat";
 import { LANGUAGES, languageFor, languageName, type LanguageDef } from "../../shared/languages";
 import { isDataSourceName } from "../../shared/lexicalTokens";
 import { splitAtLine } from "../../shared/sqlDataSource";
+import { baseName } from "../../shared/paths";
 import { backend } from "../backend";
 import { selectedLines } from "../lsp/edits";
 import { linesFromFormatted } from "../lsp/session";
@@ -433,7 +434,8 @@ async function computeNonSslFormat(
 		});
 		if (!result.ok) {
 			lastFormatError = { uri, at: Date.now() };
-			formattingHost.onError(result.error, path);
+			// The formatter was given the SQL below the directives: where it names a line, it is that line of the file.
+			formattingHost.onError(linesInFile(result.error, bodyLine), path);
 			return { ok: false };
 		}
 		let finalText = above + result.text;
@@ -441,7 +443,9 @@ async function computeNonSslFormat(
 			const embedded = await formatAllMarkdownFences(finalText, path);
 			finalText = embedded.text;
 			if (embedded.skippedErrors.length) {
-				formattingHost.onError(`Skipped unformattable code block: ${embedded.skippedErrors[0]}`, path);
+				// The document was formatted: only the code block was not, and "Could not format" said the opposite.
+				const blocks = embedded.skippedErrors.length === 1 ? "One code block" : `${embedded.skippedErrors.length} code blocks`;
+				formattingHost.onNotice?.(`${baseName(path)} was formatted. ${blocks} in it could not be: ${embedded.skippedErrors[0]}`);
 			} else if (embedded.skippedSslOffline > 0) {
 				formattingHost.onNotice?.(
 					`Skipped ${embedded.skippedSslOffline} SSL code ${embedded.skippedSslOffline === 1 ? "block" : "blocks"} because the language server is not running.`,
@@ -503,6 +507,11 @@ for (const languageId of FORMATTABLE_NON_SSL_LANGUAGES) {
 		},
 	});
 }
+
+// Quick fixes: none is offered by the language server (it answers "method not supported") or the app. With no
+// provider at all the editor's Ctrl+. did nothing and said nothing; with this one it says there is nothing to do here,
+// as VS Code does.
+monaco.languages.registerCodeActionProvider("*", { provideCodeActions: () => ({ actions: [], dispose() {} }) });
 
 // Secondary schema-table hover provider bridging SSL/SQL identifiers to `schema/` Markdown & DDL docs (ADR 0003).
 void import("./schemaHover").then((m) => m.registerSchemaHoverProviders());

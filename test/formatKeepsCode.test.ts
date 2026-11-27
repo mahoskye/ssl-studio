@@ -4,7 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { formatDocument } from "../src/bun/format";
 import { keepCodeBlockSpaces } from "../src/shared/fencedFormat";
-import { sqlDialectFor, sqlTokenLost } from "../src/shared/format";
+import { linesInFile, sqlDialectFor, sqlTokenLost } from "../src/shared/format";
 
 const format = async (path: string, text: string, languageId: string, sqlDialect?: "tsql" | "plsql") => {
 	const result = await formatDocument({ path, text, languageId, tabSize: 4, insertSpaces: false, printWidth: 90, sqlDialect });
@@ -30,6 +30,16 @@ describe("a Markdown document's code samples keep the spaces at their lines' end
 		expect(keepCodeBlockSpaces("```\na  \n```\n", "```\na\nb\n```\n")).toBe("```\na\nb\n```\n");
 		expect(keepCodeBlockSpaces("```\na  \n```\n\n```\nb\n```\n", "```\na\n```\n")).toBe("```\na\n```\n");
 		expect(keepCodeBlockSpaces("no code  \n", "no code\n")).toBe("no code\n");
+	});
+
+	test("an indented code block keeps them too, in a list as well", async () => {
+		const text = "# Notes\n\nSome prose.\n\n    indented  \n    code  \n\n*  item\n\n       in a list  \n";
+		const first = await format("notes.md", text, "markdown");
+		if (!first.ok) throw new Error(first.error);
+		expect(first.text).toContain("    indented  \n    code  \n");
+		expect(first.text).toContain("- item");
+		expect(first.text).toMatch(/in a list {2}\n/);
+		expect(await format("notes.md", first.text, "markdown")).toMatchObject({ ok: true, changed: false });
 	});
 
 	test("\"Format document\" lays the prose out and leaves the code as written, the second time too", async () => {
@@ -76,5 +86,13 @@ describe("SQL keeps what a reader of another dialect would cut up", () => {
 		// And T-SQL that is T-SQL is formatted as before.
 		const plain = await format("query.sql", "select a from t where x<>1\n", "sql", "tsql");
 		expect(plain).toMatchObject({ ok: true, text: "SELECT\n\ta\nFROM\n\tt\nWHERE\n\tx <> 1\n" });
+	});
+});
+
+describe("an error in a data source's SQL names the line of the file", () => {
+	test("the lines above the SQL are counted in", () => {
+		expect(linesInFile('Parse error: Unexpected "(" at line 2 column 18.', 2)).toBe('Parse error: Unexpected "(" at line 4 column 18.');
+		expect(linesInFile("Unexpected end at line 1, and again at line 3", 5)).toBe("Unexpected end at line 6, and again at line 8");
+		expect(linesInFile("at line 2", 0)).toBe("at line 2");
 	});
 });

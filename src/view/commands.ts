@@ -20,7 +20,7 @@ import { docsGoverningFile } from "../shared/workContext";
 import { runMonacoMarkdownAction } from "./editor/markdownKeys";
 import { backend, fileExists, inApp } from "./backend";
 import { monaco } from "./editor/monaco";
-import { session } from "./lsp/session";
+import { session, sslFormatFailure } from "./lsp/session";
 import { symbols } from "./panels/Objects";
 import { symbolPath } from "./editor/regions";
 import { openStyleProfile } from "./StyleProfile";
@@ -369,6 +369,9 @@ export const commands: Command[] = [
 	// The code
 	{ id: "blocks", label: "Toggle blocks view", detail: "A plan shows its chart; Markdown shows rendered", run: toggleVisual },
 	{ id: "change-language-mode", label: "Change Language Mode…", detail: "Select syntax highlighting and language mode for the active code editor", run: () => void pickLanguageMode() },
+	// The status bar has these too, but a narrow window leaves its items out. Loaded when asked for: the status bar loads this file.
+	{ id: "change-indentation", label: "Change Indentation…", detail: "Tabs or spaces, the tab size, converting the file's indentation, or detecting it from the content", run: () => void import("./StatusBar").then((m) => m.chooseIndentation()) },
+	{ id: "change-line-ends", label: "Change End of Line Sequence…", detail: "LF or CRLF for every line of the active file", run: () => void import("./StatusBar").then((m) => m.chooseLineEnds()) },
 	{ id: "format", label: "Format document", detail: "SSL via language server; SQL, JS/TS, XML/XFD, HTML, CSS, JSON, YAML & Markdown", run: () => void formatActiveDocument() },
 	{ id: "copy-designer", label: "Copy for Designer", detail: "Selection, procedure or file, formatted", run: () => void copyForDesigner() },
 	{ id: "copy-code-citation", label: "Copy Markdown code citation", detail: "Copy a [file#L10-L25](path#L10-L25) link for the active file and selection", run: () => void copyCodeCitation(false) },
@@ -601,7 +604,14 @@ async function formatActiveDocument() {
 		}
 		const editor = activeEditor();
 		if (!editor) return;
+		const before = doc.model.getAlternativeVersionId();
 		await editor.getAction("editor.action.formatDocument")?.run();
+		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== before) return;
+		// Nothing changed: said, as it is for the other languages, and with the reason where the server gave one.
+		const failed = sslFormatFailure(doc.model);
+		if (failed) return notify(`Could not format ${displayName(path)}: ${failed}`, "error");
+		const errors = monaco.editor.getModelMarkers({ resource: doc.model.uri }).some((marker) => marker.severity === monaco.MarkerSeverity.Error);
+		notify(errors ? `${displayName(path)} was not changed. It has errors, which can keep the language server from formatting it.` : `${displayName(path)} is already formatted.`);
 		return;
 	}
 	if (!canFormatNonSsl(languageId, path)) {

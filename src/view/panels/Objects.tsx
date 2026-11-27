@@ -1132,12 +1132,16 @@ export function SymbolOutline(props: { filter?: string; compact?: boolean; label
 			return next;
 		});
 	const matches = (s: Sym): boolean => !filter() || s.name.toLowerCase().includes(filter().toLowerCase()) || (s.children ?? []).some(matches);
-	/** The innermost region or procedure the editor's cursor is in: its row says "you are here" when Follow cursor is on. */
-	const here = () => {
+	/**
+	 * The innermost region or procedure the editor's cursor is in: its row says "you are here" when Follow cursor is on.
+	 * Worked out once for each place of the cursor. Asked by every row for itself, it was worked out once for each row:
+	 * on a script of 9,200 procedures every key typed went through all of them 9,200 times, a fifth of a second.
+	 */
+	const here = createMemo(() => {
 		if (!outlineFollow()) return undefined;
 		const p = symbolPath(symbols(), state.cursor.line).filter((s) => !isVariable(s));
 		return p[p.length - 1];
-	};
+	});
 	const keyMap = createMemo(() => buildSymbolKeyMap(symbols(), path()));
 	const TreeRow = (rowProps: { symbol: Sym; depth: number; parent: string }) => {
 		const key = () =>

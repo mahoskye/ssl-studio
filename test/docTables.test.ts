@@ -8,7 +8,8 @@ import { MAX_COLUMNS, checkTables } from "../src/shared/docTables";
 import type { Project } from "../src/shared/protocol";
 
 const root = join(import.meta.dir, "..");
-const SKIP = /^(node_modules|dist|build|artifacts|vendor|third-party|\.hutch|\.selftest|\.cottontail-tmp|\.git)\//;
+// Ignored folders hold copies of the repository (a session's worktree, a sandbox): their documents are not this one's.
+const SKIP = /^(node_modules|dist|build|artifacts|vendor|third-party|\.hutch|\.selftest|\.cottontail-tmp|\.git|\.claude\/worktrees|\.sandbox)\//;
 // Windows lists a path with backslashes: every test below reads it with forward ones.
 const files = [...new Bun.Glob("**/*.{md,markdown}").scanSync({ cwd: root, dot: true })]
 	.map((f) => f.split("\\").join("/"))

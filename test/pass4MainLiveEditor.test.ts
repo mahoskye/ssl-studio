@@ -156,7 +156,7 @@ if (typeof (globalThis as any).location === "undefined") {
 }
 
 const { liveBlockField, liveCallbacksFacet, liveInteractionExtension } = await import("../src/view/editor/cmLivePlugin");
-const { cmDuplicateLineOrSelection, cmInsertCursor, cmInsertLineAbove, cmJoinLines, cmOwnKeys, cmToggleComment, LIVE_COMMANDS, liveKeyBindings, runTableAction } = await import("../src/view/editor/cmKeymap");
+const { cmDuplicateLineOrSelection, cmInsertCursor, cmInsertLineAbove, cmJoinLines, cmOwnKeys, cmSmartEnter, cmToggleComment, LIVE_COMMANDS, liveKeyBindings, runTableAction } = await import("../src/view/editor/cmKeymap");
 const { extraCellsNote, mergeTsvIntoTable } = await import("../src/view/editor/cmLiveTable");
 const { frontMatter } = await import("../src/shared/frontMatter");
 const {
@@ -980,5 +980,20 @@ describe("the Live editor's keys come from the editor's list of keys", () => {
 		const source_mode = source("src/view/editor/markdownKeys.ts");
 		expect(source_mode).not.toMatch(/KeyCode\.Key[BIKXHC]\b/);
 	});
-});
 
+	test("Enter after a fence that nothing closes opens a line in it and closes it under that, as Obsidian does", () => {
+		const enter = (doc: string, at = doc.length) => {
+			const view = headless(EditorState.create({ doc, selection: EditorSelection.cursor(at), extensions: [markdown({ base: markdownLanguage })] }));
+			const done = cmSmartEnter(view);
+			return { done, text: view.state.doc.toString(), at: view.state.selection.main.head };
+		};
+		expect(enter("# A\n\n```ssl")).toEqual({ done: true, text: "# A\n\n```ssl\n\n```", at: 12 });
+		// In a quote, the quote goes on; in the middle of a document, before an empty line, too.
+		expect(enter("> ```md").text).toBe("> ```md\n> \n> ```");
+		expect(enter("```sql\n\nText after.", 6).text).toBe("```sql\n\n```\n\nText after.");
+		// Not where a line of text follows: a block put round lines already written is closed by hand.
+		expect(enter("```\nx := 1;", 3).text).toBe("```\nx := 1;");
+		// Nor at a fence that closes one.
+		expect(enter("```\nx\n```").text).toBe("```\nx\n```");
+	});
+});

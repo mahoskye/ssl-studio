@@ -13,7 +13,7 @@ import { monaco } from "./editor/monaco";
 import { session } from "./lsp/session";
 import { Modal } from "./modal";
 import { isPlanPath } from "./plan/model";
-import { fileTier, filterCommands, isScript, matchWords, orderCommands } from "./quickRank";
+import { fileTier, filterCommands, isScript, matchWords, orderCommands, rankSymbols } from "./quickRank";
 import { csvColumns, mdSections, planStages, symbols as fileSymbols } from "./panels/Objects";
 import { activeDoc, activePath, canonical, documents, markdownMode, openFile, setState, state } from "./state";
 import { docs, isMarkdown, isTable } from "./project";
@@ -113,12 +113,8 @@ export function matchesDocType(doc: DocFile | undefined, path: string, wantedRaw
 export function symbolsFor<S extends { name: string }>(held: { query: string; list: readonly S[] } | undefined, query: string): readonly S[] {
 	if (!held) return [];
 	if (held.query === query) return held.list;
-	const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-	if (!words.length) return [];
-	return held.list.filter((symbol) => {
-		const name = symbol.name.toLowerCase();
-		return words.every((word) => name.includes(word));
-	});
+	if (!query.trim()) return [];
+	return rankSymbols(query, held.list);
 }
 
 function Picker(props: { mode: QuickMode }) {
@@ -172,13 +168,32 @@ function Picker(props: { mode: QuickMode }) {
 	onCleanup(() => symbolSeq++);
 	// The list is kept with the question it answers: while a newer question waits for its own, the old list is
 	// still the query's value, and `symbolsFor` lists of it only what the newer question would list too.
+	// The server matches a part of a name only, so "awd" found nothing where VS Code finds AddWorkingDays. Its
+	// answer for what is typed is kept, and the procedures `looseSymbols` gives (asked once while the box is open) are
+	// matched loosely here and added; all are ranked here. In a workspace past the server's cap those are the open
+	// documents' only, and the list says so when it finds nothing.
+	let allSymbols: ReturnType<typeof session.looseSymbols> | null = null;
 	const [symbols] = createAsyncQuery(debouncedSymbolQuery, async (q) => {
 		const seq = ++symbolSeq;
 		try {
-			const list = await session.workspaceSymbols(q);
-			return { query: q, list: seq === symbolSeq ? list : [] };
+			allSymbols ??= session.looseSymbols();
+			const [all, named] = await Promise.all([
+				allSymbols.catch((e) => {
+					allSymbols = null;
+					throw e;
+				}),
+				q.trim() ? session.workspaceSymbols(q) : Promise.resolve([]),
+			]);
+			const seen = new Set<string>();
+			const both = [...named, ...all.loose].filter((s) => {
+				const key = `${s.location?.uri}\0${s.name}\0${s.location?.range?.start?.line ?? ""}`;
+				return seen.has(key) ? false : (seen.add(key), true);
+			});
+			// With nothing typed, the server's answer, as it gave it before.
+			const list = q.trim() ? rankSymbols(q, both) : all.all;
+			return { query: q, list: seq === symbolSeq ? list : [], capped: all.capped };
 		} catch {
-			return { query: q, list: [] };
+			return { query: q, list: [], capped: false };
 		}
 	});
 	const items = createMemo<Item[]>(() => {
@@ -560,7 +575,7 @@ function Picker(props: { mode: QuickMode }) {
 		if (loading()) return "Loading…";
 		if (mode() === "files" && failed()) return failed();
 		if (mode() === "files") return !state.workspace ? "Open a folder to go to its files." : query().trim() ? "No files match." : "This folder has no files.";
-		if (mode() === "symbols") return !docs().length && state.lsp.state !== "running" ? "The language server is not running." : query().trim() ? "No symbols, headings, or tagged documents match." : "Type a symbol, #tag, heading, ticket key, or document title.";
+		if (mode() === "symbols") return !docs().length && state.lsp.state !== "running" ? "The language server is not running." : query().trim() ? (symbols()?.capped ? "No symbols, headings, or tagged documents match. In a workspace this large, only open files are matched by initials: type part of the name." : "No symbols, headings, or tagged documents match.") : "Type a symbol, #tag, heading, ticket key, or document title.";
 		if (mode() === "outline") {
 			const path = activePath();
 			const doc = activeDoc();

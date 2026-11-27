@@ -16,6 +16,12 @@ export type SqlDialect = (typeof SQL_DIALECTS)[number]["id"];
 
 export const DEFAULT_SQL_DIALECT: SqlDialect = "tsql";
 
+/**
+ * A formatter's words about a piece of a file, with the lines it names counted in the whole file: the SQL of a
+ * data source is formatted below its directives, and its "line 1" was the line under them.
+ */
+export const linesInFile = (said: string, linesAbove: number) => (linesAbove ? said.replace(/\bline (\d+)/g, (_, n: string) => `line ${Number(n) + linesAbove}`) : said);
+
 /** Files that are Oracle's whatever dialect is chosen: package specs and bodies, and PL/SQL scripts. */
 export const ORACLE_ONLY_FILE = /\.(pks|pkb|pls)$/i;
 
