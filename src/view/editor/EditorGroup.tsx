@@ -14,6 +14,7 @@ import { createAsyncQuery } from "../asyncQuery";
 import { monaco } from "./monaco";
 import { activePath, canonical, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, documents, focusRequest, isUntitled, keepTab, markdownMode, moveTab, newUntitled, notify, openFile, openToSide, planMode, revealSignal, revert, save, saveAll, saveSetting, setMarkdownMode, setPlanMode, setState, setTableTextMode, split, state, tabLeaving, tableTextMode, takeReveal, togglePin, openedForALook } from "../state";
 import { docAuditData } from "../docAudit";
+import { requestHealthScope } from "../panels/healthModel";
 import { showPanel } from "../panels/registry";
 import { landsBefore } from "../../shared/tabOrder";
 import { othersOf, rightOf } from "../../shared/tabOrder";
@@ -863,8 +864,8 @@ export function EditorGroup(props: { index: number }) {
 			if (s) {
 				const limits = state.settings.limits;
 				const levels = [level(s.bytes, limits.bytes), level(s.codeLines, limits.codeLines), level(s.historyEntries, limits.historyEntries, 1)];
-				if (levels.includes("over")) return { kind: "over", icon: "warning", text: "Over size limit", title: "Open Health panel to inspect script size limits", onClick: () => showPanel("health") };
-				if (levels.includes("near")) return { kind: "near", icon: "warning", text: "Near size limit", title: "Open Health panel to inspect script size limits", onClick: () => showPanel("health") };
+				if (levels.includes("over")) return { kind: "over", icon: "warning", text: "Over size limit", title: "Open Health panel to inspect script size limits", onClick: () => (requestHealthScope("file"), showPanel("health")) };
+				if (levels.includes("near")) return { kind: "near", icon: "warning", text: "Near size limit", title: "Open Health panel to inspect script size limits", onClick: () => (requestHealthScope("file"), showPanel("health")) };
 			}
 		}
 		// Doc-health alert: drifted #L code citations pointing to/from this file.
@@ -879,7 +880,10 @@ export function EditorGroup(props: { index: number }) {
 				icon: "warning",
 				text: drifted.length === 1 ? "1 drifted citation" : `${drifted.length} drifted citations`,
 				title: "Drifted #L citations involve this file — click to open Health",
-				onClick: () => showPanel("health"),
+				onClick: () => {
+					requestHealthScope("file");
+					showPanel("health");
+				},
 			};
 		}
 		// Doc-health alert: open Questions governing this file.
@@ -918,7 +922,7 @@ export function EditorGroup(props: { index: number }) {
 					openQuestions.length === 1
 						? `Open question: ${first.title || first.name} — click to open`
 						: `${openQuestions.length} open questions governing this file — click to open Health`,
-				onClick: () => (openQuestions.length === 1 ? void openFile(first.path) : showPanel("health")),
+				onClick: () => (openQuestions.length === 1 ? void openFile(first.path) : (requestHealthScope("project"), showPanel("health"))),
 			};
 		}
 		return null;

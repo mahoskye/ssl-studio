@@ -9,6 +9,7 @@ import { backend } from "./backend";
 import { activeEditor } from "./editor/EditorGroup";
 import { activeLiveEditor } from "./editor/liveBridge";
 import { ICON } from "./icons";
+import { requestHealthScope } from "./panels/healthModel";
 import { requestMarkdownInspector, requestMarkdownPanelTab } from "./panels/markdownBridge";
 import { showPanel } from "./panels/registry";
 import { docs } from "./project";
@@ -129,6 +130,7 @@ export function selftestDocs(): Promise<Steps> {
 		// The sample workspace has a plan in design/.
 		await step("plansListed", async () => row("Release.plan.json"));
 		await step("setupOffered", async () => Boolean(setupButton()) === !state.project!.configured);
+		requestHealthScope("project");
 		showPanel("health");
 		await step("healthListsRootFiles", () => until(healthAgrees));
 		await step("healthMarksMissing", async () => docs().some((d) => d.group === "project" && !d.exists) === healthRows().some((r) => r.textContent?.includes("missing")));
@@ -171,6 +173,7 @@ export function selftestDocsSetup(): Promise<Steps> {
 		});
 		await step("openRowSelected", async () => document.querySelector(".doc-row.selected"));
 
+		requestHealthScope("project");
 		showPanel("health");
 		await step("healthSaysTemplate", () => until(() => healthAgrees() && healthMark("README.md").includes("template") && healthMark("AGENTS.md").includes("template")));
 		await step("healthSaysSetUp", async () => healthMark("project.toml").includes(ICON.check));
@@ -265,6 +268,7 @@ export function selftestWork(): Promise<Steps> {
 				return ["tickets", "specs", "knowledge", "registries"].every((group) => groups.has(group)) && catalogs.every((d) => !d.catalog!.stale);
 			});
 		});
+		requestHealthScope("project");
 		showPanel("health");
 		const checks = () => [...document.querySelectorAll<HTMLElement>(".check-row")].map((r) => r.textContent ?? "");
 		await step("healthSaysWork", () => until(() => checks().some((text) => text.includes("question is open")) && !checks().some((text) => text.includes("out of date"))));
@@ -422,6 +426,7 @@ export function selftestWork(): Promise<Steps> {
 		// A link to a file that is not there is said in Health, and marked on the page before anyone clicks it.
 		const linked = await write(["knowledge", "reference", "Links.md"], "# Where things are\n\nThe ticket is [SELF-1](../../tickets/SELF-1.md). The first notes were in [a file since removed](../../specs/Removed.md#notes).\n");
 		setState((s) => { s.treeVersion += 1; });
+		requestHealthScope("project");
 		showPanel("health");
 		await step("brokenLinkSaid", () => until(() => checks().some((text) => text.includes("links to a file that is not there: ../../specs/Removed.md"))));
 		await step("brokenLinkMarked", async () => {
@@ -437,6 +442,7 @@ export function selftestWork(): Promise<Steps> {
 		await write(["specs", "kept", "Moved.md"], "# A spec that was moved\n");
 		const moved = await write(["knowledge", "reference", "Moved.md"], "# Where the spec went\n\nIt follows SELF-1. The spec is [here](../../specs/Moved.md#checks).\n");
 		setState((s) => { s.treeVersion += 1; });
+		requestHealthScope("project");
 		showPanel("health");
 		await step("movedLinkMended", async () => {
 			const row = await until(() => [...document.querySelectorAll<HTMLElement>(".check-row")].find((r) => r.textContent?.includes("../../specs/Moved.md")));

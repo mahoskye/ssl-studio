@@ -27,6 +27,7 @@ import { measureKept } from "./editor/textmate";
 import { branchText, changedCount, gitStatus } from "./git";
 import { lspAnswering } from "./lsp/session";
 import { counts } from "./panels/Problems";
+import { requestHealthScope } from "./panels/healthModel";
 import { showPanel } from "./panels/registry";
 import { chooseFromMenu } from "./panels/RowMenu";
 import { isPlanPath } from "./plan/model";
@@ -387,7 +388,10 @@ export function StatusBar() {
 							class={["item", "status-size-alert", { over: isOver(), near: !isOver() }]}
 							title={w().tooltip}
 							aria-label={`Script size ${isOver() ? "over" : "near"} limit. Open Health.`}
-							onClick={() => showPanel("health")}
+							onClick={() => {
+								requestHealthScope("file");
+								showPanel("health");
+							}}
 						>
 							<Icon name="warning" />
 							<span>{w().alerts.map((a) => a.text).join(" · ")}</span>
