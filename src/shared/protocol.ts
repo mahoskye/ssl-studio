@@ -178,7 +178,29 @@ export type NameIn = { path: string; line: number; column: number; name: string 
 /** One file of the project, for the file manifest. */
 export type ManifestFile = { path: string; kind: string; bytes: number; lines: number; sha256: string };
 
-export type Snapshot = { id: string; time: number; size: number };
+export type SnapshotSource = "save" | "discard" | "replace" | "import" | "restore" | "manual";
+
+export type Snapshot = {
+	id: string;
+	time: number;
+	size: number;
+	source?: SnapshotSource;
+	label?: string;
+	pinned?: boolean;
+	added?: number;
+	removed?: number;
+};
+
+export type HistoryStats = {
+	fileSnapshots: number;
+	fileRawBytes: number;
+	fileStoredBytes: number;
+	workspaceFiles: number;
+	workspaceSnapshots: number;
+	workspaceRawBytes: number;
+	workspaceStoredBytes: number;
+	dbBytes: number;
+};
 
 /**
  * A document's text that is not on disk, as the app keeps it while its folder is not open (ADR 0042), so that
@@ -486,6 +508,16 @@ export interface BackendApi {
 	): Promise<{ path: string; count: number; skippedProtected?: number; invalidJson?: boolean; error?: string; changed?: boolean }[]>;
 	history(path: string): Promise<Snapshot[]>;
 	snapshot(path: string, id: string): Promise<string>;
+	/** Storage statistics for local history (current file when `path` is given, plus workspace totals). */
+	historyStats(path?: string): Promise<HistoryStats>;
+	/** Creates (or promotes) a pinned manual checkpoint of a file's current text with an optional label. */
+	historyCheckpoint(path: string, text?: string, label?: string): Promise<Snapshot | null>;
+	/** Updates a snapshot's label and/or pinned state. */
+	historyLabel(path: string, id: string, label: string | null, pinned?: boolean): Promise<boolean>;
+	/** Deletes a single local history snapshot for `path`. */
+	historyDelete(path: string, id: string): Promise<boolean>;
+	/** Clears local history for `path` (or the whole workspace when `path` is omitted); keeps pinned checkpoints by default. */
+	historyClear(path?: string, keepPinned?: boolean): Promise<number>;
 	/** The open folder's project settings (defaults when it has no project.toml). */
 	project(): Promise<Project>;
 	/** Writes project.toml, README.md and AGENTS.md where missing; returns what it created, relative to the root. */

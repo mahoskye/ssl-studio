@@ -75,3 +75,10 @@
 - Record decisions in `docs/adr/`, numbered. Supersede, never rewrite.
 - A decision that affects another project goes in the program's
   `decisions/` and is linked from here.
+
+## Application skills
+
+- Reusable development standards live in `.agents/skills/`:
+  `ssl-studio-ui-standards`, `ssl-studio-storage`,
+  `ssl-studio-visual-verify`, and `ssl-studio-testing-and-git`. Read the
+  relevant `SKILL.md` before changing UI, persistence, tests, or git state.

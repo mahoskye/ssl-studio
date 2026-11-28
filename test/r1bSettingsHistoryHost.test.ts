@@ -288,12 +288,13 @@ describe("local history serialization, numeric sorting, stray file safety, and b
 		]);
 		expect(await history.read(file, "5000-12")).toBe("version-12");
 
-		// Place stray .txt files and remove 5000-0.txt; next seq for 5000 must be 13, not 12.
+		// Place stray .txt files in a legacy bucket and remove 5000-0; next seq for 5000 must be 13, not 12.
 		const { rootKey, relKey } = historyKey(ws, file);
 		const bucketDir = join(base, rootKey, relKey);
+		mkdirSync(bucketDir, { recursive: true });
 		writeFileSync(join(bucketDir, "notes.txt"), "stray");
 		writeFileSync(join(bucketDir, "bad-seq.txt"), "stray");
-		rmSync(join(bucketDir, "5000-0.txt"), { force: true });
+		expect(await history.remove(file, "5000-0")).toBe(true);
 
 		await history.record(file, "version-13", 5000);
 		const after = history.list(file);
@@ -302,6 +303,7 @@ describe("local history serialization, numeric sorting, stray file safety, and b
 		expect(await history.read(file, "5000-12")).toBe("version-12");
 		expect(await history.read(file, "5000-13")).toBe("version-13");
 		expect(readdirSync(bucketDir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+		history.close();
 	});
 
 	test("skips snapshots exceeding MAX_SNAPSHOT_BYTES (2 MB)", async () => {

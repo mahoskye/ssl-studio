@@ -3,7 +3,7 @@ import { openInSystemApp, revealPathInFileManager, systemPrefersDark } from "./s
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, sep } from "node:path";
 import { lstatSync, statSync } from "node:fs";
-import type { BackendApi, BackendEvents, Info, LspState, Workspace } from "../shared/protocol";
+import type { BackendApi, BackendEvents, Info, LspState, SnapshotSource, Workspace } from "../shared/protocol";
 import { linkWritten } from "../shared/docLinks";
 import { htmlToMarkdown, openTags } from "../shared/htmlToMarkdown";
 import { markdownToDocx, parseDocxToMarkdown } from "./docx";
@@ -151,11 +151,11 @@ export function createBackend(host: Host, initial?: string) {
 	 * History panel counts on were not being made. Once for a cause, and again when it comes back after history was
 	 * kept in between.
 	 */
-	const keepWritten = async (hist: History, full: string, text: string) => {
+	const keepWritten = async (hist: History, full: string, text: string, source: SnapshotSource = "save") => {
 		try {
 			// A snapshot that was written shows the folder takes them again. One that was passed over (the same text as
 			// the last, a text too large to keep) wrote nothing, and shows nothing.
-			if (await hist.record(full, text)) historyFailed = null;
+			if (await hist.record(full, text, undefined, source)) historyFailed = null;
 		} catch (e: any) {
 			const why = String(e?.code ?? e?.message ?? e);
 			if (why !== historyFailed) {
@@ -202,6 +202,7 @@ export function createBackend(host: Host, initial?: string) {
 		const seq = ++openSeq;
 
 		const prevFiles = files;
+		const prevHistory = history;
 		const prevLsp = lsp;
 		const prevAsked = asked;
 		files = nextFiles;
@@ -212,6 +213,7 @@ export function createBackend(host: Host, initial?: string) {
 		const restartSeq = ++lspRestartSeq;
 		asked = null;
 		prevFiles?.close();
+		prevHistory?.close();
 		prevLsp?.stop();
 		if (prevLsp || lspState.state !== "stopped") emitLspState({ state: "stopped" });
 		prevAsked?.git.dispose();
@@ -232,12 +234,14 @@ export function createBackend(host: Host, initial?: string) {
 			await recent(nextFiles.root).catch((e) => console.error(`The list of recent folders was not written: ${e?.message ?? e}`));
 			if (isStale()) {
 				nextFiles.close();
+				nextHistory.close();
 				return { root: nextFiles.root, name: basename(nextFiles.root) };
 			}
 			if (restartSeq === lspRestartSeq) {
 				const { lsp: status } = await loadInfo().catch((e): Pick<Info, "lsp"> => ({ lsp: { ok: false, message: `The language server was not looked for: ${e?.message ?? e}` } }));
 				if (isStale()) {
 					nextFiles.close();
+					nextHistory.close();
 					return { root: nextFiles.root, name: basename(nextFiles.root) };
 				}
 				if (restartSeq === lspRestartSeq) {
@@ -263,6 +267,7 @@ export function createBackend(host: Host, initial?: string) {
 			await agent.workspaceChanged().catch((e) => console.error(`The agent's sessions of the folder before were not ended: ${e?.message ?? e}`));
 			if (isStale()) {
 				nextFiles.close();
+				nextHistory.close();
 				startedLsp?.stop();
 				return { root: nextFiles.root, name: basename(nextFiles.root) };
 			}
@@ -270,6 +275,7 @@ export function createBackend(host: Host, initial?: string) {
 		} catch (e) {
 			if (isStale()) {
 				nextFiles.close();
+				nextHistory.close();
 				startedLsp?.stop();
 				throw e;
 			}
@@ -318,7 +324,14 @@ export function createBackend(host: Host, initial?: string) {
 			});
 		},
 		create: (path, kind) => need().create(path, kind),
-		rename: async (from, to) => need().rename(from, to),
+		rename: async (from, to) => {
+			const ws = need();
+			const hist = history;
+			const fromFull = ws.inside(from);
+			const toFull = ws.inside(to);
+			await ws.rename(from, to);
+			await hist?.rename(fromFull, toFull).catch((e) => console.error(`Local history did not follow rename: ${e?.message ?? e}`));
+		},
 		copy: async (from, to) => need().copy(from, to),
 		image: (path) => need().image(path),
 		writeImage: (path, base64) => need().writeImage(path, base64),
@@ -328,7 +341,7 @@ export function createBackend(host: Host, initial?: string) {
 			const full = ws.inside(path);
 			const now = await ws.read(full);
 			// Kept whatever its size: this is asked for before something writes over the file, and is then its way back.
-			if (!now.binary) await hist.keep(full, now.text);
+			if (!now.binary) await hist.keep(full, now.text, undefined, "replace");
 		},
 		gitStatus: async () => (files ? git().status() : null),
 		gitBase: async (path, from) => {
@@ -386,7 +399,7 @@ export function createBackend(host: Host, initial?: string) {
 					if (followed && e?.code !== "ENOENT") throw new Error(copyNotKept(basename(full), String(e?.message ?? e)));
 				}
 				if (text !== null) {
-					await hist.keep(full, text).catch((e: any) => {
+					await hist.keep(full, text, undefined, "discard").catch((e: any) => {
 						if (followed) throw new Error(copyNotKept(basename(full), String(e?.message ?? e)));
 					});
 				}
@@ -422,9 +435,9 @@ export function createBackend(host: Host, initial?: string) {
 							return { count: 0, skippedProtected: change.skippedProtected, invalidJson: change.invalidJson };
 						}
 						// The file as it was goes into local history first, so that there is a way back.
-						await hist.keep(full, change.before);
+						await hist.keep(full, change.before, undefined, "replace");
 						await write(change.after, false);
-						await keepWritten(hist, full, change.after);
+						await keepWritten(hist, full, change.after, "save");
 						return { count: change.count, skippedProtected: change.skippedProtected, invalidJson: false };
 					});
 					if (outcome && "changed" in outcome) done.push({ path: full, count: 0, changed: true });
@@ -444,6 +457,43 @@ export function createBackend(host: Host, initial?: string) {
 		},
 		history: async (path) => history?.list(need().inside(path)) ?? [],
 		snapshot: (path, id) => history!.read(need().inside(path), id),
+		historyStats: async (path) => {
+			const ws = need();
+			const hist = history;
+			if (!hist) {
+				return {
+					fileSnapshots: 0,
+					fileRawBytes: 0,
+					fileStoredBytes: 0,
+					workspaceFiles: 0,
+					workspaceSnapshots: 0,
+					workspaceRawBytes: 0,
+					workspaceStoredBytes: 0,
+					dbBytes: 0,
+				};
+			}
+			return hist.stats(path ? ws.inside(path) : undefined);
+		},
+		historyCheckpoint: async (path, text, label) => {
+			const ws = need();
+			const hist = history!;
+			const full = ws.inside(path);
+			let content = text;
+			if (content === undefined) {
+				const current = await ws.read(full);
+				if (current.binary) return null;
+				content = current.text;
+			}
+			return hist.checkpoint(full, content, label);
+		},
+		historyLabel: async (path, id, label, pinned) => history!.setLabel(need().inside(path), id, label, pinned),
+		historyDelete: async (path, id) => history!.remove(need().inside(path), id),
+		historyClear: async (path, keepPinned = true) => {
+			const ws = need();
+			const hist = history;
+			if (!hist) return 0;
+			return path ? hist.clearFile(ws.inside(path), keepPinned) : hist.clearWorkspace(keepPinned);
+		},
 		project: async () => readProject(need().root),
 		setupProject: async () => setupProject(need().root),
 		setupPreview: async () => setupProject(need().root, true),
@@ -591,7 +641,7 @@ export function createBackend(host: Host, initial?: string) {
 				} else if (mode === "overwrite") {
 					try {
 						const before = await ws.read(baseDestPath);
-						if (!before.binary) await hist.record(baseDestPath, before.text);
+						if (!before.binary) await hist.record(baseDestPath, before.text, undefined, "import");
 					} catch {
 						// Ignore if unreadable before snapshot.
 					}
@@ -702,7 +752,7 @@ export function createBackend(host: Host, initial?: string) {
 				} else if (mode === "overwrite") {
 					try {
 						const before = await ws.read(baseDestPath);
-						if (!before.binary) await hist.record(baseDestPath, before.text);
+						if (!before.binary) await hist.record(baseDestPath, before.text, undefined, "import");
 					} catch {
 						// Ignore if unreadable before snapshot.
 					}
@@ -864,6 +914,8 @@ export function createBackend(host: Host, initial?: string) {
 			info = null;
 			files?.close();
 			files = null;
+			history?.close();
+			history = null;
 			lsp?.stop();
 			lsp = null;
 			lspPath = "";
