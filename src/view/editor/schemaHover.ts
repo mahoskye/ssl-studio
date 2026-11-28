@@ -792,7 +792,8 @@ export function registerSchemaHoverProviders(): void {
 					return { range, contents: [{ value }] };
 				}
 
-				// 4. Column hover for tables referenced elsewhere in this file
+				// 4. Column hover for tables referenced elsewhere in this file. Not for a document closed while the tables were read.
+				if (model.isDisposed()) return null;
 				if (model.getValueLength() <= 200_000) {
 					const refTables = referencedSchemaTables(await searchableText(model), allDocs, 8);
 					if (refTables.length) {
@@ -921,6 +922,7 @@ export function registerSchemaHoverProviders(): void {
 					}
 				}
 
+				if (model.isDisposed()) return { suggestions: [] };
 				if (model.getValueLength() <= 200_000 && hasSchemaTables(allDocs)) {
 					const refTables = referencedSchemaTables(await searchableText(model), allDocs, 6);
 					const seenCols = new Set<string>();

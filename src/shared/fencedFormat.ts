@@ -196,6 +196,48 @@ export function findMarkdownCodeFences(text: string): MarkdownCodeFence[] {
 	return out;
 }
 
+/**
+ * Gives each fenced code block of a formatted Markdown document back the spaces at its lines' ends that the
+ * formatter took away. "Format document" lays the prose out and leaves code as written (its embedded formatting is
+ * off), but Prettier's printer trims every line it prints, code blocks' too: `s := "x   ` in an SSL block lost the
+ * spaces of a string, a diff's empty context line ` ` became nothing, and a Markdown example's hard break went.
+ *
+ * Only a block that came out with the same lines, each the same but for the spaces at its end, is given them back;
+ * a block the formatter changed otherwise (or a document whose blocks no longer pair up) is left as it printed it.
+ * An indented code block (four spaces, no fence) is not looked at.
+ */
+export function keepCodeBlockSpaces(before: string, after: string): string {
+	const was = findMarkdownCodeFences(before);
+	const now = findMarkdownCodeFences(after);
+	if (!was.length || was.length !== now.length) return after;
+	const trimEnd = (line: string) => line.replace(/[ \t]+$/, "");
+	const replacements = new Map<number, string>();
+	now.forEach((fence, index) => {
+		const old = was[index]!;
+		if (old.code === fence.code || old.rawLang !== fence.rawLang) return;
+		const oldLines = old.code.split(/\r?\n/);
+		const newLines = fence.code.split(/\r?\n/);
+		if (oldLines.length !== newLines.length || oldLines.some((line, i) => trimEnd(line) !== trimEnd(newLines[i]!))) return;
+		const body = after.slice(fence.bodyFrom, fence.bodyTo);
+		const eol = /\r\n/.test(body) || /\r\n/.test(after) ? "\r\n" : "\n";
+		const printed = body.split(/\r?\n/);
+		if (printed.length !== newLines.length) return;
+		replacements.set(
+			fence.openLine,
+			printed
+				.map((line, i) => {
+					if (oldLines[i] === newLines[i]) return line;
+					// What stands before the code on the printed line (a list's indent, a quote's ">"): a line of spaces
+					// alone has none printed, and is given the block's own.
+					const lead = newLines[i] ? line.slice(0, line.length - newLines[i]!.length) : fence.linePrefix;
+					return lead + oldLines[i];
+				})
+				.join(eol),
+		);
+	});
+	return replacements.size ? replaceFencesInMarkdown(after, now, replacements) : after;
+}
+
 /** Finds the fenced code block enclosing the given 1-based line number (including its fence lines). */
 export function fenceAtLine(text: string, lineNumber: number): MarkdownCodeFence | null {
 	for (const fence of findMarkdownCodeFences(text)) {

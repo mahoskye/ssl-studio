@@ -2,7 +2,7 @@
 // whether or not they exist yet, then the Markdown in the docs folder and the
 // plans. Which folders those are comes from .ssl-studio/project.toml.
 import { Icon } from "../Icon";
-import { FileMark } from "../FileMark";
+import { DocMark } from "../FileMark";
 import { createContext, createEffect, createMemo, createSignal, For, onSettled, Show, useContext } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
@@ -68,7 +68,8 @@ import { changeLetter } from "../../shared/gitStatus";
 import { recall, remember } from "../graph/canvas";
 import { focusRowsBelow, IconButton, isFolded, Row, RowGroup, Rows, setFold, setFolds, type Point } from "./Rows";
 import { chooseFromMenu, type RowMenuEntry } from "./RowMenu";
-import { Menu } from "../Menu";
+import { Menu, type MenuItem } from "../Menu";
+import { FilterBox, filterKey, filterMenuItem, filterToggle } from "../FilterBox";
 
 type DocsPanelContextValue = {
 	has: (path: string) => boolean;
@@ -142,6 +143,16 @@ export async function editDocFrontMatter(path: string, field: string, transform:
 	return true;
 }
 
+type DocsMode = "all" | "active" | "ticket" | "problems";
+/** A filter by state, as its chip names it, and as its chip's tooltip says what is shown. */
+const MODE_CHIP: Record<DocsMode, string> = { all: "All", active: "Active work", ticket: "This ticket", problems: "With issues" };
+const MODE_SAID: Record<DocsMode, string> = {
+	all: "every document",
+	active: "active and waiting work (archived tickets are left out)",
+	ticket: "the active ticket with its linked specs, plans, decisions, questions, schemas and registries",
+	problems: "documents with broken links, missing files, stale catalogs, audit issues, citation drift or governance warnings",
+};
+
 function gitKindOf(path: string) {
 	const st = gitStatus();
 	if (!st) return null;
@@ -212,7 +223,7 @@ function DocRow(props: { file: DocFile; depth?: number }) {
 				return true;
 			}}
 		>
-			<FileMark name={props.file.name} />
+			<DocMark file={props.file} />
 			<span class="label">{displayLabel()}</span>
 			<Show when={projectInfo()?.fileMeta}>
 				{(fileMeta) => <span class="meta project-file-meta">{fileMeta()}</span>}
@@ -745,7 +756,7 @@ function ItemRow(props: {
 					</span>
 				)}
 			</Show>
-			<FileMark name={props.file.name} />
+			<DocMark file={props.file} />
 			{/* Open or shut, in words, for what reads the screen aloud: a list's row has no state for it. */}
 			<Show when={props.fold?.parent}>
 				<span class="visually-hidden">{props.fold!.locked ? `${props.fold!.locked}.` : props.fold!.shut ? "Shut: what is under it is hidden." : "Open."} </span>
@@ -1224,7 +1235,9 @@ export function Docs() {
 	};
 	/** Narrows every list in the panel to the documents the words typed are in. */
 	const [filter, setFilter] = createSignal("");
-	const [mode, setMode] = createSignal<"all" | "active" | "ticket" | "problems">("all");
+	const [mode, setMode] = createSignal<DocsMode>("all");
+	// The text filter is out of sight until the filter menu or Ctrl+F asks for it (ADR 0050).
+	const filterBox = filterToggle(filter, setFilter);
 	const [releaseFilter, setReleaseFilter] = createSignal("");
 	const [activeTag, setActiveTag] = createSignal<string | null>(null);
 	const [selectedPaths, setSelectedPaths] = createSignal<Set<string>>(new Set());
@@ -1945,7 +1958,7 @@ export function Docs() {
 				if (e.key === "Escape" && selectedPaths().size > 0) {
 					e.preventDefault();
 					bulkClearSelection();
-				}
+				} else filterKey(e, filterBox);
 			}}
 		>
 			<div class="panel-title">
@@ -1982,6 +1995,40 @@ export function Docs() {
 					{ label: "Onboard existing workspace…", run: () => void onboardBrownfieldWorkspace() },
 				]}>
 					<Icon name="add" />
+				</Menu>
+				<Menu
+					floating
+					class={filtering() ? "docs-filter-menu on" : "docs-filter-menu"}
+					label={filtering() ? "Filter documents: a filter is on" : "Filter documents"}
+					title={filtering() ? "Filter: a filter is on. Filter by text, by state, by release" : "Filter by text, by state, by release"}
+					items={() => {
+						const items: MenuItem[] = [
+							filterMenuItem(filterBox, undefined, "Filter by Text…"),
+							"separator",
+							{ label: "All documents", checked: mode() === "all", run: () => setMode("all") },
+							{ label: "Active work", checked: mode() === "active", run: () => setMode("active") },
+						];
+						if (focusedTicket()) items.push({ label: `This ticket (${focusedTicket()})`, checked: mode() === "ticket", run: () => setMode("ticket") });
+						items.push({ label: issueCount() ? `With issues (${issueCount()})` : "With issues", checked: mode() === "problems", run: () => setMode("problems") });
+						if (releases().length) {
+							items.push("separator", { label: "Every release", checked: !releaseFilter(), run: () => setReleaseFilter("") });
+							for (const rel of releases()) items.push({ label: `Release ${rel}`, checked: releaseFilter() === rel, run: () => setReleaseFilter(rel) });
+						}
+						if (filtering()) {
+							items.push("separator", {
+								label: "Clear Filters",
+								run: () => {
+									filterBox.clear();
+									setMode("all");
+									setReleaseFilter("");
+									setActiveTag(null);
+								},
+							});
+						}
+						return items;
+					}}
+				>
+					<Icon name={filtering() ? "filter-filled" : "filter"} />
 				</Menu>
 				<IconButton label="Collapse all" title={filtering() ? `Collapse all: not while filtering. ${LOCKED}.` : "Collapse all: shut every group and ticket"} icon="collapse-all" disabled={filtering()} onClick={() => setFolds(allFolds(), true)} />
 				<IconButton label="Expand all" title={filtering() ? `Expand all: not while filtering. ${LOCKED}.` : "Expand all: open every group and ticket"} icon="expand-all" disabled={filtering()} onClick={() => setFolds(allFolds(), false)} />
@@ -2066,83 +2113,43 @@ export function Docs() {
 					</div>
 				</div>
 			</Show>
-			<Show when={filtering() || docs().some((d) => d.exists)}>
+			<Show when={filterBox.shown() || mode() !== "all" || Boolean(releaseFilter()) || Boolean(activeTag())}>
+				{/* Out of sight until the filter menu or Ctrl+F asks for it; a filter that is on is shown here as a chip that clears it (ADR 0050). */}
 				<div class="docs-filter-bar">
-					<input
-						class="filter"
-						type="search"
-						aria-label="Filter the project's documents by title, key, state or what they are about"
+					<FilterBox
+						toggle={filterBox}
+						label="Filter the project's documents by title, key, state or what they are about"
 						placeholder="Filter"
 						value={filter()}
-						onInput={(e) => setFilter(e.currentTarget.value)}
+						onInput={setFilter}
 						onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
+						onDismiss={(box) => focusRowsBelow(box)}
 					/>
-					<div class="docs-filter-pills" role="group" aria-label="Document filter mode">
-						<button type="button" class={{ on: mode() === "all" }} onClick={() => setMode("all")}>
-							All
-						</button>
-						<button type="button" class={{ on: mode() === "active" }} title="Active and waiting work (excludes archived tickets)" onClick={() => setMode("active")}>
-							Active
-						</button>
-						<Show when={focusedTicket()}>
-							<button
-								type="button"
-								class={{ on: mode() === "ticket" }}
-								title={`Show only ${focusedTicket()} and its linked specs, plans, decisions, questions, schemas, and registries`}
-								onClick={() => setMode("ticket")}
-							>
-								This ticket
-							</button>
-						</Show>
-						<button
-							type="button"
-							class={{ on: mode() === "problems" }}
-							title="Documents with broken links, missing files, stale catalogs, audit issues, citation drift, or governance warnings"
-							onClick={() => setMode("problems")}
-						>
-							<span>Issues</span>
-							<Show when={issueCount() > 0}>
-								<span class="docs-pill-count" aria-label={`${issueCount()} documents with issues`}>
-									{issueCount()}
-								</span>
+					<Show when={mode() !== "all" || releaseFilter() || activeTag()}>
+						<div class="docs-filter-chips" role="group" aria-label="Filters that are on">
+							<Show when={mode() !== "all"}>
+								<button type="button" class="docs-tag-active" title={`Showing ${MODE_SAID[mode()]}. Click to show all documents.`} onClick={() => setMode("all")}>
+									<span>{MODE_CHIP[mode()]}</span>
+									<Icon name="close" />
+								</button>
 							</Show>
-						</button>
-					</div>
-					<Show when={releases().length > 0}>
-						<div
-							class="docs-facet-row"
-							style={{ display: "flex", gap: "4px", "align-items": "center", "flex-wrap": "wrap" }}
-						>
-							<select
-								aria-label="Filter by release"
-								title="Filter by release"
-								value={releaseFilter()}
-								onChange={(e) => setReleaseFilter(e.currentTarget.value)}
-								style={{
-									flex: "1 1 90px",
-									"min-width": "0",
-									padding: "2px 6px",
-									"font-size": "var(--text-xs)",
-									"line-height": "1.4",
-								}}
-							>
-								<option value="">All releases</option>
-								<For each={releases()}>{(rel) => <option value={rel}>{rel}</option>}</For>
-							</select>
+							<Show when={releaseFilter()}>
+								{(rel) => (
+									<button type="button" class="docs-tag-active" title={`Showing release ${rel()} only. Click to show every release.`} onClick={() => setReleaseFilter("")}>
+										<span>Release {rel()}</span>
+										<Icon name="close" />
+									</button>
+								)}
+							</Show>
+							<Show when={activeTag()}>
+								{(tag) => (
+									<button type="button" class="docs-tag-active" title={`Filtering by #${tag()}. Click to clear.`} onClick={() => setActiveTag(null)}>
+										<span>#{tag()}</span>
+										<Icon name="close" />
+									</button>
+								)}
+							</Show>
 						</div>
-					</Show>
-					<Show when={activeTag()}>
-						{(tag) => (
-							<button
-								type="button"
-								class="docs-tag-active"
-								title={`Filtering by #${tag()}. Click to clear.`}
-								onClick={() => setActiveTag(null)}
-							>
-								<span>#{tag()}</span>
-								<Icon name="close" />
-							</button>
-						)}
 					</Show>
 				</div>
 			</Show>

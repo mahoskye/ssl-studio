@@ -500,6 +500,52 @@ export function statusChoices(
 }
 
 /**
+ * What a document in the Docs panel is, for the mark drawn beside its name (ADR 0051): every Markdown file had the
+ * one Markdown mark, so a spec, a catalog and a decision looked alike. A catalog is told by its name wherever it
+ * lies, the project's own files by theirs, and the rest by the folder they are in. Null for what keeps the mark of
+ * its file type: a plan, a script, SQL, a Markdown file in no folder of a kind.
+ */
+export type DocKind =
+	| "overview"
+	| "agents"
+	| "state"
+	| "catalog"
+	| "ticket"
+	| "spec"
+	| "decision"
+	| "question"
+	| "snippet"
+	| "prompt"
+	| "reference"
+	| "registry"
+	| "schema-database"
+	| "schema-interface"
+	| "schema-file"
+	| "schema";
+const KNOWLEDGE_DOC_KIND: Record<string, DocKind> = { decisions: "decision", questions: "question", snippets: "snippet", prompts: "prompt", reference: "reference" };
+const SCHEMA_DOC_KIND: Record<string, DocKind> = { database: "schema-database", interfaces: "schema-interface", files: "schema-file" };
+export function docKindOf(file: Pick<DocFile, "name" | "group"> & Partial<Pick<DocFile, "kind" | "catalog">>): DocKind | null {
+	const base = baseName(file.name.replace(/\\/g, "/")).toLowerCase();
+	if (file.group === "registries" && /\.(csv|tsv)$/.test(base)) return "registry";
+	if (!/\.(md|markdown)$/.test(base) || /\.plan\.md$/.test(base)) return null;
+	if (file.catalog || isCatalog(file)) return "catalog";
+	switch (file.group) {
+		case "project":
+			return /^readme\./.test(base) ? "overview" : /^agents\./.test(base) ? "agents" : /^state\./.test(base) ? "state" : null;
+		case "tickets":
+			return "ticket";
+		case "specs":
+			return "spec";
+		case "knowledge":
+			return KNOWLEDGE_DOC_KIND[file.kind ?? ""] ?? null;
+		case "schema":
+			return SCHEMA_DOC_KIND[file.kind ?? ""] ?? "schema";
+		default:
+			return null;
+	}
+}
+
+/**
  * Standard friendly label and quiet filename metadata for curated Project-section
  * documents (ADR 0032). Returns null for documents outside the Project group.
  */

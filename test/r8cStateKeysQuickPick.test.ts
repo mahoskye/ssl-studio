@@ -70,6 +70,7 @@ type FakeModel = {
 	getLanguageId(): string;
 	getVersionId(): number;
 	getAlternativeVersionId(): number;
+	detectIndentation(insertSpaces: boolean, tabSize: number): void;
 	getLineCount(): number;
 	getLineMaxColumn(line: number): number;
 	getLineFirstNonWhitespaceColumn(line: number): number;
@@ -149,6 +150,8 @@ function createFakeModel(text: string, lang: string, uri: ReturnType<typeof make
 		getVersionId() {
 			return this._version;
 		},
+		// What Tab writes is the real editor's to work out: asked here, nothing follows from it.
+		detectIndentation() {},
 		getAlternativeVersionId() {
 			return this._altVersion;
 		},
@@ -333,7 +336,8 @@ const {
 const { removeRecentGroup, resetRecentTabs, stepRecent, tabShown } = await import("../src/view/recentTabs");
 const { goAlong, noteCursor } = await import("../src/view/navigation");
 const { newDocIn, setUpProject, undoSetUp } = await import("../src/view/project");
-const { copyPath, defaultKeysForPlatform, MARKDOWN_TEXT_KEYS, resolveCommandKey, runCommand } = await import("../src/view/commands");
+const { copyPath, defaultKeysForPlatform, resolveCommandKey, runCommand } = await import("../src/view/commands");
+const { MARKDOWN_KEYS } = await import("../src/shared/editorKeymap");
 
 // --- In-process MockSocket RPC driver for real src/view/backend.ts ---
 type RpcHandler = (method: string, args: unknown[]) => unknown | Promise<unknown>;
@@ -966,10 +970,11 @@ describe("R8C P1 — workspace switch, cancel openFolder, watcher race, recentTa
 // 4. P1 — Keybindings, Commands, and Markdown Input Protection
 // =============================================================================
 describe("R8C P1 — keys.ts, commands.ts, and isInMarkdownTextEditor", () => {
-	test("MARKDOWN_TEXT_KEYS excludes ctrl+l (Select Line) and reconciles ctrl+alt+enter to md-checkbox", () => {
-		expect(MARKDOWN_TEXT_KEYS["ctrl+l"]).toBeUndefined();
-		expect(MARKDOWN_TEXT_KEYS["ctrl+alt+enter"]).toBe("md-checkbox");
-		expect(MARKDOWN_TEXT_KEYS["ctrl+b"]).toBe("md-bold");
+	test("Markdown's keys exclude ctrl+l (Select Line) and have both of the checkbox's keys", () => {
+		expect(MARKDOWN_KEYS["ctrl+l"]).toBeUndefined();
+		expect(MARKDOWN_KEYS["ctrl+alt+enter"]).toBe("md-checkbox");
+		expect(MARKDOWN_KEYS["alt+c"]).toBe("md-checkbox");
+		expect(MARKDOWN_KEYS["ctrl+b"]).toBe("md-bold");
 	});
 
 	test("defaultKeysForPlatform includes ctrl+shift++ zoom-in and keeps macOS Cmd+- zoom-out independent of go-back", () => {
@@ -1027,7 +1032,7 @@ describe("R8C P1 — keys.ts, commands.ts, and isInMarkdownTextEditor", () => {
 			expect(isInMarkdownTextEditor(new FakeEl(new Set([".cm-editor", ".cm-panels"])) as any, "markdown")).toBe(false);
 			expect(isInMarkdownTextEditor(new FakeEl(new Set([".cm-editor", ".cm-md-table-wrap"])) as any, "markdown")).toBe(false);
 			expect(isInMarkdownTextEditor(new FakeEl(new Set([".cm-editor", "input"])) as any, "markdown")).toBe(false);
-			expect(isInMarkdownTextEditor(new FakeEl(new Set([".cm-editor", "textarea:not(.inputarea)"])) as any, "markdown")).toBe(false);
+			expect(isInMarkdownTextEditor(new FakeEl(new Set([".cm-editor", "textarea:not(.inputarea):not(.ime-text-area)"])) as any, "markdown")).toBe(false);
 			// Monaco Markdown source editor (textarea.inputarea) vs find/rename widgets
 			expect(isInMarkdownTextEditor(new FakeEl(new Set([".monaco-editor"])) as any, "markdown")).toBe(true);
 			expect(isInMarkdownTextEditor(new FakeEl(new Set([".monaco-editor", ".find-widget"])) as any, "markdown")).toBe(false);
@@ -1292,5 +1297,38 @@ describe("R8C P1/P2 — shared helpers (workContext, workList, fileKind, editorD
 			{ sourcePath: "/ws/src/DueDates/Query.sql" },
 		);
 		expect(refs2.map((r) => [r.line, r.doc.name, r.targetLine ?? null])).toEqual([[1, "due-dates.md", 5]]);
+	});
+});
+
+describe("ADR 0034 — the shell's keys beside Sublime Text's editing keys", () => {
+	test("Sublime Text's keys for symbols and for going back are added beside VS Code's, which stay", () => {
+		const keys = defaultKeysForPlatform(false);
+		expect(keys["ctrl+r"]).toBe("quick-outline");
+		expect(keys["ctrl+shift+o"]).toBe("quick-outline");
+		expect(keys["ctrl+shift+r"]).toBe("symbols");
+		expect(keys["ctrl+t"]).toBe("symbols");
+		expect(keys["alt+-"]).toBe("go-back");
+		expect(keys["alt+arrowleft"]).toBe("go-back");
+		expect(keys["alt+shift+-"]).toBe("go-forward");
+		expect(keys["alt+shift+_"]).toBe("go-forward");
+		expect(resolveCommandKey({ key: "r", code: "KeyR", ctrlKey: true }, keys, false).id).toBe("quick-outline");
+		expect(resolveCommandKey({ key: "-", code: "Minus", altKey: true }, keys, false).id).toBe("go-back");
+		expect(resolveCommandKey({ key: "_", code: "Minus", altKey: true, shiftKey: true }, keys, false).id).toBe("go-forward");
+	});
+
+	test("on a Mac, Alt with the hyphen types a dash and is no shortcut; the symbol keys are on Cmd", () => {
+		const keys = defaultKeysForPlatform(true);
+		expect(keys["alt+-"]).toBeUndefined();
+		expect(keys["alt+shift+-"]).toBeUndefined();
+		expect(keys["alt+shift+_"]).toBeUndefined();
+		expect(resolveCommandKey({ key: "r", code: "KeyR", metaKey: true }, keys, true).id).toBe("quick-outline");
+	});
+
+	test("each shell key that gives way in an editor is that command's default key", async () => {
+		const { EDITING_KEYS_OVER_SHELL } = await import("../src/shared/menuBar");
+		for (const mac of [false, true]) {
+			const keys = defaultKeysForPlatform(mac);
+			for (const own of EDITING_KEYS_OVER_SHELL) expect(keys[own.key]).toBe(own.command);
+		}
 	});
 });

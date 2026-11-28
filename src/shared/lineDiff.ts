@@ -98,6 +98,21 @@ function fewChanges(a: readonly string[], b: readonly string[], budget: number):
 	return ops.subarray(at);
 }
 
+/** One line of an alignment: in both texts, in the earlier one alone, or in the later one alone. */
+export const LINE_SAME = SAME;
+export const LINE_GONE = GONE;
+export const LINE_CAME = CAME;
+
+/**
+ * Two lists of lines set side by side: for each line in order, whether it is in both (`LINE_SAME`), in `a`
+ * alone (`LINE_GONE`) or in `b` alone (`LINE_CAME`), with as few of the last two as can be. The cost grows with
+ * the number of lines that differ, so two long texts that differ in a few places are cheap. Null where it would
+ * take more than `budget` steps.
+ */
+export function alignLines(a: readonly string[], b: readonly string[], budget = MAX_CELLS): Uint8Array | null {
+	return fewChanges(a, b, budget);
+}
+
 /** The changes that turn `before` into `after`, in the order of `after`'s lines. */
 export function lineChanges(before: readonly string[], after: readonly string[], maxCells = MAX_CELLS): LineChange[] {
 	let head = 0;

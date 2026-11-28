@@ -151,6 +151,7 @@ import {
 	type UnreadFile,
 } from "../../shared/tablePower";
 import { chooseFromMenu, rowMenuOpen, type RowMenuEntry } from "../panels/RowMenu";
+import { FilterBox, filterToggle } from "../FilterBox";
 import { searchFor } from "../panels/Search";
 import { docs } from "../project";
 import { canonical, documents, holdsPendingEdit, notify, openFile, revealSignal, saveSetting, state, takeReveal, type Reveal } from "../state";
@@ -174,6 +175,8 @@ const keyOs: KeyOs = (() => {
 
 /** Minimum column width (px) when manually dragging a resize handle. */
 const MIN_COL_WIDTH = 56;
+/** The selection column's width at the default interface size, until it is measured (style.css, .table-sel-col). */
+const SEL_COL_WIDTH = 60;
 
 /** Upper cap (px) when double-clicking a column divider to auto-fit long cells. */
 const MAX_AUTOFIT_WIDTH = 960;
@@ -617,6 +620,8 @@ export function TableView(props: { path: string; group?: number }) {
 	const columnRule = (col: number) => ruleForColumn(csvConfig(), headerName(col));
 
 	const [filter, setFilter] = createSignal("");
+	// The rows' text filter is out of sight until the table's menu asks for it (ADR 0050); Ctrl+F here is Find.
+	const filterBox = filterToggle(filter, setFilter);
 	/** Per-column filters keyed by 0-based column index. */
 	const [colFilters, setColFilters] = createSignal<Map<number, ColumnFilter>>(new Map());
 	/** Currently open column header filter popover, if any. */
@@ -987,7 +992,7 @@ export function TableView(props: { path: string; group?: number }) {
 		const w = colWidths()[col];
 		if (!isFrozen && w === undefined) return undefined;
 		const style: JSX.CSSProperties = {};
-		if (isFrozen) style.left = `${frozenLefts()[visIdx] ?? (visIdx === 0 ? 56 : 0)}px`;
+		if (isFrozen) style.left = `${frozenLefts()[visIdx] ?? (visIdx === 0 ? SEL_COL_WIDTH : 0)}px`;
 		if (w !== undefined) {
 			style.width = `${w}px`;
 			style["min-width"] = `${w}px`;
@@ -1874,7 +1879,7 @@ export function TableView(props: { path: string; group?: number }) {
 
 	const clearAllFilters = () => {
 		setPinnedRow(null);
-		setFilter("");
+		filterBox.clear();
 		setColFilters(new Map());
 		setOnlyTicket(null);
 		setOnlyMissing(false);
@@ -3261,7 +3266,7 @@ export function TableView(props: { path: string; group?: number }) {
 	const onRowGripPointerDown = (e: PointerEvent, rowIdx: number) => {
 		if (e.button !== 0 || !canReorderRows() || table().rows.length < 2) return;
 		const target = e.target as HTMLElement | null;
-		if (target?.closest("input")) return;
+		if (target?.closest("input, .table-sel-hit")) return;
 		e.stopPropagation();
 		const startY = e.clientY;
 		const label = table().rows[rowIdx]?.[0]?.text.trim() || `Row ${rowIdx + 1}`;
@@ -4739,9 +4744,9 @@ export function TableView(props: { path: string; group?: number }) {
 				const thRect = th.getBoundingClientRect();
 				const frozenWidth = (() => {
 					const lastFrozenIdx = visibleFrozenCount() - 1;
-					if (lastFrozenIdx < 0) return headRow?.querySelector<HTMLElement>("th.table-sel-col")?.getBoundingClientRect().width ?? 56;
+					if (lastFrozenIdx < 0) return headRow?.querySelector<HTMLElement>("th.table-sel-col")?.getBoundingClientRect().width ?? SEL_COL_WIDTH;
 					const lastTh = headRow?.querySelectorAll<HTMLElement>("th[data-col]")[lastFrozenIdx];
-					return lastTh ? lastTh.getBoundingClientRect().right - sRect.left : 56;
+					return lastTh ? lastTh.getBoundingClientRect().right - sRect.left : SEL_COL_WIDTH;
 				})();
 				if (thRect.left < sRect.left + frozenWidth) {
 					scrollEl.scrollLeft = Math.max(0, scrollEl.scrollLeft - (sRect.left + frozenWidth - thRect.left) - 12);
@@ -5925,6 +5930,7 @@ export function TableView(props: { path: string; group?: number }) {
 
 		const items: RowMenuEntry[] = [
 			{ label: "Find & replace…", value: "find", keys: "Ctrl+F" },
+			{ label: "Filter rows…", value: "filter-rows", checked: filter() !== "" ? true : undefined },
 			...(tableIssues().length > 0 ? [{ label: `Jump to next issue (${tableIssues().length})`, value: "next-issue", keys: "F8" }] : []),
 			...(duplicateEntries().length > 0
 				? [{ label: onlyDupes() ? "Show all rows (clear dupes filter)" : `Filter to duplicate keys (${duplicateEntries().length})`, value: "toggle-dupes", checked: onlyDupes() }]
@@ -5990,6 +5996,8 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!picked) return;
 		if (picked === "find") {
 			openFind(false);
+		} else if (picked === "filter-rows") {
+			filterBox.open();
 		} else if (picked === "next-issue") {
 			jumpToTableIssue(1);
 		} else if (picked === "toggle-dupes") {
@@ -6151,13 +6159,13 @@ export function TableView(props: { path: string; group?: number }) {
 					if (e.target === e.currentTarget) clearCellSelection();
 				}}
 			>
-				<input
-					class="filter"
-					type="search"
+				<FilterBox
+					toggle={filterBox}
 					placeholder="Filter rows"
-					aria-label="Filter the rows by what they hold"
+					label="Filter the rows by what they hold"
 					value={filter()}
-					onInput={(e) => (setPinnedRow(null), setFilter(e.currentTarget.value))}
+					onInput={(value) => (setPinnedRow(null), setFilter(value))}
+					onDismiss={() => queueMicrotask(() => rootEl?.focus())}
 				/>
 				<span class="hint">
 					{rows().length === table().rows.length ? `${table().rows.length} ${table().rows.length === 1 ? "row" : "rows"}` : `${rows().length} of ${table().rows.length} rows`}
@@ -6437,51 +6445,6 @@ export function TableView(props: { path: string; group?: number }) {
 				</span>
 			</div>
 
-			<Show when={visibleSelectedRows().length > 0}>
-				<div class="table-bulk-bar" role="region" aria-label="Selected rows actions">
-					<span class="table-bulk-count">
-						{visibleSelectedRows().length} {visibleSelectedRows().length === 1 ? "row" : "rows"} selected
-						<Show when={hiddenSelectedCount() > 0}> ({hiddenSelectedCount()} hidden ignored)</Show>
-					</span>
-					<Show when={statusCol() >= 0}>
-						<button type="button" class="table-bulk-btn" onClick={() => void bulkSetStatus()}>
-							Set {headerName(statusCol()) || "status"}…
-						</button>
-					</Show>
-					<Show when={ticketAt() >= 0}>
-						<button type="button" class="table-bulk-btn" onClick={() => void bulkAssignTicket()}>
-							Assign ticket…
-						</button>
-					</Show>
-					<button type="button" class="table-bulk-btn" onClick={() => void bulkFillAnyColumn()}>
-						Set column…
-					</button>
-					<button type="button" class="table-bulk-btn" title="Copy selected rows as TSV for Excel/Sheets (Ctrl+C)" onClick={() => void copySelectedAsTsv()}>
-						Copy TSV
-					</button>
-					<button type="button" class="table-bulk-btn" onClick={() => void copySelectedAsCsv()}>
-						Copy CSV
-					</button>
-					<button type="button" class="table-bulk-btn" title="Copy selected rows as a Markdown table" onClick={() => void copySelectedAsMarkdown()}>
-						Copy Markdown
-					</button>
-					<button
-						type="button"
-						class="table-bulk-btn"
-						title="Search workspace code for values in the checked rows"
-						onClick={() => setCheckDialog({ open: true, column: defaultCheckColumn(table()), rowScope: "checked" })}
-					>
-						Check in code…
-					</button>
-					<button type="button" class="table-bulk-btn danger" onClick={() => void bulkDeleteSelected()}>
-						<Icon name="trash" /> Delete
-					</button>
-					<button type="button" class="link table-bulk-clear" onClick={() => setSelectedRows(new Set<number>())}>
-						Clear
-					</button>
-				</div>
-			</Show>
-
 			{/* Compact inline Find & Replace bar (Ctrl+F / Ctrl+H). */}
 			<Show when={findOpen()}>
 				<div class="table-find-bar" role="search" aria-label="Find and replace in table">
@@ -6739,20 +6702,22 @@ export function TableView(props: { path: string; group?: number }) {
 							<Show when={table().header.length > 0}>
 								<th scope="col" class="table-sel-col">
 									<div class="table-sel-inner">
-										<input
-											type="checkbox"
-											checked={allDrawnSelected()}
-											disabled={rows().length === 0}
-											aria-label="Select all visible rows"
-											title="Select all visible rows"
-											onChange={(e) => {
-												if (!rows().length) {
-													e.currentTarget.checked = false;
-													return;
-												}
-												toggleSelectAllDrawn();
-											}}
-										/>
+										{/* The label is the checkbox's target: 24px square, where the box itself is 16px. */}
+										<label class="table-sel-hit" title="Select all visible rows">
+											<input
+												type="checkbox"
+												checked={allDrawnSelected()}
+												disabled={rows().length === 0}
+												aria-label="Select all visible rows"
+												onChange={(e) => {
+													if (!rows().length) {
+														e.currentTarget.checked = false;
+														return;
+													}
+													toggleSelectAllDrawn();
+												}}
+											/>
+										</label>
 									</div>
 								</th>
 							</Show>
@@ -6933,20 +6898,21 @@ export function TableView(props: { path: string; group?: number }) {
 													<tr class="table-group-row" data-entry-key={ge().entryKey}>
 														<td class="table-sel-col" onClick={(e) => e.stopPropagation()}>
 															<div class="table-sel-inner">
-																<input
-																	type="checkbox"
-																	checked={allInGroupSelected()}
-																	ref={(el) => {
-																		groupCbEl = el;
-																	}}
-																	aria-label={`Select all ${ge().count} rows in group ${ge().label || "(empty)"}`}
-																	title={`Select/deselect all ${ge().count} rows in “${ge().label || "(empty)"}”`}
-																	onClick={(e) => {
-																		e.stopPropagation();
-																		toggleGroupSelect(ge().rowIndices);
-																	}}
-																	onChange={() => {}}
-																/>
+																<label class="table-sel-hit" title={`Select/deselect all ${ge().count} rows in “${ge().label || "(empty)"}”`}>
+																	<input
+																		type="checkbox"
+																		checked={allInGroupSelected()}
+																		ref={(el) => {
+																			groupCbEl = el;
+																		}}
+																		aria-label={`Select all ${ge().count} rows in group ${ge().label || "(empty)"}`}
+																		onClick={(e) => {
+																			e.stopPropagation();
+																			toggleGroupSelect(ge().rowIndices);
+																		}}
+																		onChange={() => {}}
+																	/>
+																</label>
 															</div>
 														</td>
 														<td colspan={visibleColumns().length}>
@@ -7007,17 +6973,20 @@ export function TableView(props: { path: string; group?: number }) {
 												>
 													{index() + 1}
 												</span>
-												<input
-													type="checkbox"
-													tabindex={isRovingRow(index()) ? 0 : -1}
-													checked={selectedRows().has(index())}
-													aria-label={`Select row ${index() + 1}`}
-													onClick={(e) => {
-														e.stopPropagation();
-														toggleRowSelect(index(), e.shiftKey);
-													}}
-													onChange={() => {}}
-												/>
+												{/* A click anywhere in the label ticks the box; Shift still selects the run of rows to it. */}
+												<label class="table-sel-hit" title={`Select row ${index() + 1} (Shift selects a run)`}>
+													<input
+														type="checkbox"
+														tabindex={isRovingRow(index()) ? 0 : -1}
+														checked={selectedRows().has(index())}
+														aria-label={`Select row ${index() + 1}`}
+														onClick={(e) => {
+															e.stopPropagation();
+															toggleRowSelect(index(), e.shiftKey);
+														}}
+														onChange={() => {}}
+													/>
+												</label>
 											</div>
 										</td>
 										<For each={visibleColumns()} keyed={false}>
@@ -7517,6 +7486,53 @@ export function TableView(props: { path: string; group?: number }) {
 					</p>
 				</Show>
 			</div>
+
+			{/* Under the rows, not over them: a bar that appeared above pushed every row down as the first was ticked, and
+			    the next click meant for a checkbox landed on the bar, its Delete among the buttons. */}
+			<Show when={visibleSelectedRows().length > 0}>
+				<div class="table-bulk-bar" role="region" aria-label="Selected rows actions">
+					<span class="table-bulk-count">
+						{visibleSelectedRows().length} {visibleSelectedRows().length === 1 ? "row" : "rows"} selected
+						<Show when={hiddenSelectedCount() > 0}> ({hiddenSelectedCount()} hidden ignored)</Show>
+					</span>
+					<Show when={statusCol() >= 0}>
+						<button type="button" class="table-bulk-btn" onClick={() => void bulkSetStatus()}>
+							Set {headerName(statusCol()) || "status"}…
+						</button>
+					</Show>
+					<Show when={ticketAt() >= 0}>
+						<button type="button" class="table-bulk-btn" onClick={() => void bulkAssignTicket()}>
+							Assign ticket…
+						</button>
+					</Show>
+					<button type="button" class="table-bulk-btn" onClick={() => void bulkFillAnyColumn()}>
+						Set column…
+					</button>
+					<button type="button" class="table-bulk-btn" title="Copy selected rows as TSV for Excel/Sheets (Ctrl+C)" onClick={() => void copySelectedAsTsv()}>
+						Copy TSV
+					</button>
+					<button type="button" class="table-bulk-btn" onClick={() => void copySelectedAsCsv()}>
+						Copy CSV
+					</button>
+					<button type="button" class="table-bulk-btn" title="Copy selected rows as a Markdown table" onClick={() => void copySelectedAsMarkdown()}>
+						Copy Markdown
+					</button>
+					<button
+						type="button"
+						class="table-bulk-btn"
+						title="Search workspace code for values in the checked rows"
+						onClick={() => setCheckDialog({ open: true, column: defaultCheckColumn(table()), rowScope: "checked" })}
+					>
+						Check in code…
+					</button>
+					<button type="button" class="table-bulk-btn danger" onClick={() => void bulkDeleteSelected()}>
+						<Icon name="trash" /> Delete
+					</button>
+					<button type="button" class="link table-bulk-clear" onClick={() => setSelectedRows(new Set<number>())}>
+						Clear
+					</button>
+				</div>
+			</Show>
 
 			{/* Compact footer summary strip: visible/total rows, clickable status tally pills, and range / focused column statistics. */}
 			<Show when={table().header.length > 0}>

@@ -369,16 +369,16 @@ describe("Blocks — a change that cannot be made says why (finding 3)", () => {
 		const edit = between(src, "const commitEdit = (n: Node, text: string) => {", "const drop = (e: DragEvent, line: number) => {");
 		expect(edit.indexOf("if (!isTreeFresh(model) || !within(n)) {")).toBeGreaterThan(0);
 		expect(edit.indexOf("if (!isTreeFresh(model) || !within(n)) {")).toBeLessThan(edit.indexOf("\n\t\tsetEditing(null);"));
-		expect(edit).toContain('notify(staleNotice(staleReason(state.lsp.state), "edit"))');
+		expect(edit).toContain('notify(staleNotice(staleReason(state.lsp.state, session.answering), "edit"))');
 		const condition = between(src, "const commitCondition = (n: Node, value: string) => {", "const commitEdit = (n: Node, text: string) => {");
 		expect(condition.indexOf("if (!isTreeFresh(model))")).toBeLessThan(condition.indexOf("\n\t\tsetEditing(null);"));
-		expect(condition).toContain('notify(staleNotice(staleReason(state.lsp.state), "edit"))');
+		expect(condition).toContain('notify(staleNotice(staleReason(state.lsp.state, session.answering), "edit"))');
 		// An edit kept open is not closed by opening another, and Escape drops it from anywhere in the view.
 		expect(src).toContain('if (open && open !== key) return notify("Another edit is still open here. Confirm it, or press Escape to drop it, first.");');
 		expect(src).not.toContain("onDblClick={() => setEditing(p.node.key)}");
 		expect(src).toContain('if (editing() && e.key === "Escape") return e.preventDefault(), e.stopPropagation(), void setEditing(null);');
 		// Move, wrap, delete and drop go through the check that says why.
-		expect(src).toContain('if (open) notify(staleNotice(staleReason(state.lsp.state), "change"));');
+		expect(src).toContain('if (open) notify(staleNotice(staleReason(state.lsp.state, session.answering), "change"));');
 		for (const [from, to] of [
 			["const move = async (n: Node, direction: -1 | 1) => {", "const wrap = async (n: Node) => {"],
 			["const wrap = async (n: Node) => {", "const remove = async (n: Node) => {"],

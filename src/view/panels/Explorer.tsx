@@ -32,6 +32,7 @@ import { focusRowsBelow, IconButton, Row, Rows, type Point, type RowsApi } from 
 import { outlineAnyOpen, outlineHasExpandable, outlineMenuItems, SymbolOutline, toggleOutlineCollapseAll } from "./Objects";
 import { SectionSplitter } from "./SectionSplitter";
 import { Menu } from "../Menu";
+import { FilterBox, filterKey, filterMenuItem, filterToggle } from "../FilterBox";
 import { recall, remember } from "../graph/canvas";
 
 /** Optional subfolder scope for Explorer (e.g. browsing a ticket bundle folder without workspace clutter). */
@@ -1026,6 +1027,8 @@ export function Explorer() {
 	};
 
 	const [outlineFilter, setOutlineFilter] = createSignal("");
+	// The outline's filter is out of sight until its menu or Ctrl+F asks for it (ADR 0050).
+	const outlineFilterBox = filterToggle(outlineFilter, setOutlineFilter);
 	const hasScope = createMemo(() => Boolean(scopedFolder()));
 	createEffect(
 		() => hasScope(),
@@ -1302,7 +1305,17 @@ export function Explorer() {
 						<span class="explorer-section-title">Outline</span>
 					</button>
 					<div class="explorer-section-actions">
-						<Menu floating label="Outline options" title="Outline options: follow cursor, sort order" class="outline-more" items={outlineMenuItems}>
+						<Menu
+							floating
+							label="Outline options"
+							title="Outline options: filter, follow cursor, sort order"
+							class="outline-more"
+							items={() => [
+								filterMenuItem(outlineFilterBox, () => !outlineOpen() && toggleOutline()),
+								"separator",
+								...outlineMenuItems(),
+							]}
+						>
 							<Icon name="ellipsis" />
 						</Menu>
 						<Show when={outlineHasExpandable()}>
@@ -1316,21 +1329,16 @@ export function Explorer() {
 					</div>
 				</div>
 				<Show when={outlineOpen()}>
-					<div class="explorer-outline-body" style={{ height: `${outlineH()}px` }}>
-						<input
-							class="filter"
-							aria-label="Filter outline"
+					<div class="explorer-outline-body" style={{ height: `${outlineH()}px` }} onKeyDown={(e) => filterKey(e, outlineFilterBox)}>
+						<FilterBox
+							toggle={outlineFilterBox}
+							label="Filter outline"
 							placeholder="Filter outline…"
 							value={outlineFilter()}
 							style={{ margin: "4px 8px 4px", "flex-shrink": "0" }}
-							onInput={(e) => setOutlineFilter(e.currentTarget.value)}
-							onKeyDown={(e) => {
-								if (e.key === "ArrowDown" && focusRowsBelow(e.currentTarget)) e.preventDefault();
-								else if (e.key === "Escape" && outlineFilter()) {
-									e.preventDefault();
-									setOutlineFilter("");
-								}
-							}}
+							onInput={setOutlineFilter}
+							onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
+							onDismiss={(box) => focusRowsBelow(box)}
 						/>
 						<SymbolOutline compact filter={outlineFilter()} label="Outline of the open file" />
 					</div>

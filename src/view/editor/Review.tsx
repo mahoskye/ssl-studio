@@ -435,6 +435,8 @@ export function ReviewView() {
 			...(codeFont ? { fontFamily: codeFont } : {}),
 			fixedOverflowWidgets: true,
 			selectionClipboard: false,
+			// As in the editor (ADR 0034): the same click adds a cursor on both sides of a comparison.
+			multiCursorModifier: state.settings.ctrlClickAddsCursor === false ? "alt" : "ctrlCmd",
 		}));
 		diff.setModel({ original, modified: proposed });
 		// Ctrl+F12 goes to the definition here as it does in the editor: each side is told it is in a web view,

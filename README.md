@@ -4,6 +4,10 @@ A desktop IDE for STARLIMS SSL, built on Bun. Code can be read and edited as
 text or as visual blocks, and the two stay in step because the text is always
 the source of truth.
 
+Write-ups of the work on it are at
+[mahoskye.github.io/ssl-studio](https://mahoskye.github.io/ssl-studio/),
+published from `site/`.
+
 - **Text mode:** a full editor backed by
   [`starlims-lsp`](https://github.com/mahoskye/starlims-lsp): completion,
   hover, diagnostics, formatting, navigation, and semantic highlighting: the
@@ -74,7 +78,7 @@ Status: M1 to M6 done in a first version, and tested on Linux and Windows
 ## Running it
 
 Needs [Bun](https://bun.sh), and
-[`starlims-lsp`](https://github.com/mahoskye/starlims-lsp/releases) 0.32.0 on
+[`starlims-lsp`](https://github.com/mahoskye/starlims-lsp/releases) 0.33.1 on
 `PATH` (or set `lspPath` in Settings). opencode (2.2.5 up to 2.3.x) is optional: it powers
 the Agent panel.
 
@@ -95,7 +99,7 @@ Other scripts:
 | `hutch run test` | Unit tests (`bun test`) |
 | `hutch run check` | Type check |
 | `hutch run selftest` | Opens the app on `fixtures/workspace`, checks the editor and language server, writes `selftest.json`, quits |
-| `hutch run selftest-close` | Leaves an edit unsaved and presses the window's close button: the app must ask first (Linux with X11, Windows) |
+| `hutch run selftest-close` | Closes the window over unsaved edits: nothing asked, and they are back next time (X11, Windows) |
 
 A second fixture, `fixtures/sample-module`, is a whole module in STARLIMS export layout (server scripts, data sources, forms with code-behind, client scripts, resources, sidecars, and deliberately broken scripts); `hutch run start fixtures/sample-module` opens it. Its README says what the IDE does and does not open yet.
 | `hutch run build` | A release build |
@@ -133,7 +137,8 @@ edits the file in the editor, and you save it.
 | Ctrl+N | New untitled file |
 | Ctrl+O | Open folder |
 | Ctrl+P, Ctrl+T | Go to file, go to symbol |
-| Ctrl+Shift+P | All commands |
+| Ctrl+Shift+P, F1 | All commands, the text editor's too |
+| Ctrl+G | Go to a line of the open file |
 | Ctrl+S, Ctrl+Alt+S | Save (formats the changed procedures), save all |
 | Ctrl+W, Ctrl+Shift+T | Close tab, reopen the last closed tab |
 | Ctrl+PageDown, Ctrl+PageUp | Next tab, previous tab |
@@ -145,7 +150,6 @@ edits the file in the editor, and you save it.
 | Ctrl+B, Ctrl+J | Side bar, bottom panel |
 | Ctrl+Shift+H | Ask the agent about the selection |
 | Ctrl+=, Ctrl+-, Ctrl+Shift+0 | Interface size: larger, smaller, reset |
-| F1 | The text editor's own commands |
 
 Every shortcut can be changed in Settings (Ctrl+,). The lists and trees, the
 editor tabs, Blocks, the plan chart and the call graph all work with the arrow

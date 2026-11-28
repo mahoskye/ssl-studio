@@ -31,8 +31,8 @@ import { Finder } from "./Finder";
 import { Menu, type MenuItem } from "../Menu";
 import { savePicture } from "./picture";
 import { registerGraphBridge } from "./graphBridge";
-import { session } from "../lsp/session";
-import { aroundFocus, callList, choices, computeImpactAnalysis, formatImpactMarkdown, sameStep, dirId, keptFolds, withoutUnresolved, fold, gather, isFolderEnd, FOLD_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, ticketSubgraphFilter, topLabel, UNRESOLVED, visible, type Direction, type DrawnEdge, type Filter, type FocusLink, type Graph, type ImpactDocSummary, type ImpactNode, type ImpactReport, type ListedProc, relationOf, type Relation } from "./model";
+import { lspAnswering, session } from "../lsp/session";
+import { aroundFocus, callList, choices, computeImpactAnalysis, formatImpactMarkdown, sameStep, dirId, graphIdle, keptFolds, withoutUnresolved, fold, gather, isFolderEnd, FOLD_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, ticketSubgraphFilter, topLabel, UNRESOLVED, visible, type Direction, type DrawnEdge, type Filter, type FocusLink, type Graph, type ImpactDocSummary, type ImpactNode, type ImpactReport, type ListedProc, relationOf, type Relation } from "./model";
 import { asksFirst, chosenKey, layoutGate, openedFoldedNote, openingFolds, openingSize, pictureSize, shownWords, sizeOf, unfoldQuestion, type Chosen, type PictureSize } from "./unfold";
 import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
 import { submenuOrInline, type RowMenuEntry } from "../../shared/contextMenu";
@@ -1812,20 +1812,16 @@ export function GraphView() {
 		return [link.relation === "call" ? "" : RELATION_WORDS[link.relation], focus.endsWith("#") ? `${link.own.name}` : "", elsewhere ? `in ${rel(link.other.path)}` : "", link.count > 1 ? `from ${link.count} places` : ""].filter(Boolean).join(", ");
 	};
 	/** Why there is nothing to see, and what to do about it. */
-	const idle = (): { text: string; hint?: string; restart?: boolean } | null => {
-		if (!state.workspace) return { text: "Open a folder to see the calls between its procedures." };
-		const stale = graph()?.nodes.length ? " These are the calls as they were last read." : "";
-		if (state.lsp.state === "starting" || state.lsp.state === "restarting") return { text: `The language server is starting.${stale || " The graph is read from it, and appears when it is ready."}` };
-		if (state.lsp.state !== "running")
-			return {
-				text: `The language server is not running${stale ? `.${stale}` : ", so there are no calls to show: the graph is read from it."}${state.lsp.message ? ` It said: ${state.lsp.message}` : ""}`,
-				hint: "Restart it here or from the status bar. If it does not start, Settings has where to find it, under Language server program.",
-				restart: true,
-			};
-		if (failed()) return { text: failed(), hint: "Refresh tries again." };
-		if (graph() && !graph()!.nodes.length) return { text: "The language server found no procedures in this folder." };
-		return null;
-	};
+	const idle = () =>
+		graphIdle({ workspace: Boolean(state.workspace), lsp: state.lsp.state, lspMessage: state.lsp.message, answering: lspAnswering(), waiting: Boolean(progress()) && !layoutFailed(), failed: failed(), nodes: graph() ? graph()!.nodes.length : null });
+	/** The progress text is the view's own word on a layout that failed, not on what is being read. */
+	const layoutFailed = () => progress().startsWith("Layout failed: ");
+	/**
+	 * What is being read, for the bar. Not said while the server runs and does not answer: the lines under the bar
+	 * say then why nothing comes, and "Reading the workspace…" beside them would promise what may never come. The
+	 * request stays asked all the same. A layout that failed is still said.
+	 */
+	const reading = () => (state.lsp.state === "running" && !lspAnswering() && !layoutFailed() ? "" : progress());
 	const Proc = (p: { proc: ListedProc }) => (
 		<>
 			<Show when={p.proc.path !== UNRESOLVED} fallback={<span>{p.proc.name}</span>}>
@@ -1954,9 +1950,9 @@ export function GraphView() {
 				</Show>
 				<span class="spacer" />
 				{/* How much there is: in the bar while it is being read or listed, beside the key under the picture otherwise. */}
-				<Show when={progress() || mode() === "list" || !graph()?.nodes.length}>
+				<Show when={reading() || mode() === "list" || !graph()?.nodes.length}>
 					<span class="hint" role="status">
-						{progress() || tally()}
+						{reading() || tally()}
 					</span>
 				</Show>
 				<Show when={mode() === "graph" && !narrow()}>
@@ -2419,7 +2415,7 @@ export function GraphView() {
 					<div class="plan-keys graph-legend-pop" id={legendId} role="group" aria-label="What the graph's shapes and lines mean" hidden={!legendOpen()}>
 						<div class="graph-legend-head">
 							<strong>Legend</strong>
-							<Show when={!progress() && tally()}>
+							<Show when={!reading() && tally()}>
 								<span class="hint">{tally()}</span>
 							</Show>
 							<button class="graph-legend-close" aria-label="Close legend" onClick={() => setLegendOpen(false)}>
@@ -2461,7 +2457,7 @@ export function GraphView() {
 					<Show
 						when={said()}
 						fallback={
-							<Show when={!progress() && tally()}>
+							<Show when={!reading() && tally()}>
 								<p class="graph-said graph-tally-badge" role="status">
 									{tally()}
 								</p>

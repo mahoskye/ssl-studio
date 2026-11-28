@@ -48,8 +48,24 @@ milestone M0.
   per-launch token is the fallback.)
 - **Formatting edits** from the server replace the whole range; the client
   trims them to the changed lines so the cursor and markers stay put. Format
-  on save formats changed ranges: a full format of a 400 KB script takes
-  about a second.
+  on save formats the lines that changed, and leaves them as "Format
+  document" would: the whole document is formatted and the changed lines
+  are taken from the answer. A script over 400,000 characters is asked for
+  its changed ranges alone, which leaves out the server's whole-document
+  passes. A save waits two seconds for the server at most, then
+  writes the file as typed and says so once; while the server stays silent,
+  later saves wait a quarter of a second. Saving never depends on the server.
+- **A server that runs and does not answer** is one fact, kept by the LSP
+  session (`lspAnswering`): a request has waited five seconds and the server
+  has answered nothing since it was asked. Only an answer counts, a refusal
+  included; what the server sends of its own accord does not. A save that
+  gives up after its two seconds tells the session, so the notice and the
+  status bar turn together. The status bar item reads "LSP not answering"
+  and restarts the server; the Outline, Procedures, Reference, Problems,
+  Health, Blocks and the call graph say so in place of "Reading…" or of
+  nothing found.
+  Requests are not failed when the time is up: an answer that comes late is
+  delivered, and ends the silence, as a restart does.
 
 ## The language server (ADR 0003)
 
@@ -178,6 +194,7 @@ base, registries, and a catalog for each folder. The guide is
 | Workspace settings the IDE writes: region colours, panel layout, profile overrides | `<workspace>/.ssl-studio/settings.json` (the user decides whether to commit it) |
 | The project's documents | `README.md` and `AGENTS.md` at the root, Markdown under `docs/`, the data's shape under `schema/` (or the folders `project.toml` names), plans under `design/` |
 | Local history snapshots | `~/.local/share/ssl-studio/history/`, keyed by workspace |
+| Unsaved text, kept while a folder is not open | `~/.local/state/ssl-studio/unsaved/`, keyed by workspace ([ADR 0042](adr/0042-closing-keeps-unsaved-work-and-asks-nothing.md)) |
 
 Settings layer in this order, each later one winning: the user's, the
 project's (`project.toml`), what the IDE saved for the workspace.

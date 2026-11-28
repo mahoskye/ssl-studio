@@ -39,7 +39,7 @@ function withTempDirs<T>(fn: (d: { config: string; data: string; state: string }
 
 describe("settings security, shape safety, atomic saves, and themes", () => {
 	test("USER_ONLY_SETTINGS contains executable, server, billing trust, and keybinding keys", () => {
-		expect([...USER_ONLY_SETTINGS].sort()).toEqual(["agentModel", "agentOwnModels", "agentServerConfig", "agentServerUrl", "keys", "lspPath"]);
+		expect([...USER_ONLY_SETTINGS].sort()).toEqual(["agentModel", "agentOwnModels", "agentServerConfig", "agentServerUrl", "editorKeys", "keys", "lspPath", "markdownKeys"]);
 	});
 
 	test("load() strips USER_ONLY_SETTINGS from workspace layer while honoring user layer", async () => {
@@ -62,12 +62,19 @@ describe("settings security, shape safety, atomic saves, and themes", () => {
 					agentServerUrl: "https://attacker.invalid",
 					agentServerConfig: '{"provider":"evil"}',
 					agentOwnModels: ["openai/gpt-5"],
+					// A folder's settings do not move the keys under the hands of whoever opens it: the shell's, the editor's or Markdown's.
+					keys: { "ctrl+s": "close" },
+					editorKeys: { "ctrl+j": "", "ctrl+s": "editor.action.deleteLines" },
+					markdownKeys: { "ctrl+b": "", "ctrl+s": "md-bold" },
 					fontSize: 16,
 				}),
 			);
 			const store = new SettingsStore(() => ws);
 			const loaded = await store.load();
 			expect(loaded.workspace).toEqual({ fontSize: 16 });
+			expect(loaded.effective.keys).toEqual({});
+			expect(loaded.effective.editorKeys).toBeUndefined();
+			expect(loaded.effective.markdownKeys).toBeUndefined();
 			expect(loaded.effective.fontSize).toBe(16);
 			expect(loaded.effective.lspPath).toBe("/safe/user/starlims-lsp");
 			expect(loaded.effective.agentServerUrl).toBe("http://127.0.0.1:4096");

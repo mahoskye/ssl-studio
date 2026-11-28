@@ -230,7 +230,7 @@ for (const lang of [
 	mock.module(`monaco-editor/languages/definitions/${lang}/register`, () => ({}));
 }
 
-const { loadGrammar, resetGrammarForTest } = await import("../src/view/editor/textmate");
+const { loadGrammar, measure, measureKept, resetGrammarForTest } = await import("../src/view/editor/textmate");
 const { applyTheme, builtIn, resolveTheme, sanitizeTokenColors, shapeEditorMenus } = await import("../src/view/themes/themes");
 
 const rootTmp = mkdtempSync(join(tmpdir(), "ssl-studio-r9b-"));
@@ -362,6 +362,39 @@ describe("P1-1: resolveFontStack() CSS syntax injection & IACVT hardening", () =
 		expect(resolveFontStack("inherit, Inter, unset, monospace", DEFAULT_CODE_FONT)).toBe(`"Inter", monospace, ${DEFAULT_CODE_FONT}`);
 		const generics = "system-ui, -apple-system, sans-serif, serif, monospace, ui-sans-serif, ui-serif, ui-monospace, cursive, fantasy, emoji, math, fangsong";
 		expect(resolveFontStack(generics, DEFAULT_UI_FONT)).toBe(`${generics}, ${DEFAULT_UI_FONT}`);
+	});
+});
+
+describe("the size meter reads again only what an edit changed (StatusBar, measureKept)", () => {
+	test("each reading is the whole reading, through edits that open and close a comment, add lines and take them away", () => {
+		const dir = resolve(import.meta.dir, "../examples/due-dates/src/DueDates");
+		const scripts = ["DueRules.ssl", "WorkCalendar.ssl", "SetSampleDueDates.ssl"].map((name) => readFileSync(join(dir, name), "utf8"));
+		let lines = scripts.join("\n").split("\n");
+		const owner = {};
+		const same = () => {
+			const text = lines.join("\n");
+			expect(measureKept(owner, text)).toEqual(measure(text));
+		};
+		same();
+		const at = Math.floor(lines.length / 3);
+		// A comment opened mid-script runs to the next ";": the lines after the edit read otherwise until it ends.
+		lines[at] = `/* opened here ${lines[at]}`;
+		same();
+		lines[at] = lines[at]!.slice("/* opened here ".length);
+		same();
+		lines.splice(0, 0, "/* a new banner;", "", ":DECLARE nNew;");
+		same();
+		lines.splice(at, 25);
+		same();
+		lines.push("nLast := 1;");
+		same();
+		lines[5] = `${lines[5]} /* trailing;`;
+		same();
+		lines = ["only this;"];
+		same();
+		// A document the meter has not read before, and one read with nothing to keep it by, read as a whole does.
+		expect(measureKept({}, scripts[0]!)).toEqual(measure(scripts[0]!));
+		expect(measureKept(null, scripts[1]!)).toEqual(measure(scripts[1]!));
 	});
 });
 

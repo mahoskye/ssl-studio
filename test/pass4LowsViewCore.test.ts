@@ -13,7 +13,7 @@ import { createEffect, createMemo, createRoot, createSignal, flush, snapshot } f
 import { createBackend, VIEW_ANSWERS_WITHIN, type Host } from "../src/bun/backend";
 import { historyNotKept } from "../src/bun/history";
 import { dirs } from "../src/bun/paths";
-import { DEFAULT_SETTINGS, type BackendEvents, type Settings } from "../src/shared/protocol";
+import { DEFAULT_SETTINGS, type BackendEvents, type KeptText, type Settings } from "../src/shared/protocol";
 import { createAsyncQuery } from "../src/view/asyncQuery";
 
 // --- Headless browser & Monaco shims (compatible superset of r2cEditorTabsState.test.ts / r8cStateKeysQuickPick.test.ts) ---
@@ -74,6 +74,7 @@ type FakeModel = {
 	getLanguageId(): string;
 	getVersionId(): number;
 	getAlternativeVersionId(): number;
+	detectIndentation(insertSpaces: boolean, tabSize: number): void;
 	getLineCount(): number;
 	getLineMaxColumn(line: number): number;
 	getLineFirstNonWhitespaceColumn(line: number): number;
@@ -153,6 +154,8 @@ function createFakeModel(text: string, lang: string, uri: ReturnType<typeof make
 		getVersionId() {
 			return this._version;
 		},
+		// What Tab writes is the real editor's to work out: asked here, nothing follows from it.
+		detectIndentation() {},
 		getAlternativeVersionId() {
 			return this._altVersion;
 		},
@@ -320,7 +323,8 @@ mock.module(resolve(import.meta.dir, "../src/view/dialogs.tsx"), () => ({
 
 const { connect } = await import("../src/view/backend");
 const { closeReview, review } = await import("../src/view/editor/Review");
-const { commitPendingEdits, documents, holdsPendingEdit, loadSettings, newUntitled, notSavedText, openFile, openFolder, saveAllUnasked, saveSetting, setState, state } = await import("../src/view/state");
+const { closeTab, commitPendingEdits, documents, forgetKeptRecord, holdsPendingEdit, KEEP_AFTER, keepUnsaved, loadSettings, newUntitled, notSavedText, openFile, openFolder, restoreTabs, save, saveAllUnasked, saveSetting, setDocumentLanguage, setState, state } =
+	await import("../src/view/state");
 const { resetRecentTabs } = await import("../src/view/recentTabs");
 const { resetTidy } = await import("../src/view/agent/tidy");
 const { askAbout } = await import("../src/view/agent/Agent");
@@ -661,9 +665,9 @@ describe("L6: local history that is not kept is said in the app", () => {
 });
 
 // =============================================================================
-// B9-4. The desktop window closed over text that is still being typed
+// B9-4. The desktop window closed over text that is still being typed, and over unsaved files (ADR 0042)
 // =============================================================================
-describe("B9-4: the window is not closed over text still being typed", () => {
+describe("B9-4: the window is not closed over text still being typed, nor over unsaved files before their text is kept", () => {
 	// The backend's side: what `will-close` and `before-quit` ask (src/bun/index.ts), and what it answers from.
 	describe("the backend", () => {
 		test("with nothing unsaved and no view that may hold typed text, the window closes at once and nobody is asked", async () => {
@@ -677,7 +681,7 @@ describe("B9-4: the window is not closed over text still being typed", () => {
 			backend.dispose();
 		});
 
-		test("while such a view is open it does not close on a count of 0: the view is asked to count again", async () => {
+		test("while such a view is open it does not close on a count of 0: the view is sent for", async () => {
 			const { host, sent, quits } = hostOf();
 			const backend = createBackend(host);
 			await backend.api.unsavedChanged(0);
@@ -685,8 +689,8 @@ describe("B9-4: the window is not closed over text still being typed", () => {
 			expect(backend.mayClose()).toBe(false);
 			expect(sent("closeRequested").length).toBe(1);
 
-			// The view put the text in its document: one file is unsaved now, and it asks. Cancelled, the window stays,
-			// and a second press of the close button asks again.
+			// The view put the text in its document: one file is unsaved now. Until the view has had its text kept and
+			// closes the app, the window stays, and a second press of the close button sends for the view again.
 			await backend.api.unsavedChanged(1);
 			expect(backend.mayClose()).toBe(false);
 			expect(sent("closeRequested").length).toBe(2);
@@ -740,7 +744,7 @@ describe("B9-4: the window is not closed over text still being typed", () => {
 			}
 		});
 
-		test("unsaved files are never let go that way, however long the view says nothing", async () => {
+		test("unsaved files are let go that way too: what was kept as they were typed is what there is of them (ADR 0042)", async () => {
 			const { host } = hostOf();
 			const backend = createBackend(host);
 			const clock = Date.now;
@@ -751,7 +755,7 @@ describe("B9-4: the window is not closed over text still being typed", () => {
 				await backend.api.unsavedChanged(1);
 				expect(backend.mayClose()).toBe(false);
 				now += 10 * VIEW_ANSWERS_WITHIN;
-				expect(backend.mayClose()).toBe(false);
+				expect(backend.mayClose()).toBe(true);
 			} finally {
 				Date.now = clock;
 				backend.dispose();
@@ -824,12 +828,14 @@ describe("B9-4: the window is not closed over text still being typed", () => {
 			expect(readSrc("../src/view/state.ts")).toContain('for (const type of ["keydown", "input", "focusout"]) window.addEventListener(type, askAgain, true);');
 		});
 
-		test("asked about a close, it puts the typed text in its document first and then asks about the unsaved file", async () => {
+		test("sent for about a close, it puts the typed text in its document, has the unsaved text kept, and closes the app without a question", async () => {
 			const file = "/ws/registry.csv";
 			const calls: string[] = [];
-			rpcHandler = (method) => {
+			const keeps: unknown[][] = [];
+			rpcHandler = (method, args) => {
 				calls.push(method);
 				if (method === "read") return { text: "Code,Name\n", mtime: 1, encoding: "utf-8" };
+				if (method === "unsavedKeep") keeps.push(args);
 				return null;
 			};
 			await openFile(file, { keep: true });
@@ -843,24 +849,50 @@ describe("B9-4: the window is not closed over text still being typed", () => {
 			});
 			try {
 				expect(snapshot(state).dirty[file]).toBeFalsy();
-				const asked: string[] = [];
-				chooseHandler = (prompt) => (asked.push(prompt), null);
-				pushed("closeRequested", {});
-				await until(() => asked.length === 1);
-				expect((documents.get(file)!.model as any).getValue()).toBe("A1,Code,Name\n");
-				expect(asked[0]).toBe("1 file has unsaved changes (registry.csv). Closing the window would lose them.");
-				await sleep(5);
-				// Cancelled: the window stays, and nothing closed the app.
-				expect(calls).not.toContain("closeWindow");
-
-				// The close button again: asked again, and "Discard changes" closes the app.
-				chooseHandler = (prompt) => (asked.push(prompt), "Discard changes");
+				let asked = 0;
+				chooseHandler = () => (asked++, null);
 				pushed("closeRequested", {});
 				await until(() => calls.includes("closeWindow"));
-				expect(asked.length).toBe(2);
+				expect(asked).toBe(0);
+				// The text that was still in the cell is in the document, and is what was kept: before the app was closed.
+				expect((documents.get(file)!.model as any).getValue()).toBe("A1,Code,Name\n");
+				expect(keeps).toEqual([["/ws", [{ path: file, text: "A1,Code,Name\n", saved: { text: "Code,Name\n", mtime: 1 } }], []]]);
+				expect(calls.indexOf("unsavedKeep")).toBeLessThan(calls.indexOf("closeWindow"));
+				// Still unsaved here: nothing saved it, and nothing discarded it.
+				expect(snapshot(state).dirty[file]).toBe(true);
+				expect(calls).not.toContain("write");
 			} finally {
 				release();
 			}
+		});
+
+		test("where the text cannot be kept, it asks as it did before (ADR 0009), and closes the app only on an answer", async () => {
+			const file = "/ws/registry.csv";
+			const calls: string[] = [];
+			rpcHandler = (method) => {
+				calls.push(method);
+				if (method === "read") return { text: "Code,Name\n", mtime: 1, encoding: "utf-8" };
+				if (method === "unsavedKeep") throw new Error("ENOSPC: no space left on device");
+				return null;
+			};
+			await openFile(file, { keep: true });
+			flush();
+			typeInto(file, "A1,");
+			const asked: string[] = [];
+			chooseHandler = (prompt) => (asked.push(prompt), null);
+			pushed("closeRequested", {});
+			await until(() => asked.length === 1);
+			expect(asked[0]).toBe("1 file has unsaved changes (registry.csv). They could not be kept for next time. Closing the window would lose them.");
+			await sleep(5);
+			// Cancelled: the window stays, and nothing closed the app.
+			expect(calls).not.toContain("closeWindow");
+			expect((documents.get(file)!.model as any).getValue()).toBe("A1,Code,Name\n");
+
+			// The close button again: asked again, and "Discard changes" closes the app.
+			chooseHandler = (prompt) => (asked.push(prompt), "Discard changes");
+			pushed("closeRequested", {});
+			await until(() => calls.includes("closeWindow"));
+			expect(asked.length).toBe(2);
 		});
 
 		test("with such a view open and nothing typed in it, it closes the app at once and asks nothing", async () => {
@@ -881,17 +913,342 @@ describe("B9-4: the window is not closed over text still being typed", () => {
 		});
 	});
 
-	test("the desktop host asks the guard on both ways to close, and the view answers a request with the question about unsaved changes (source text)", () => {
+	test("the desktop host asks the guard on both ways to close, and the view answers a request by having the unsaved text kept (source text)", () => {
 		// Electrobun cannot be run here: these are the two ends the tests above stand between.
 		const host = readSrc("../src/bun/index.ts");
 		expect(host).toContain('window.on("will-close", (event: unknown) => {\n\tif (!backend.mayClose())');
 		expect(host).toContain('Electrobun.events.on("before-quit"');
 		expect(host.match(/backend\.mayClose\(\)/g)?.length).toBe(2);
 		const view = readSrc("../src/view/state.ts");
-		expect(view).toContain('if (await settleUnsaved("Closing the window would lose them.")) await backend.closeWindow();');
+		expect(view).toContain('if (await leaveUnsavedKept("Closing the window would lose them.")) await backend.closeWindow();');
+		expect(view).toMatch(/export async function leaveUnsavedKept\(what: string\): Promise<boolean> \{\n\tcommitPendingEdits\(\);\n\tif \(\(await keepUnsaved\(\)\) === null\) return true;/);
 		expect(view).toMatch(/export async function settleUnsaved\(what: string\): Promise<boolean> \{\n\tcommitPendingEdits\(\);/);
+		// A page that goes (a reload, a browser tab closed) asks nothing either: the text is sent to be kept.
+		expect(readSrc("../src/view/main.tsx")).toContain('window.addEventListener("beforeunload", () => keepUnsavedOnLeave());');
 		// A window that was reloaded starts by saying that no such view is open.
 		expect(readSrc("../src/view/main.tsx")).toContain("void backend.typingChanged(false).catch(() => undefined);");
+	});
+});
+
+// =============================================================================
+// ADR 0042. Unsaved text is kept as it is typed, and comes back with the folder
+// =============================================================================
+describe("ADR 0042: unsaved text is kept, and comes back when the folder is opened again", () => {
+	beforeAll(connectTestRpc);
+	afterAll(disconnectTestRpc);
+	/** The tabs and panels the window remembers for the folders of these tests. Through the window's own storage: in a run of every test file it is whichever file's came first, not this file's `storage`. */
+	const forgetTabs = () => {
+		for (const root of ["/ws", "/other"]) for (const kind of ["tabs", "views"]) localStorage.removeItem(`ssl-studio.${kind}:${root}`);
+	};
+	const rememberedTabs = (tabs: string[], active: string) => localStorage.setItem("ssl-studio.tabs:/ws", JSON.stringify({ groups: [{ tabs, active }], activeGroup: 0 }));
+	beforeEach(() => {
+		resetAll();
+		forgetKeptRecord();
+		forgetTabs();
+	});
+	afterAll(forgetTabs);
+
+	type Keep = { root: string; keep: KeptText[]; drop: string[] };
+	/**
+	 * A backend with these files on disk (null: not there), and this text kept for the folder. It writes down what
+	 * it is asked to keep, and what it is asked to write.
+	 */
+	function backendOf(files: Record<string, { text: string; mtime: number } | null>, kept: KeptText[] = []) {
+		const keeps: Keep[] = [];
+		const written: Record<string, string> = {};
+		const calls: string[] = [];
+		rpcHandler = (method, args) => {
+			calls.push(method);
+			if (method === "read") {
+				const file = files[String(args[0])];
+				if (!file) throw new Error(`ENOENT: no such file or directory, open '${args[0]}'`);
+				return { path: args[0], ...file, encoding: "utf-8" };
+			}
+			if (method === "write") {
+				written[String(args[0])] = String(args[1]);
+				files[String(args[0])] = { text: String(args[1]), mtime: 99 };
+				return { mtime: 99 };
+			}
+			if (method === "unsavedKeep") keeps.push({ root: args[0] as string, keep: args[1] as KeptText[], drop: args[2] as string[] });
+			if (method === "unsavedKept") return kept;
+			if (method === "settings") return { effective: structuredClone(DEFAULT_SETTINGS), user: {}, workspace: {} };
+			if (method === "themes") return [];
+			if (method === "info") return { app: "0.1.0", selftest: false };
+			if (method === "lspState") return { state: "stopped" };
+			if (method === "openFolder") return { root: String(args[0]), name: String(args[0]).slice(1) };
+			return null;
+		};
+		return { keeps, written, calls };
+	}
+	const A = "/ws/a.ssl";
+	const B = "/ws/b.ssl";
+	const textOf = (path: string) => (documents.get(path)!.model as any).getValue() as string;
+	const tabs = () => snapshot(state).groups.map((g) => [...g.tabs]);
+	const unsaved = () => Object.keys(snapshot(state).dirty).filter((path) => snapshot(state).dirty[path]);
+
+	test("text is kept within the second of being typed, and a further key does not put that off", async () => {
+		const { keeps } = backendOf({ [A]: { text: "one\n", mtime: 1 } });
+		await openFile(A, { keep: true });
+		typeInto(A, "a");
+		await sleep(KEEP_AFTER / 2);
+		typeInto(A, "b");
+		expect(keeps).toEqual([]);
+		await sleep(KEEP_AFTER / 2 + 100);
+		// A second after the first key, with what had been typed by then; the file it was made over goes along.
+		expect(keeps).toEqual([{ root: "/ws", keep: [{ path: A, text: "baone\n", saved: { text: "one\n", mtime: 1 } }], drop: [] }]);
+		typeInto(A, "c");
+		await sleep(KEEP_AFTER + 100);
+		// The next text goes alone: the backend has the file it was made over.
+		expect(keeps[1]).toEqual({ root: "/ws", keep: [{ path: A, text: "cbaone\n" }], drop: [] });
+		// Nothing typed since: nothing more is sent, also when it is asked for.
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps.length).toBe(2);
+	});
+
+	test("what is saved, or closed with its changes given up, is no longer kept; a document with no file yet is kept too", async () => {
+		const { keeps } = backendOf({ [A]: { text: "one\n", mtime: 1 }, [B]: { text: "two\n", mtime: 1 } });
+		await openFile(A, { keep: true });
+		await openFile(B, { keep: true });
+		typeInto(A, "a");
+		typeInto(B, "b");
+		const untitled = newUntitled(0, "ssl");
+		typeInto(untitled, "draft");
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps.length).toBe(1);
+		expect(keeps[0]!.keep).toEqual([
+			{ path: A, text: "aone\n", saved: { text: "one\n", mtime: 1 } },
+			{ path: B, text: "btwo\n", saved: { text: "two\n", mtime: 1 } },
+			{ path: untitled, text: "draft", language: "ssl" },
+		]);
+
+		expect(await save(A)).toBe(true);
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps[1]).toEqual({ root: "/ws", keep: [], drop: [A] });
+
+		expect(await closeTab(B, 0, { discard: true })).toBe(true);
+		expect(await closeTab(untitled, 0, { discard: true })).toBe(true);
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps[2]).toEqual({ root: "/ws", keep: [], drop: [B, untitled] });
+
+		// Edited again after the save: kept again, over the file as the save left it.
+		typeInto(A, "x");
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps[3]).toEqual({ root: "/ws", keep: [{ path: A, text: "xaone\n", saved: { text: "aone\n", mtime: 99 } }], drop: [] });
+	});
+
+	test("opening another folder asks nothing: what is unsaved is kept for the folder that is left, before it is left", async () => {
+		const { keeps, calls } = backendOf({ [A]: { text: "one\n", mtime: 1 } });
+		await openFile(A, { keep: true });
+		typeInto(A, "a");
+		let asked = 0;
+		chooseHandler = () => (asked++, null);
+		await openFolder("/other");
+		flush();
+		expect(asked).toBe(0);
+		expect(snapshot(state).workspace?.root).toBe("/other");
+		expect(keeps).toEqual([{ root: "/ws", keep: [{ path: A, text: "aone\n", saved: { text: "one\n", mtime: 1 } }], drop: [] }]);
+		expect(calls.indexOf("unsavedKeep")).toBeLessThan(calls.indexOf("openFolder"));
+		// The folder that is open now has none of it: not among its documents, and not on record to be forgotten.
+		expect(documents.size).toBe(0);
+		expect(unsaved()).toEqual([]);
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps.length).toBe(1);
+	});
+
+	test("where it cannot be kept, opening another folder asks as it did, and a cancelled question leaves the folder open", async () => {
+		const { calls } = backendOf({ [A]: { text: "one\n", mtime: 1 } });
+		const answer = rpcHandler;
+		rpcHandler = (method, args) => {
+			if (method === "unsavedKeep") throw new Error("EROFS: read-only file system");
+			return answer(method, args);
+		};
+		await openFile(A, { keep: true });
+		typeInto(A, "a");
+		const asked: string[] = [];
+		chooseHandler = (prompt) => (asked.push(prompt), null);
+		await openFolder("/other");
+		expect(asked).toEqual(["1 file has unsaved changes (a.ssl). They could not be kept for next time. Opening another folder closes them."]);
+		expect(snapshot(state).workspace?.root).toBe("/ws");
+		expect(calls).not.toContain("openFolder");
+		expect(textOf(A)).toBe("aone\n");
+	});
+
+	test("a language mode chosen for a document with no file yet is kept, though no text of it changed", async () => {
+		const { keeps } = backendOf({ [A]: { text: "one\n", mtime: 1 } });
+		const untitled = newUntitled();
+		typeInto(untitled, "draft");
+		await openFile(A, { keep: true });
+		typeInto(A, "a");
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps).toEqual([{ root: "/ws", keep: [{ path: untitled, text: "draft", language: "plaintext" }, { path: A, text: "aone\n", saved: { text: "one\n", mtime: 1 } }], drop: [] }]);
+
+		// Made a script by its language mode, with no key typed: kept within the second, as typing is, with the mode.
+		// It once came back as plain text: the mode is kept with the text, and the text was kept already.
+		expect(setDocumentLanguage(untitled, "ssl")).toBe(true);
+		expect(keeps.length).toBe(1);
+		await sleep(KEEP_AFTER + 100);
+		expect(keeps.slice(1)).toEqual([{ root: "/ws", keep: [{ path: untitled, text: "draft", language: "ssl" }], drop: [] }]);
+		// And once: the backend has it as it is now.
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps.length).toBe(2);
+
+		// The mode it has already is no change, and a file's mode is not kept: its name says what it is.
+		expect(setDocumentLanguage(untitled, "ssl")).toBe(false);
+		expect(setDocumentLanguage(A, "plaintext")).toBe(true);
+		await sleep(KEEP_AFTER + 100);
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps.length).toBe(2);
+
+		// Chosen and the folder left at once, before the second is up: what is asked to be kept then has the mode.
+		expect(setDocumentLanguage(untitled, "sql")).toBe(true);
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps[2]).toEqual({ root: "/ws", keep: [{ path: untitled, text: "draft", language: "sql" }], drop: [] });
+	});
+
+	test("the folder opens with what was left unsaved: the kept text, unsaved, each in a tab, and nothing said", async () => {
+		const { keeps } = backendOf({ [A]: { text: "one\n", mtime: 1 } }, [
+			{ path: A, text: "edited\n", saved: { text: "one\n", mtime: 1 } },
+			{ path: "untitled:Untitled-1", text: "draft\n", language: "ssl" },
+		]);
+		let asked = 0;
+		chooseHandler = () => (asked++, null);
+		await restoreTabs();
+		flush();
+		expect(textOf(A)).toBe("edited\n");
+		expect(textOf("untitled:Untitled-1")).toBe("draft\n");
+		expect((documents.get("untitled:Untitled-1")!.model as any).getLanguageId()).toBe("ssl");
+		expect(unsaved().sort()).toEqual([A, "untitled:Untitled-1"]);
+		expect(tabs()).toEqual([[A, "untitled:Untitled-1"]]);
+		expect(snapshot(state).conflicts).toEqual({});
+		expect(notices()).toEqual([]);
+		expect(asked).toBe(0);
+		// The backend has these texts: they are not sent to it again until they change.
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps).toEqual([]);
+		// The document that came back is given another language mode: that is a change, and is kept.
+		expect(setDocumentLanguage("untitled:Untitled-1", "sql")).toBe(true);
+		expect(await keepUnsaved()).toBeNull();
+		expect(keeps).toEqual([{ root: "/ws", keep: [{ path: "untitled:Untitled-1", text: "draft\n", language: "sql" }], drop: [] }]);
+		keeps.length = 0;
+		// A new document with no file does not take the name of the one that came back.
+		expect(newUntitled()).toBe("untitled:Untitled-2");
+		// The file was touched meanwhile (another date, the same text): it has not changed under the edits, and a save is a save.
+		expect(await save(A)).toBe(true);
+		expect(asked).toBe(0);
+	});
+
+	test("with tabs remembered, each comes back in its place: a document with no file among them, and one left empty not at all", async () => {
+		backendOf({ [A]: { text: "one\n", mtime: 1 }, [B]: { text: "two\n", mtime: 1 } }, [
+			{ path: A, text: "edited\n", saved: { text: "one\n", mtime: 1 } },
+			{ path: "untitled:Untitled-2", text: "draft\n" },
+		]);
+		rememberedTabs(["untitled:Untitled-2", B, A, "untitled:Untitled-7"], A);
+		await restoreTabs();
+		flush();
+		expect(tabs()).toEqual([["untitled:Untitled-2", B, A]]);
+		expect(snapshot(state).groups[0]!.active).toBe(A);
+		expect(unsaved().sort()).toEqual([A, "untitled:Untitled-2"]);
+		expect(textOf(B)).toBe("two\n");
+	});
+
+	test("a file that changed on disk meanwhile comes back with the kept text, marked: it is said, and saving asks which to keep", async () => {
+		for (const diskDate of [5, 1]) {
+			resetAll();
+			forgetKeptRecord();
+			forgetTabs();
+			// Changed on disk, with a later date or (a file put back from elsewhere) with the very date it had.
+			const { written } = backendOf({ [A]: { text: "changed elsewhere\n", mtime: diskDate } }, [{ path: A, text: "edited\n", saved: { text: "one\n", mtime: 1 } }]);
+			await restoreTabs();
+			flush();
+			expect(textOf(A)).toBe("edited\n");
+			expect(unsaved()).toEqual([A]);
+			expect(snapshot(state).conflicts).toEqual({ [A]: true });
+			expect(notices()).toEqual(["a.ssl changed on disk while its unsaved text was kept. The unsaved text is open: saving will ask which to keep."]);
+			const asked: string[] = [];
+			chooseHandler = (prompt) => (asked.push(prompt), null);
+			expect(await save(A)).toBe(false);
+			expect(asked).toEqual(["a.ssl changed on disk after you opened it. Saving would replace what is there."]);
+			expect(written).toEqual({});
+		}
+	});
+
+	test("a file that is gone comes back with its kept text, and saving puts the file back", async () => {
+		const { written } = backendOf({ [A]: null, [B]: null }, [
+			{ path: A, text: "edited\n", saved: { text: "one\n", mtime: 1 } },
+			{ path: B, text: "more\n", saved: { text: "two\n", mtime: 1 } },
+		]);
+		await restoreTabs();
+		flush();
+		expect(unsaved().sort()).toEqual([A, B]);
+		expect(snapshot(state).conflicts).toEqual({});
+		expect(notices()).toEqual(["a.ssl, b.ssl are no longer on disk. Their unsaved text is open: save to put the files back."]);
+		let asked = 0;
+		chooseHandler = () => (asked++, null);
+		expect(await save(A)).toBe(true);
+		expect(asked).toBe(0);
+		expect(written).toEqual({ [A]: "edited\n" });
+	});
+
+	test("a file that has the kept text by now has nothing unsaved: it gets no tab for it, and the kept text is forgotten", async () => {
+		const { keeps } = backendOf({ [A]: { text: "edited\n", mtime: 8 } }, [{ path: A, text: "edited\n", saved: { text: "one\n", mtime: 1 } }]);
+		await restoreTabs();
+		flush();
+		expect(unsaved()).toEqual([]);
+		expect(tabs()).toEqual([[]]);
+		expect(notices()).toEqual([]);
+		await sleep(20);
+		expect(keeps).toEqual([{ root: "/ws", keep: [], drop: [A] }]);
+	});
+
+	test("text kept with no word of the file it was made over is not taken to fit the file that is there", async () => {
+		// What a keep cut short could leave. The file is not written over on the strength of it: saving asks.
+		backendOf({ [A]: { text: "one\n", mtime: 1 } }, [{ path: A, text: "edited\n" }]);
+		await restoreTabs();
+		flush();
+		expect(textOf(A)).toBe("edited\n");
+		expect(snapshot(state).conflicts).toEqual({ [A]: true });
+		const asked: string[] = [];
+		chooseHandler = (prompt) => (asked.push(prompt), null);
+		expect(await save(A)).toBe(false);
+		expect(asked.length).toBe(1);
+	});
+
+	test("reloaded without its tabs, the folder keeps the unsaved text for when the file is opened, and says that it has it", async () => {
+		const had = (globalThis as any).sessionStorage;
+		(globalThis as any).sessionStorage = { getItem: (key: string) => (key === "ssl-studio.skipTabsOnce" ? "1" : null), setItem() {}, removeItem() {} };
+		try {
+			const { keeps } = backendOf({ [A]: { text: "one\n", mtime: 1 } }, [{ path: A, text: "edited\n", saved: { text: "one\n", mtime: 1 } }]);
+			rememberedTabs([A], A);
+			await restoreTabs();
+			flush();
+			expect(tabs()).toEqual([[]]);
+			expect(documents.size).toBe(0);
+			expect(notices()).toEqual(["Unsaved text is kept for a.ssl. It comes back when the file is opened."]);
+			// Nothing of it is forgotten for not being open.
+			expect(await keepUnsaved()).toBeNull();
+			expect(keeps).toEqual([]);
+			await openFile(A, { keep: true });
+			flush();
+			expect(textOf(A)).toBe("edited\n");
+			expect(unsaved()).toEqual([A]);
+		} finally {
+			(globalThis as any).sessionStorage = had;
+		}
+	});
+
+	test("unsaved text that cannot be asked for loses nothing: the files open as they are, and why is in Output", async () => {
+		backendOf({ [A]: { text: "one\n", mtime: 1 } });
+		const answer = rpcHandler;
+		rpcHandler = (method, args) => {
+			if (method === "unsavedKept") throw new Error("EACCES: permission denied");
+			return answer(method, args);
+		};
+		rememberedTabs([A], A);
+		await restoreTabs();
+		flush();
+		expect(tabs()).toEqual([[A]]);
+		expect(textOf(A)).toBe("one\n");
+		expect(snapshot(state).output.some((line) => line.includes("the unsaved text kept for ws could not be read: EACCES: permission denied"))).toBe(true);
 	});
 });
 
@@ -966,6 +1323,17 @@ describe("B9-5: Save all where nothing can be asked", () => {
 				"“Try again” may bring the editor back, where that can be asked.",
 			].join("\n"),
 		);
+	});
+
+	test("a file is saved in the encoding it was read in, which the backend is told", async () => {
+		const file = "/ws/Degrees.ssl";
+		const wrote: unknown[][] = [];
+		rpcHandler = (method, args) => (method === "read" ? { text: "/* 37°C ;\n", mtime: 1, encoding: "windows-1252" } : method === "write" ? (wrote.push(args), { mtime: 2 }) : null);
+		await openFile(file, { keep: true });
+		flush();
+		typeInto(file, "/* µL ; */ ");
+		expect(await save(file)).toBe(true);
+		expect(wrote.map((args) => args[3])).toEqual(["windows-1252"]);
 	});
 
 	test("with nothing in the way everything is saved, and the card has nothing to say of files not saved", async () => {

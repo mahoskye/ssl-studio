@@ -224,8 +224,24 @@ are left alone. The same release reports junk after a block keyword
 as `unexpected_token`; both used to pass. The demo project is still clean
 under it.
 
-**Still open** in mahoskye/starlims-lsp#372: the other two rows, and
-`doproc_in_class`. Each waits on a run on STARLIMS itself.
+**The rest is answered in starlims-lsp 0.33.0 (2026-11-27)**, SSL Studio's
+pinned version, after a run of each on STARLIMS 12; #372 is closed:
+
+- **The third row** is the warning `iif_guard_ineffective`, for the shape
+  that fails at run time. `IIf` works out both of its value arguments, so
+  a read the test was meant to guard (`IIf(Empty(aRows), 0, aRows[1, 1])`)
+  raises when the test is true.
+- **The second row has no diagnostic, by decision** (the server's D22). A
+  procedure entered by its three-part name reads the variables declared
+  anywhere up the call stack, so one call site cannot show whether the
+  name is there.
+- **`doproc_in_class` stands.** A bare `DoProc` in such a method does not
+  compile on STARLIMS 12; the runner was wrong to run it.
+
+The same release fails validation on four more `DoProc` shapes
+(`DoProc("Name",)` among them) and a quoted `:INHERIT` parent. The demo
+project is still clean under it. The IDE needed no change: it shows what
+the server reports, and lists no codes of its own.
 
 ## Asked on 2026-11-25
 
@@ -323,3 +339,65 @@ stays, because one case still reaches past the line asked for, and rightly:
 a statement with no `;` at all runs on into the next line, for the server
 as for STARLIMS. That answer is not applied
 (`test/pass4Regressions.test.ts` asks the pinned server both).
+
+## Reported on 2026-11-27
+
+Found by the second review of the editor, and checked against the server's
+own specification at 0.32.0 before they were reported: each answer breaks
+a rule the server's catalog states. Three defects, no feature of the IDE.
+**All three are answered in starlims-lsp 0.33.1 (2026-11-27)**, SSL
+Studio's pinned version; #378, #379 and #380 are closed. The IDE needed no
+change, since it applies what the server answers. `test/lspDefectsAnswered.test.ts`
+asks the pinned server each case; every one of its tests fails on 0.33.0.
+
+Other findings of that review were left with the server as they are,
+because its specification calls them intended: a range format keeps its
+first line's indentation (formatting A2, so the IDE takes a selection's
+lines from a whole-document format, ADR 0043); Ctrl+Space after `oObj:Pre`
+gives the full list; a `:` after a space gives keywords; workspace symbols
+match by substring. `DoProc("X")` reaching a procedure of an `:INCLUDE`d
+script is a request the IDE has not made.
+
+| Request | Issue |
+| --- | --- |
+| L11 | mahoskye/starlims-lsp#378 |
+| L12 | mahoskye/starlims-lsp#379 |
+| L13 | mahoskye/starlims-lsp#380 |
+
+### L11: no rename of `.T.`, `.F.`, `.AND.`, `.OR.` or `.NOT.`
+
+Prepare-rename on `.T.` offers `T` as a name, and the rename then turns
+every `.T.` in the file into `.Z.` (or whatever was typed). The catalog
+says prepare-rename must refuse literals and operators. The IDE applies
+what the server answers, so it has nothing to guard here.
+
+**What came (0.33.1):** prepare-rename and rename on the letters of any of
+the five answer nothing, so the editor says the name cannot be renamed.
+Renaming a variable spelled `t` (or `f`, `and`, `or`, `not`) edits the
+variable alone, and find references on it no longer lists the dotted
+tokens.
+
+### L12: one unit for columns and token lengths
+
+With non-ASCII text in a string (`°`, `µ`, `é`), signature help counts
+the wrong argument for a few characters after the next comma, and a
+SQL placeholder's hover can come back empty. The server compares character
+columns with `len` of a token's text, which counts bytes.
+
+**What came (0.33.1):** a token's extent is counted in characters. Signature
+help moves to the next parameter at the comma, a placeholder hovers from
+its first letter, and member completion and the placeholder findings'
+ranges are right after such text too. The same release fixed a
+placeholder's hover on the later lines of a multi-line string, which had
+never answered.
+
+### L13: `Me:` lists the class's own members
+
+In a class written in the workspace, `Me:` offers nothing; the catalog's
+A4 says the enclosing class's members are listed. The server looks only
+among the built-in classes.
+
+**What came (0.33.1):** `Me:` lists the class's fields and methods, the
+procedures of the scripts it `:INCLUDE`s and what it inherits; `Base:`
+lists what it inherits. A method is offered as a snippet with its
+parameters as placeholders, which the editor already inserts as one.

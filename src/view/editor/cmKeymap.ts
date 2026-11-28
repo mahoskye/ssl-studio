@@ -5,27 +5,40 @@ import { completionStatus } from "@codemirror/autocomplete";
 import {
 	copyLineDown,
 	copyLineUp,
+	cursorMatchingBracket,
 	defaultKeymap,
 	deleteLine,
+	deleteToLineEnd,
+	deleteToLineStart,
 	historyKeymap,
 	indentLess,
 	indentMore,
+	insertBlankLine,
 	moveLineDown,
 	moveLineUp,
 	redo,
 	redoDepth,
+	redoSelection,
 	selectAll,
+	selectLine,
 	selectMatchingBracket,
 	selectParentSyntax,
+	toggleBlockComment,
+	toggleComment,
+	toggleLineComment,
+	toggleTabFocusMode,
 	undo,
 	undoDepth,
+	undoSelection,
 } from "@codemirror/commands";
-import { foldAll, foldKeymap, unfoldAll } from "@codemirror/language";
-import { gotoLine, openSearchPanel, search, searchKeymap, selectNextOccurrence, selectSelectionMatches } from "@codemirror/search";
-import { EditorSelection, Prec, type ChangeSpec, type Extension } from "@codemirror/state";
+import { foldAll, foldCode, foldKeymap, unfoldAll, unfoldCode } from "@codemirror/language";
+import { findNext, findPrevious, gotoLine, openSearchPanel, search, searchKeymap, selectNextOccurrence, selectSelectionMatches } from "@codemirror/search";
+import { Compartment, EditorSelection, Prec, type ChangeSpec, type Extension } from "@codemirror/state";
 import { EditorView, keymap, type Command, type KeyBinding } from "@codemirror/view";
 import { fenced } from "../../shared/catalog";
+import { findMarkdownCodeFences } from "../../shared/fencedFormat";
 import { linkWritten } from "../../shared/docLinks";
+import { liveKeyName } from "../../shared/editorKeymap";
 import { DRAG_TYPE, dropEffectFor } from "../../shared/editorDocHelpers";
 import { htmlToMarkdown, looksLikeRichHtml, tsvToMarkdownTable } from "../../shared/htmlToMarkdown";
 import { nameFor } from "../../shared/namedLinks";
@@ -65,7 +78,7 @@ import { listEnter } from "../../shared/markdownText";
 import { backend } from "../backend";
 import { docs } from "../project";
 import { showPanel } from "../panels/registry";
-import { canonical, notify, state as appState } from "../state";
+import { canonical, notify, openLinePicker, state as appState } from "../state";
 import { focusLiveWidgetAt, historyFallbackFacet, rawEditBlockField, type HistoryFallback } from "./cmLiveShared";
 import { IMAGE_FILE_RE, saveImageAttachment } from "./imageResolve";
 import {
@@ -354,6 +367,25 @@ export const cmSmartEnter: Command = (view) => {
 	if (!range.empty) return false;
 	const line = view.state.doc.lineAt(range.head);
 	const col = range.head - line.from;
+	// An opening fence that nothing closes yet: Enter opens a line inside it and puts the closing fence under that,
+	// as Obsidian does. Left open, every line after it in the document read as code until a fence came. Not where a
+	// line of text follows the fence: that is a block being put round lines already written.
+	const after = line.number < view.state.doc.lines ? view.state.doc.line(line.number + 1).text : "";
+	if (col === line.text.length && !after.replace(/^[\s>]*/, "")) {
+		const open = findMarkdownCodeFences(view.state.doc.toString()).find((fence) => fence.openLine === line.number);
+		const fence = open && open.closeLine === null ? /^[\s>]*(`{3,}|~{3,})/.exec(line.text)?.[1] : undefined;
+		if (open && fence) {
+			const prefix = open.linePrefix;
+			const insert = `\n${prefix}\n${prefix}${fence}`;
+			view.dispatch({
+				changes: { from: line.to, insert },
+				selection: EditorSelection.cursor(line.to + 1 + prefix.length),
+				scrollIntoView: true,
+				userEvent: "input.enter",
+			});
+			return true;
+		}
+	}
 	// Never continue Markdown lists/blockquotes inside fenced code blocks.
 	if (fenced(view.state.doc.toString()).some(([from, to]) => range.head >= from && range.head <= to)) return false;
 
@@ -654,6 +686,24 @@ export const cmInsertLineAbove: Command = (view) => {
 		};
 	});
 	view.dispatch(spec, { scrollIntoView: true, userEvent: "input.enter" });
+	return true;
+};
+
+/**
+ * Sublime Text `Mod-Shift-l`, "split into lines": a selection that runs over several lines becomes a cursor at the
+ * end of each of its lines (not of a last line it only reaches the start of), and a selection within one line a
+ * cursor at its end. The code editor's command for the key does the same.
+ */
+export const cmSplitIntoLines: Command = (view) => {
+	const { state } = view;
+	const ranges = state.selection.ranges.flatMap((range) => {
+		const first = state.doc.lineAt(range.from).number;
+		const end = state.doc.lineAt(range.to);
+		const last = end.number > first && range.to === end.from ? end.number - 1 : end.number;
+		if (last === first) return [EditorSelection.cursor(range.empty ? range.head : range.to)];
+		return Array.from({ length: last - first + 1 }, (_, i) => EditorSelection.cursor(state.doc.line(first + i).to));
+	});
+	view.dispatch({ selection: EditorSelection.create(ranges, ranges.length - 1), scrollIntoView: true, userEvent: "select" });
 	return true;
 };
 
@@ -1014,22 +1064,18 @@ function cmStepIntoLiveWidget(dir: 1 | -1): Command {
 	};
 }
 
+/**
+ * The keys of this editor that no list in Settings holds: what Enter, Tab, Backspace and the arrows do in a
+ * document, and undo. Every other key it has is one of two lists' (ADR 0041): Markdown's own keys, which the shell
+ * reads before any editor does (commands.ts), and the code editor's keys for the commands this editor has too
+ * (`liveKeymap`). Neither is written here a second time, so a key changed in Settings has nothing left behind it.
+ */
 const markdownBindings: KeyBinding[] = [
-	// Obsidian text formatting (takes precedence over conflicting window chrome shortcuts inside Markdown).
-	{ key: "Mod-b", run: cmToggleBold, preventDefault: true },
-	{ key: "Mod-i", run: cmToggleItalic, preventDefault: true },
-	{ key: "Mod-Shift-x", run: cmToggleStrike, preventDefault: true },
-	{ key: "Mod-`", run: cmToggleCode, preventDefault: true },
-	{ key: "Mod-Alt-h", run: cmToggleHighlight, preventDefault: true },
-	{ key: "Mod-k", run: cmInsertLink, preventDefault: true },
-	{ key: "Mod-Alt-Enter", run: cmToggleCheckbox, preventDefault: true },
-	{ key: "Alt-c", run: cmToggleCheckbox, preventDefault: true },
-	// Sublime Text editing ergonomics (ADR 0032).
-	{ key: "Mod-Shift-d", run: cmDuplicateLineOrSelection, preventDefault: true },
-	{ key: "Mod-j", run: cmJoinLines, preventDefault: true },
-	{ key: "Mod-Enter", run: cmInsertLineBelow, preventDefault: true },
-	{ key: "Mod-Shift-Enter", run: cmInsertLineAbove, preventDefault: true },
-	{ key: "Mod-l", run: cmSelectLine, preventDefault: true },
+	// On a Mac these three are held with Cmd and Ctrl both, a press the shell's names for keys have no name for:
+	// the code editor's are not listed with a key either, and stay (ADR 0039).
+	{ mac: "Ctrl-Cmd-ArrowUp", run: moveLineUp, preventDefault: true },
+	{ mac: "Ctrl-Cmd-ArrowDown", run: moveLineDown, preventDefault: true },
+	{ mac: "Ctrl-Cmd-g", run: selectSelectionMatches, preventDefault: true },
 	// Live Table & Callout keyboard entry on vertical boundary navigation.
 	{ key: "ArrowDown", run: cmStepIntoLiveWidget(1) },
 	{ key: "ArrowUp", run: cmStepIntoLiveWidget(-1) },
@@ -1039,36 +1085,121 @@ const markdownBindings: KeyBinding[] = [
 	{ key: "Tab", run: smartTab("indent") },
 	{ key: "Shift-Tab", run: smartTab("outdent") },
 	{ key: "Backspace", run: cmSmartBackspace },
-	// VS Code / Monaco unified editing shortcuts.
 	{ key: "Mod-z", run: cmUndo, preventDefault: true },
 	{ key: "Mod-y", run: cmRedo, preventDefault: true },
 	{ key: "Mod-Shift-z", run: cmRedo, preventDefault: true },
-	{ key: "Mod-f", run: (v) => openFind(v, false), preventDefault: true },
-	{ key: "Mod-h", run: (v) => openFind(v, true), preventDefault: true },
-	{ key: "Mod-g", run: gotoLine, preventDefault: true },
-	{ key: "Mod-d", run: selectNextOccurrence, preventDefault: true },
-	{ key: "Mod-Shift-l", run: selectSelectionMatches, preventDefault: true },
-	{ key: "Mod-/", run: cmToggleComment, preventDefault: true },
-	{ key: "Shift-Alt-a", run: cmToggleComment, preventDefault: true },
-	{ key: "Alt-ArrowUp", run: moveLineUp, preventDefault: true },
-	{ key: "Alt-ArrowDown", run: moveLineDown, preventDefault: true },
-	{ key: "Shift-Alt-ArrowUp", run: copyLineUp, preventDefault: true },
-	{ key: "Shift-Alt-ArrowDown", run: copyLineDown, preventDefault: true },
-	{ key: "Ctrl-Alt-ArrowUp", run: (v) => cmInsertCursor(v, -1), preventDefault: true },
-	{ key: "Ctrl-Alt-ArrowDown", run: (v) => cmInsertCursor(v, 1), preventDefault: true },
-	{ key: "Mod-Shift-k", run: deleteLine, preventDefault: true },
-	{ key: "Shift-Alt-ArrowRight", run: cmExpandSelection, preventDefault: true },
-	{ key: "Shift-Alt-ArrowLeft", run: cmShrinkSelection, preventDefault: true },
-	{ key: "Mod-Shift-\\", run: selectMatchingBracket, preventDefault: true },
 ];
 
-const selectionHistoryKeymap = historyKeymap.filter((b) => b.run !== undo && b.run !== redo);
+/**
+ * The code editor's commands this editor has, each with what runs it here: by the code editor's id for the
+ * command, as Settings lists it (shared/editorKeymap.ts `LIVE_EDITOR_COMMANDS` names the same ones).
+ */
+export const LIVE_COMMANDS: Readonly<Partial<Record<string, Command>>> = {
+	"editor.action.duplicateSelection": (view) => cmDuplicateLineOrSelection(view),
+	"editor.action.joinLines": (view) => cmJoinLines(view),
+	"editor.action.moveLinesUpAction": moveLineUp,
+	"editor.action.moveLinesDownAction": moveLineDown,
+	"editor.action.copyLinesUpAction": copyLineUp,
+	"editor.action.copyLinesDownAction": copyLineDown,
+	"editor.action.deleteLines": deleteLine,
+	"editor.action.insertLineAfter": (view) => cmInsertLineBelow(view),
+	"editor.action.insertLineBefore": (view) => cmInsertLineAbove(view),
+	"editor.action.indentLines": indentMore,
+	"editor.action.outdentLines": indentLess,
+	deleteAllRight: deleteToLineEnd,
+	deleteAllLeft: deleteToLineStart,
+	"editor.action.commentLine": (view) => cmToggleComment(view),
+	"editor.action.blockComment": (view) => cmToggleComment(view),
+	expandLineSelection: (view) => cmSelectLine(view),
+	"editor.action.smartSelect.expand": (view) => cmExpandSelection(view),
+	"editor.action.smartSelect.shrink": (view) => cmShrinkSelection(view),
+	"editor.action.addSelectionToNextFindMatch": selectNextOccurrence,
+	"editor.action.selectHighlights": selectSelectionMatches,
+	"editor.action.insertCursorAbove": (view) => cmInsertCursor(view, -1),
+	"editor.action.insertCursorBelow": (view) => cmInsertCursor(view, 1),
+	"editor.action.insertCursorAtEndOfEachLineSelected": (view) => cmSplitIntoLines(view),
+	"editor.action.jumpToBracket": cursorMatchingBracket,
+	"editor.action.selectToBracket": selectMatchingBracket,
+	cursorUndo: undoSelection,
+	cursorRedo: redoSelection,
+	"actions.find": (view) => openFind(view, false),
+	"editor.action.startFindReplaceAction": (view) => openFind(view, true),
+	"editor.action.nextMatchFindAction": findNext,
+	"editor.action.previousMatchFindAction": findPrevious,
+	// The app's box at the top of the window, as in the code editor (ADR 0044).
+	"editor.action.gotoLine": () => (openLinePicker(), true),
+	"editor.fold": foldCode,
+	"editor.unfold": unfoldCode,
+	"editor.foldAll": foldAll,
+	"editor.unfoldAll": unfoldAll,
+};
 
-/** Complete keymap extension combining Obsidian Markdown commands + VS Code parity + CodeMirror defaults. */
-export const cmMarkdownKeymap: Extension = [
-	Prec.high(keymap.of(markdownBindings)),
-	keymap.of([...searchKeymap, ...selectionHistoryKeymap, ...foldKeymap, ...defaultKeymap]),
-];
+/**
+ * CodeMirror's own commands for what those commands do. Its lists of keys give each a key of CodeMirror's choosing
+ * (Alt+L selects a line, Ctrl+Alt+[ folds everything), which no list in Settings shows and none could take away:
+ * a key cleared there went on working. They are taken out, and the commands have the keys Settings gives them.
+ */
+const FROM_THE_LIST = new Set<unknown>([
+	moveLineUp,
+	moveLineDown,
+	copyLineUp,
+	copyLineDown,
+	deleteLine,
+	selectLine,
+	selectParentSyntax,
+	indentMore,
+	indentLess,
+	insertBlankLine,
+	cursorMatchingBracket,
+	toggleComment,
+	toggleLineComment,
+	toggleBlockComment,
+	undoSelection,
+	redoSelection,
+	selectSelectionMatches,
+	selectNextOccurrence,
+	gotoLine,
+	foldCode,
+	unfoldCode,
+	foldAll,
+	unfoldAll,
+]);
+/** Finding, which CodeMirror's keys still do while the keyboard is in its find box: there they are the box's own. */
+const IN_THE_FIND_BOX = new Set<unknown>([openSearchPanel, findNext]);
+
+/**
+ * CodeMirror's lists of keys as this editor keeps them. Besides the above, "Tab moves focus" is taken out: its
+ * key (Ctrl+M) turns Tab off without a word, and was only ever kept from doing so by "go to bracket" being on it.
+ */
+export const cmOwnKeys: readonly KeyBinding[] = [...searchKeymap, ...historyKeymap.filter((b) => b.run !== undo && b.run !== redo), ...foldKeymap, ...defaultKeymap].flatMap((binding) => {
+	if (FROM_THE_LIST.has(binding.run) || binding.run === toggleTabFocusMode) return [];
+	return IN_THE_FIND_BOX.has(binding.run) ? [{ ...binding, scope: "search-panel" }] : [binding];
+});
+
+/**
+ * The keys of the code editor's commands in this editor, from the editor's keys as they are now (the key's name
+ * as the shell names it, to the command's id). A key this editor has no name for, or a command it has not, is
+ * left out.
+ */
+export function liveKeyBindings(keys: Readonly<Record<string, string>>): KeyBinding[] {
+	const bindings: KeyBinding[] = [];
+	for (const [name, id] of Object.entries(keys)) {
+		const key = liveKeyName(name);
+		const run = LIVE_COMMANDS[id];
+		if (key && run) bindings.push({ key, run, preventDefault: true });
+	}
+	return bindings;
+}
+
+/** Where those keys are held in an editor, so that they can be put in afresh when Settings changes them. */
+const liveKeys = new Compartment();
+/** The extension that gives an editor those keys, to start with. */
+export const liveKeymap = (keys: Readonly<Record<string, string>>): Extension => liveKeys.of(Prec.high(keymap.of(liveKeyBindings(keys))));
+/** The same keys put in afresh, in an editor that has them already. */
+export const setLiveKeys = (view: EditorView, keys: Readonly<Record<string, string>>) => view.dispatch({ effects: liveKeys.reconfigure(Prec.high(keymap.of(liveKeyBindings(keys)))) });
+
+/** The keys every Live editor has whatever Settings says: its own few, and CodeMirror's that are no listed command's. */
+export const cmMarkdownKeymap: Extension = [Prec.high(keymap.of(markdownBindings)), keymap.of([...cmOwnKeys])];
 
 /**
  * Unified action dispatcher: runs any Monaco menu/command action id or Markdown
@@ -1077,6 +1208,8 @@ export const cmMarkdownKeymap: Extension = [
  */
 export function runCmAction(view: EditorView, id: string): boolean {
 	view.focus();
+	const listed = LIVE_COMMANDS[id];
+	if (listed) return listed(view);
 	switch (id) {
 		case "undo":
 			return cmUndo(view);
@@ -1094,62 +1227,22 @@ export function runCmAction(view: EditorView, id: string): boolean {
 		case "editor.action.pasteAsPlainText":
 		case "md-paste-plain":
 			return cmPastePlain(view);
-		case "editor.foldAll":
-			return foldAll(view);
-		case "editor.unfoldAll":
-			return unfoldAll(view);
-		case "actions.find":
-			return openFind(view, false);
-		case "editor.action.startFindReplaceAction":
-			return openFind(view, true);
-		case "editor.action.commentLine":
-		case "editor.action.blockComment":
-			return cmToggleComment(view);
 		case "editor.action.selectAll":
 			return selectAll(view);
-		case "editor.action.smartSelect.expand":
-			return cmExpandSelection(view);
-		case "editor.action.smartSelect.shrink":
-			return cmShrinkSelection(view);
-		case "editor.action.copyLinesUpAction":
-			return copyLineUp(view);
-		case "editor.action.copyLinesDownAction":
-			return copyLineDown(view);
-		case "editor.action.moveLinesUpAction":
-			return moveLineUp(view);
-		case "editor.action.moveLinesDownAction":
-			return moveLineDown(view);
-		case "editor.action.insertCursorAbove":
-			return cmInsertCursor(view, -1);
-		case "editor.action.insertCursorBelow":
-			return cmInsertCursor(view, 1);
-		case "editor.action.addSelectionToNextFindMatch":
-			return selectNextOccurrence(view);
-		case "editor.action.selectHighlights":
-			return selectSelectionMatches(view);
-		case "editor.action.duplicateSelection":
 		case "md-duplicate-line":
 			return cmDuplicateLineOrSelection(view);
-		case "editor.action.joinLines":
 		case "md-join-lines":
 			return cmJoinLines(view);
-		case "editor.action.insertLineAfter":
 		case "md-insert-line-below":
 			return cmInsertLineBelow(view);
-		case "editor.action.insertLineBefore":
 		case "md-insert-line-above":
 			return cmInsertLineAbove(view);
-		case "expandLineSelection":
 		case "editor.action.selectLine":
 		case "md-select-line":
 			return cmSelectLine(view);
-		case "editor.action.gotoLine":
-			return gotoLine(view);
 		case "editor.action.quickOutline":
 			showPanel("objects");
 			return true;
-		case "editor.action.jumpToBracket":
-			return selectMatchingBracket(view);
 		case "md-bold":
 			return cmToggleBold(view);
 		case "md-italic":

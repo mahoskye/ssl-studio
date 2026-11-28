@@ -1,7 +1,11 @@
 // A box that finds one of many by name, for the call graph's procedures and a
 // plan's steps: type part of a name, and the ones that match are listed under
 // the box. The arrow keys move through them and Enter, or a click, chooses.
+// Until it is asked for (its button, or Ctrl+F) it is a search button, not a
+// box: a text box always in the bar was clutter there (ADR 0050). It folds
+// away again when the keyboard leaves it.
 import { createMemo, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
+import { Icon } from "../Icon";
 import { matching, type Choice } from "./model";
 
 export function Finder(props: {
@@ -21,7 +25,19 @@ export function Finder(props: {
 	const listId = createUniqueId();
 	const [text, setText] = createSignal("");
 	const [at, setAt] = createSignal(0);
+	const [open, setOpen] = createSignal(false);
 	let inputEl: HTMLInputElement | undefined;
+	let focusOnDraw = false;
+	const focusBox = (el: HTMLInputElement) => {
+		el.focus();
+		el.select();
+	};
+	const show = () => {
+		if (inputEl?.isConnected) return focusBox(inputEl);
+		focusOnDraw = true;
+		setOpen(true);
+	};
+	props.onRef?.(show);
 	onCleanup(() => {
 		inputEl = undefined;
 		props.onRef?.(undefined);
@@ -34,54 +50,67 @@ export function Finder(props: {
 	};
 	return (
 		<span class="graph-find-box">
-			<input
-				ref={(el) => {
-					inputEl = el;
-					props.onRef?.(() => {
-						if (!el.isConnected) return;
-						el.focus();
-						el.select();
-					});
-				}}
-				class="graph-find"
-				type="search"
-				role="combobox"
-				aria-label={props.label}
-				aria-expanded={found().length > 0 ? "true" : "false"}
-				aria-controls={listId}
-				aria-autocomplete="list"
-				aria-activedescendant={found().length ? `${listId}-${here()}` : undefined}
-				title={props.title}
-				placeholder={props.placeholder}
-				autocomplete="off"
-				spellcheck="false"
-				value={text()}
-				onInput={(e) => (setText(e.currentTarget.value), setAt(0))}
-				onBlur={() => setText("")}
-				onKeyDown={(e) => {
-					const list = found();
-					if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-						e.preventDefault();
-						if (list.length) setAt((now) => (Math.min(now, list.length - 1) + (e.key === "ArrowDown" ? 1 : list.length - 1)) % list.length);
-					} else if (e.key === "Enter") {
-						e.preventDefault();
-						const pick = list[here()];
-						if (pick) choose(pick.id);
-					} else if (e.key === "Escape") {
-						if (text()) {
-							// The first Escape empties the box; it is not the view's Escape yet.
+			<Show
+				when={open()}
+				fallback={
+					<button
+						type="button"
+						class="graph-find-open"
+						aria-label={props.label}
+						title={props.title}
+						onClick={show}
+					>
+						<Icon name="search" />
+					</button>
+				}
+			>
+				<input
+					ref={(el) => {
+						inputEl = el;
+						if (!focusOnDraw) return;
+						focusOnDraw = false;
+						queueMicrotask(() => el.isConnected && focusBox(el));
+					}}
+					class="graph-find"
+					type="search"
+					role="combobox"
+					aria-label={props.label}
+					aria-expanded={found().length > 0 ? "true" : "false"}
+					aria-controls={listId}
+					aria-autocomplete="list"
+					aria-activedescendant={found().length ? `${listId}-${here()}` : undefined}
+					title={props.title}
+					placeholder={props.placeholder}
+					autocomplete="off"
+					spellcheck="false"
+					value={text()}
+					onInput={(e) => (setText(e.currentTarget.value), setAt(0))}
+					onBlur={() => (setText(""), setOpen(false))}
+					onKeyDown={(e) => {
+						const list = found();
+						if (e.key === "ArrowDown" || e.key === "ArrowUp") {
 							e.preventDefault();
-							e.stopPropagation();
-							setText("");
-						} else {
+							if (list.length) setAt((now) => (Math.min(now, list.length - 1) + (e.key === "ArrowDown" ? 1 : list.length - 1)) % list.length);
+						} else if (e.key === "Enter") {
 							e.preventDefault();
-							e.stopPropagation();
-							inputEl?.blur();
-							props.onEscape?.();
+							const pick = list[here()];
+							if (pick) choose(pick.id);
+						} else if (e.key === "Escape") {
+							if (text()) {
+								// The first Escape empties the box; it is not the view's Escape yet.
+								e.preventDefault();
+								e.stopPropagation();
+								setText("");
+							} else {
+								e.preventDefault();
+								e.stopPropagation();
+								inputEl?.blur();
+								props.onEscape?.();
+							}
 						}
-					}
-				}}
-			/>
+					}}
+				/>
+			</Show>
 			<Show when={text().trim()}>
 				<ul class="graph-find-list" id={listId} role="listbox" aria-label="What matches">
 					<For each={found()} fallback={<li class="none">{props.none(text().trim())}</li>}>

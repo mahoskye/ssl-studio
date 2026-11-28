@@ -5,8 +5,9 @@ import { monaco } from "../editor/monaco";
 import { LEGEND, onSemanticThemeChange, refreshSemanticTokens, translateTokens } from "../editor/semantic";
 import { backend, on } from "../backend";
 import { LspClient } from "./client";
-import { applyTextEdits, trimEdit } from "./edits";
-import { decodeNameTokens, type LexToken, type NameToken } from "../../shared/lexicalTokens";
+import { applyTextEdits, FORMAT_WHOLE_UP_TO, formattedParts, selectedLines, smallEdits, trimEdit, typedLead } from "./edits";
+import { decodeNameTokens, isDataSourceName, type LexToken, type NameToken } from "../../shared/lexicalTokens";
+import { isSqlLanguage } from "../../shared/format";
 import { baseName } from "../../shared/paths";
 
 export type Diagnostic = {
@@ -23,7 +24,12 @@ export type Diagnostic = {
 
 const [diagnostics, setDiagnostics] = createStore<Record<string, Diagnostic[]>>({});
 const [lspReadyEpoch, setLspReadyEpoch] = createSignal(0);
-export { diagnostics, lspReadyEpoch };
+/**
+ * False while the server runs and leaves what it was asked unanswered (the rule is the client's, `answerWait`).
+ * The one source of that fact: the status bar, the panels and format on save all read it here.
+ */
+const [lspAnswering, setLspAnswering] = createSignal(true);
+export { diagnostics, lspAnswering, lspReadyEpoch };
 
 type Range = { start: { line: number; character: number }; end: { line: number; character: number } };
 const toRange = (r: Range) => new monaco.Range(r.start.line + 1, r.start.character + 1, r.end.line + 1, r.end.character + 1);
@@ -41,6 +47,11 @@ const markdown = (value: any) => (value == null ? undefined : typeof value === "
 export type ServerInfo = { name: string; version: string };
 
 const LSP_MARKER_OWNER = "starlims-lsp";
+/** starlims-lsp answers a symbol search with at most this many symbols (`maxSymbolResults`), open documents included. */
+export const WORKSPACE_SYMBOL_CAP = 500;
+export type WorkspaceSymbol = { name: string; kind: number; containerName?: string; location: { uri: string; range: Range } };
+/** The copies the app has the server read for a moment, under `.ssl-studio/`. */
+const isScratchUri = (uri: string) => /\/\.ssl-studio\//.test(decodeURIComponent(uri));
 const diagnosticsByOwner = new Map<string, Map<string, Diagnostic[]>>();
 
 function setOwnerDiagnostics(uri: string, owner: string, list: Diagnostic[] | null) {
@@ -125,6 +136,7 @@ export class LspSession {
 		);
 		this.client.onRequest("client/registerCapability", () => null);
 		this.client.onRequest("window/workDoneProgress/create", () => null);
+		this.client.onAnswering((answering) => setLspAnswering(answering));
 		on("lspState", (state) => {
 			if (state.state === "restarting" || state.state === "stopped" || state.state === "failed") {
 				this.handleDown(state.state);
@@ -155,6 +167,8 @@ export class LspSession {
 		this.client.rejectAll(reason);
 		this.abortScratchWaiters();
 		this.clearLspDiagnostics();
+		// The next server is asked afresh.
+		this.symbolAnswers.clear();
 	}
 
 	/** Clears session state and LSP diagnostics (e.g. when switching or closing a workspace). */
@@ -186,7 +200,8 @@ export class LspSession {
 						textDocument: {
 							synchronization: { didSave: true },
 							documentSymbol: { hierarchicalDocumentSymbolSupport: true },
-							completion: { completionItem: { snippetSupport: true, documentationFormat: ["markdown", "plaintext"] } },
+							// `contextSupport`: each request says what set it off (`completionContext`), which the server answers by.
+							completion: { contextSupport: true, completionItem: { snippetSupport: true, documentationFormat: ["markdown", "plaintext"] } },
 							hover: { contentFormat: ["markdown", "plaintext"] },
 							signatureHelp: { signatureInformation: { documentationFormat: ["markdown", "plaintext"] } },
 							rename: { prepareSupport: true },
@@ -205,9 +220,10 @@ export class LspSession {
 				setLspReadyEpoch(myEpoch);
 				for (const model of monaco.editor.getModels()) {
 					const uri = model.uri.toString();
-					if (this.tracked.has(uri) && !this.versions.get(uri) && !model.isDisposed() && model.getLanguageId() === "ssl") this.open(model);
+					if (this.tracked.has(uri) && !this.versions.get(uri) && !model.isDisposed() && readByServer(model)) this.open(model);
 				}
 				refreshSemanticTokens();
+				for (const listener of this.readyListeners) listener();
 			} catch (err) {
 				if (this.epoch === myEpoch) {
 					this.readyFlag = false;
@@ -217,6 +233,18 @@ export class LspSession {
 			}
 		})();
 		return this.initialized;
+	}
+
+	private readyListeners = new Set<() => void>();
+	/** Told each time the server has started and been given the open documents: what was asked of it before can be asked again. */
+	onReady(listener: () => void): () => void {
+		this.readyListeners.add(listener);
+		return () => void this.readyListeners.delete(listener);
+	}
+
+	/** Whether a model is one the server is told of, in the language mode it is in now (`readByServer`). */
+	reads(model: monaco.editor.ITextModel): boolean {
+		return readByServer(model) && isServed(model);
 	}
 
 	/**
@@ -415,11 +443,16 @@ export class LspSession {
 		};
 	}
 
-	/** The formatter's output for text not in any editor. */
-	async formatText(text: string, options: { tabSize: number; insertSpaces: boolean }): Promise<string> {
+	/**
+	 * The formatter's output for text not in any editor. `name` is the name of the file the text is of, where it
+	 * is of one: the server tells a script from a data source by it (as for `scratchLexical`), and leaves an SQL
+	 * data source as it is.
+	 */
+	async formatText(text: string, options: { tabSize: number; insertSpaces: boolean }, name = "text.ssl"): Promise<string> {
 		await this.ready();
 		const myEpoch = this.epoch;
-		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/format-${++this.scratchCount}.ssl`).toString();
+		const ending = /(\.(?:ssl|ds)\.txt|\.[A-Za-z0-9]+)$/.exec(name)?.[1] ?? ".ssl";
+		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/format-${++this.scratchCount}${ending}`).toString();
 		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
 		try {
 			const edits = ((await this.client.request("textDocument/formatting", { textDocument: { uri }, options })) ?? []) as { range: Range; newText: string }[];
@@ -427,6 +460,25 @@ export class LspSession {
 		} finally {
 			if (this.epoch === myEpoch && this.readyFlag) this.client.notify("textDocument/didClose", { textDocument: { uri } });
 		}
+	}
+
+	/** As `lspAnswering`, read now: for work that is not drawn (a save deciding how long to wait). */
+	get answering(): boolean {
+		return this.client.answering;
+	}
+
+	/** Which silence this is, counted from one: what is said once for a silence remembers the number it was said at. */
+	get silences(): number {
+		return this.client.silences;
+	}
+
+	/**
+	 * A caller that would wait no longer for what it asked says so here (a save waits two seconds, less than the
+	 * session does). If the server has in fact answered nothing since, it counts as not answering from now, so that
+	 * what gave up and what is shown agree.
+	 */
+	unanswered() {
+		this.client.noAnswer();
 	}
 
 	/** Waits until the language server has finished initializing. */
@@ -449,13 +501,13 @@ export class LspSession {
 
 	/** Keeps the server's copy of an SSL model in step with the editor. */
 	track(model: monaco.editor.ITextModel) {
-		if (model.getLanguageId() !== "ssl" || model.uri.scheme !== "file") return;
+		if (!readByServer(model) || !isServed(model)) return;
 		const uri = model.uri.toString();
 		if (this.tracked.has(uri)) return;
 		this.versions.set(uri, 0);
 		this.initialized
 			?.then(() => {
-				if (this.readyFlag && this.tracked.has(uri) && !this.versions.get(uri) && !model.isDisposed() && model.getLanguageId() === "ssl") {
+				if (this.readyFlag && this.tracked.has(uri) && !this.versions.get(uri) && !model.isDisposed() && readByServer(model)) {
 					this.open(model);
 				}
 			})
@@ -504,6 +556,9 @@ export class LspSession {
 			this.scratchWaiters.get(uri)?.(params.diagnostics);
 			return;
 		}
+		// A document the server was told is closed: what it found in the edit just before the close comes after it,
+		// and was put back into Problems for a file no longer open, where nothing took it out again.
+		if (!this.tracked.has(uri) && !this.versions.has(uri)) return;
 		const model = monaco.editor.getModel(parsedUri);
 		const list: Diagnostic[] = params.diagnostics.map((d) => ({
 			uri,
@@ -539,6 +594,14 @@ export class LspSession {
 		return this.client.request<T>(method, params);
 	}
 
+	/** The server's last answer for a document's symbols, by the document and its version. */
+	private symbolAnswers = new Map<string, { model: monaco.editor.ITextModel; version: number; answer: Promise<any[]> }>();
+
+	/**
+	 * A document's symbols. Several ask for them at each change (the outline, the sticky lines at the top of the
+	 * editor, the breadcrumbs, the hovers): the server is asked once for each version of the document, and each asker
+	 * is given its own copy.
+	 */
 	async documentSymbols(model: monaco.editor.ITextModel): Promise<monaco.languages.DocumentSymbol[]> {
 		const convert = (s: any): monaco.languages.DocumentSymbol => ({
 			name: s.name,
@@ -549,15 +612,89 @@ export class LspSession {
 			selectionRange: toRange(s.selectionRange ?? s.location.range),
 			children: (s.children ?? []).map(convert),
 		});
-		return ((await this.request("textDocument/documentSymbol", { textDocument: { uri: model.uri.toString() } })) ?? []).map(convert);
+		return (await this.documentSymbolAnswer(model)).map(convert);
+	}
+
+	/** The server's own answer for a document's symbols, asked once for each version of it. */
+	private documentSymbolAnswer(model: monaco.editor.ITextModel): Promise<any[]> {
+		const uri = model.uri.toString();
+		const version = model.getVersionId();
+		const kept = this.symbolAnswers.get(uri);
+		if (kept && kept.model === model && kept.version === version) return kept.answer;
+		const asked = this.request("textDocument/documentSymbol", { textDocument: { uri } }).then((list) => (list ?? []) as any[]);
+		this.symbolAnswers.set(uri, { model, version, answer: asked });
+		// A failure is not kept: the next asker asks again.
+		asked.catch(() => this.symbolAnswers.get(uri)?.answer === asked && this.symbolAnswers.delete(uri));
+		return asked;
 	}
 
 	async workspaceSymbols(query: string) {
-		return ((await this.request("workspace/symbol", { query })) ?? []) as { name: string; kind: number; containerName?: string; location: { uri: string; range: Range } }[];
+		return (await this.workspaceSymbolAnswer(query)).list;
 	}
 
-	/** Formats the given line ranges (0-based, inclusive) as small edits. */
-	async formatRanges(model: monaco.editor.ITextModel, ranges: [number, number][], options: monaco.languages.FormattingOptions) {
+	/** The server's answer to a symbol search; `capped` where it stopped at `WORKSPACE_SYMBOL_CAP`. */
+	async workspaceSymbolAnswer(query: string) {
+		const found = ((await this.request("workspace/symbol", { query })) ?? []) as WorkspaceSymbol[];
+		// The copies the app has the server read for a moment (a format, an indent, a check) are not the user's files:
+		// one open while the list was asked for came back in it.
+		const list = found.filter((symbol) => !isScratchUri(symbol.location?.uri ?? ""));
+		return { list, capped: found.length >= WORKSPACE_SYMBOL_CAP };
+	}
+
+	/**
+	 * The procedures a loose match ("awd" for AddWorkingDays) may be made over, with the server's answer for nothing
+	 * typed (`all`). The server matches a part of a name only, and stops at `WORKSPACE_SYMBOL_CAP` symbols taken in no
+	 * set order, those of the open documents included. Under the cap its answer for nothing typed is every procedure
+	 * of the workspace. At the cap a loose match over it found some copies of a name and missed others from one search
+	 * to the next, so the open documents' own symbol lists are used instead, and the files not open are left out.
+	 */
+	async looseSymbols(): Promise<{ all: WorkspaceSymbol[]; loose: WorkspaceSymbol[]; capped: boolean }> {
+		const { list: all, capped } = await this.workspaceSymbolAnswer("");
+		if (!capped) return { all, loose: all, capped };
+		const loose: WorkspaceSymbol[] = [];
+		const collect = (uri: string, symbols: any[]) => {
+			for (const symbol of symbols ?? []) {
+				if (symbol.kind === 12 || symbol.kind === 6) loose.push({ name: symbol.name, kind: symbol.kind, location: { uri, range: symbol.range } });
+				else collect(uri, symbol.children);
+			}
+		};
+		const open = [...this.versions.keys()].filter((uri) => !isScratchUri(uri));
+		await Promise.all(
+			open.map(async (uri) => {
+				const model = monaco.editor.getModel(monaco.Uri.parse(uri));
+				if (!model || model.isDisposed()) return;
+				collect(uri, await this.documentSymbolAnswer(model).catch(() => []));
+			}),
+		);
+		return { all, loose, capped };
+	}
+
+	/**
+	 * The edits that leave the given line ranges (0-based, inclusive) as a format of the whole document would leave
+	 * them, and touch nothing else. The document is formatted as "Format document" formats it, and the lines of the
+	 * ranges are taken from the answer (`formattedParts`), as the smallest edits that make the change.
+	 *
+	 * A range format is not the same: the server leaves out of it what it does to a whole document only. Null where
+	 * the two texts cannot be set side by side; the caller then has the range format to fall back on.
+	 */
+	async formatRangesAsDocument(model: monaco.editor.ITextModel, ranges: [number, number][], options: monaco.languages.FormattingOptions): Promise<monaco.editor.IIdentifiedSingleEditOperation[] | null> {
+		if (model.isDisposed()) return [];
+		const version = model.getVersionId();
+		const answer = ((await this.request("textDocument/formatting", {
+			textDocument: { uri: model.uri.toString() },
+			options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces },
+		})) ?? []) as { range: Range; newText: string }[];
+		if (model.isDisposed() || model.getVersionId() !== version) return [];
+		if (!answer.length) return [];
+		return linesFromFormatted(model, applyTextEdits(model.getLinesContent().join("\n"), answer), ranges);
+	}
+
+	/**
+	 * Formats the given line ranges (0-based, inclusive). The edits are each range's changed lines; with `small`,
+	 * only the characters that differ in a line the formatter kept (`toSmallEdits`), for a cursor that is to stay
+	 * where it is.
+	 */
+	async formatRanges(model: monaco.editor.ITextModel, ranges: [number, number][], options: monaco.languages.FormattingOptions, small = false) {
 		if (model.isDisposed()) return [];
 		const version = model.getVersionId();
 		const edits: monaco.editor.IIdentifiedSingleEditOperation[] = [];
@@ -573,7 +710,7 @@ export class LspSession {
 				options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces },
 			});
 			if (model.isDisposed() || model.getVersionId() !== version) return [];
-			edits.push(...toMinimalEdits(model, result ?? []));
+			edits.push(...(small ? toSmallEdits : toMinimalEdits)(model, result ?? []));
 		}
 		return edits;
 	}
@@ -635,9 +772,59 @@ export function toMinimalEdits(model: monaco.editor.ITextModel, edits: { range: 
 	});
 }
 
+/**
+ * The formatter's edits as the smallest edits that make the same change (`smallEdits`): a line the formatter kept
+ * is changed only where its characters differ. For edits applied where a cursor is: one inside a replaced range
+ * is put at the range's edge, and format on save, which replaced a whole procedure, took the cursor off the line
+ * being typed. Edits that share a line are left as `toMinimalEdits` makes them.
+ */
+export function toSmallEdits(model: monaco.editor.ITextModel, edits: { range: Range; newText: string }[]): monaco.editor.IIdentifiedSingleEditOperation[] {
+	if (!edits.length) return [];
+	const ranges = edits.map((edit) => model.validateRange(toRange(edit.range)));
+	const sorted = [...ranges].sort((a, b) => a.startLineNumber - b.startLineNumber || a.endLineNumber - b.endLineNumber);
+	for (let i = 1; i < sorted.length; i++) if (sorted[i]!.startLineNumber <= sorted[i - 1]!.endLineNumber) return toMinimalEdits(model, edits);
+	const eol = model.getEOL();
+	return edits.flatMap((edit, at) => {
+		const range = ranges[at]!;
+		const full = new monaco.Range(range.startLineNumber, 1, range.endLineNumber, model.getLineMaxColumn(range.endLineNumber));
+		const before = model.getValueInRange(new monaco.Range(range.startLineNumber, 1, range.startLineNumber, range.startColumn));
+		const after = model.getValueInRange(new monaco.Range(range.endLineNumber, range.endColumn, range.endLineNumber, model.getLineMaxColumn(range.endLineNumber)));
+		const oldLines = model.getValueInRange(full).split(eol);
+		const newLines = (before + edit.newText.replace(/\r?\n/g, eol) + after).split(eol);
+		const trimmed = trimEdit(oldLines, newLines);
+		if (!trimmed) return [];
+		const changed = oldLines.slice(trimmed.startLine, trimmed.endLine + 1);
+		// Lines only added, or only taken out: the one edit is the smallest there is.
+		if (!changed.length || !trimmed.lines.length) return toMinimalEdits(model, [edit]);
+		const first = full.startLineNumber + trimmed.startLine;
+		return smallEdits(changed, trimmed.lines).map((small) => ({
+			range: new monaco.Range(first + small.startLine, small.startColumn + 1, first + small.endLine, small.endColumn + 1),
+			text: small.text.replace(/\n/g, eol),
+		}));
+	});
+}
+
 export const session = new LspSession();
 
-const isFileModel = (model: monaco.editor.ITextModel) => model.uri.scheme === "file";
+/**
+ * Whether a model is in a language mode the server reads: SSL, or SQL where the file is a data source. The server
+ * tells an SQL data source from an SSL one by the file itself, whatever mode the editor shows it in, and checks
+ * what is its own to check in one (its parameters, a misplaced `;`): shown as SQL (ADR 0038), it is still told
+ * of, so those findings are kept.
+ */
+function readByServer(model: monaco.editor.ITextModel) {
+	const language = model.getLanguageId();
+	return language === "ssl" || (isSqlLanguage(language) && isDataSourceName(model.uri.path));
+}
+
+/**
+ * Whether a model is a document the server is told of: a file, or a document not yet saved. The server reads an
+ * `untitled:` document as it does a file. Other models in the language (the earlier side of a comparison, a
+ * preview) are not the user's documents, and the server holds no copy of them to answer from.
+ */
+function isServed(model: monaco.editor.ITextModel) {
+	return model.uri.scheme === "file" || model.uri.scheme === "untitled";
+}
 const doc = (model: monaco.editor.ITextModel) => ({ textDocument: { uri: model.uri.toString() } });
 const quiet = <T>(work: Promise<T>, fallback: T) => work.catch(() => fallback);
 
@@ -653,34 +840,115 @@ async function locations(result: any): Promise<monaco.languages.Location[]> {
 	return out;
 }
 
-export function registerProviders() {
+/**
+ * What set a completion off, as the protocol says it: typing, a trigger character (and which), or a list that was
+ * not complete. The protocol's numbers are the editor's plus one.
+ *
+ * The server answers by it. Told that ":" was typed, it gives the members of the object before the colon, or the
+ * keywords alone, each with the range it replaces. Told nothing, it gave every name it knows at every place, and no
+ * range: the list after "oMail:" was the whole language, and the app had never said what was typed.
+ */
+export function completionContext(context?: { triggerKind?: number; triggerCharacter?: string }): { triggerKind: number; triggerCharacter?: string } {
+	const triggerKind = (context?.triggerKind ?? 0) + 1;
+	return context?.triggerCharacter ? { triggerKind, triggerCharacter: context.triggerCharacter } : { triggerKind };
+}
+
+/**
+ * What is said of a rename the server answered with no edits. It answers so for a new name it will not take (a
+ * keyword, the name of a built-in function, something that is no name), and gives no reason. Which of its rules
+ * said no is not for the app to guess, which knows no SSL: this says what was asked, and that nothing changed.
+ */
+/** Why the language server last failed to format a document, by its URI; none once it formats it. */
+const formatFailures = new Map<string, string>();
+export const sslFormatFailure = (model: monaco.editor.ITextModel) => formatFailures.get(model.uri.toString());
+
+export const renameRefusal = (from: string, to: string) =>
+	from ? `The language server would not rename “${from}” to “${to}”. Nothing was changed.` : `The language server would not take “${to}” as the new name. Nothing was changed.`;
+
+/** What is said of a rename that failed: the server's own words where it gave any (a reason, should it come to give one). */
+export const renameFailure = (err: unknown) => {
+	const said = String((err as { message?: unknown } | null)?.message ?? "").trim();
+	return said ? `Nothing was renamed: ${said}` : "Nothing was renamed: the language server did not answer.";
+};
+
+/**
+ * The edits that leave the given line ranges (0-based, inclusive) of a document as they are in `formatted`, a format
+ * of the whole of it, and touch nothing else: the lines are taken from the formatted text (`formattedParts`), as the
+ * smallest edits that make the change. Null where the two texts cannot be set side by side.
+ */
+export function linesFromFormatted(model: monaco.editor.ITextModel, formatted: string, ranges: [number, number][]): monaco.editor.IIdentifiedSingleEditOperation[] | null {
+	const oldLines = model.getLinesContent();
+	const parts = formattedParts(oldLines, formatted.split(/\r?\n/), ranges);
+	if (!parts) return null;
+	const eol = model.getEOL();
+	const lineCount = oldLines.length;
+	return parts.flatMap((part): monaco.editor.IIdentifiedSingleEditOperation[] => {
+		const first = part.start + 1;
+		const last = part.start + part.oldLines.length;
+		// The formatter has none of these lines any more: they go, with a line break, so no empty line is left.
+		if (!part.newLines.length) {
+			if (last < lineCount) return [{ range: new monaco.Range(first, 1, last + 1, 1), text: "" }];
+			if (first > 1) return [{ range: new monaco.Range(first - 1, model.getLineMaxColumn(first - 1), last, model.getLineMaxColumn(last)), text: "" }];
+			return [{ range: new monaco.Range(first, 1, last, model.getLineMaxColumn(last)), text: "" }];
+		}
+		return smallEdits(part.oldLines, part.newLines).map((small) => ({
+			range: new monaco.Range(first + small.startLine, small.startColumn + 1, first + small.endLine, small.endColumn + 1),
+			text: small.text.replace(/\n/g, eol),
+		}));
+	});
+}
+
+/**
+ * Puts the language server behind the editor's own features for SSL: completion, hover, going to a definition,
+ * rename and the rest.
+ *
+ * `tell` is where a thing the user has to hear of is said, the app's notices. The session draws nothing itself.
+ */
+export function registerProviders(tell: (text: string) => void = () => {}) {
 	monaco.languages.registerCompletionItemProvider("ssl", {
 		triggerCharacters: [":"],
-		async provideCompletionItems(model, position) {
-			if (!isFileModel(model)) return { suggestions: [] };
-			const result = await quiet(session.request("textDocument/completion", { ...doc(model), position: toPosition(position) }), null);
+		async provideCompletionItems(model, position, context) {
+			if (!isServed(model)) return { suggestions: [] };
+			const result = await quiet(session.request("textDocument/completion", { ...doc(model), position: toPosition(position), context: completionContext(context) }), null);
+			// Closed while the server was asked (its tab shut, a scratch copy let go): there is no list to show, and
+			// reading the document now raised "Something went wrong".
+			if (model.isDisposed()) return { suggestions: [] };
 			const items = (result?.items ?? result ?? []) as any[];
 			const word = model.getWordUntilPosition(position);
 			const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
+			const beforeWord = model.getLineContent(position.lineNumber).slice(0, word.startColumn - 1);
 			return {
 				incomplete: Boolean(result?.isIncomplete),
-				suggestions: items.map((item) => ({
-					label: item.label,
-					kind: completionKinds[item.kind ?? 1] ?? K.Text,
-					detail: item.detail,
-					documentation: markdown(item.documentation),
-					insertText: item.textEdit?.newText ?? item.insertText ?? item.label,
-					insertTextRules: item.insertTextFormat === 2 ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
-					range: item.textEdit?.range ? toRange(item.textEdit.range) : range,
-					sortText: item.sortText,
-					filterText: item.filterText,
-				})),
+				suggestions: items.map((item) => {
+					const snippet = item.insertTextFormat === 2;
+					const insertText: string = item.textEdit?.newText ?? item.insertText ?? item.label;
+					const named = item.textEdit?.range ?? item.textEdit?.replace;
+					// With no range from the server (it names one for a keyword only when a typed ":" set the list off, not
+					// when the list is asked for later) the word at the cursor is replaced, and with it the punctuation
+					// before the word that the text itself opens with: ":WHILE" for a typed ":wh" is not "::WHILE".
+					const lead = named ? 0 : typedLead(beforeWord, insertText, snippet);
+					const typed = insertText.slice(0, lead);
+					const filter: string = item.filterText ?? item.label;
+					return {
+						label: item.label,
+						kind: completionKinds[item.kind ?? 1] ?? K.Text,
+						detail: item.detail,
+						documentation: markdown(item.documentation),
+						insertText,
+						insertTextRules: snippet ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
+						range: named ? toRange(named) : lead ? new monaco.Range(position.lineNumber, word.startColumn - lead, position.lineNumber, word.endColumn) : range,
+						sortText: item.sortText,
+						// The list is narrowed by what the range holds, which now starts with that punctuation: an item
+						// whose name does not (a snippet named "while" that writes ":WHILE") is found by it all the same.
+						filterText: lead && !filter.startsWith(typed) ? typed + filter : item.filterText,
+					};
+				}),
 			};
 		},
 	});
 	monaco.languages.registerHoverProvider("ssl", {
 		async provideHover(model, position) {
-			if (!isFileModel(model)) return null;
+			if (!isServed(model)) return null;
 			const hover = await quiet(session.request("textDocument/hover", { ...doc(model), position: toPosition(position) }), null);
 			if (!hover?.contents) return null;
 			const contents = (Array.isArray(hover.contents) ? hover.contents : [hover.contents]).map(markdown).filter(Boolean);
@@ -691,7 +959,7 @@ export function registerProviders() {
 		signatureHelpTriggerCharacters: ["(", ","],
 		signatureHelpRetriggerCharacters: [","],
 		async provideSignatureHelp(model, position) {
-			if (!isFileModel(model)) return null;
+			if (!isServed(model)) return null;
 			const help = await quiet(session.request("textDocument/signatureHelp", { ...doc(model), position: toPosition(position) }), null);
 			if (!help?.signatures?.length) return null;
 			return {
@@ -711,42 +979,48 @@ export function registerProviders() {
 	});
 	monaco.languages.registerDefinitionProvider("ssl", {
 		async provideDefinition(model, position) {
-			if (!isFileModel(model)) return [];
+			if (!isServed(model)) return [];
 			return locations(await quiet(session.request("textDocument/definition", { ...doc(model), position: toPosition(position) }), null));
 		},
 	});
 	monaco.languages.registerReferenceProvider("ssl", {
 		async provideReferences(model, position, context) {
-			if (!isFileModel(model)) return [];
+			if (!isServed(model)) return [];
 			return locations(
 				await quiet(session.request("textDocument/references", { ...doc(model), position: toPosition(position), context: { includeDeclaration: context.includeDeclaration } }), null),
 			);
 		},
 	});
+	/** The name the server last said a rename is of, and in which document: what the editor's box opened with. */
+	let renaming = { uri: "", name: "" };
 	monaco.languages.registerRenameProvider("ssl", {
 		async provideRenameEdits(model, position, newName) {
-			if (!isFileModel(model)) return { edits: [], rejectReason: "Save the file before renaming symbols." };
-			let edit: any;
-			try {
-				edit = await session.request("textDocument/rename", { ...doc(model), position: toPosition(position), newName });
-			} catch (err: any) {
-				return { edits: [], rejectReason: String(err?.message ?? "Rename failed.") };
-			}
+			// A reason given back to the editor here goes to its notifications, and this editor's are written to the
+			// console and nowhere else: the box closed, nothing changed and nothing was said. So it is told as well.
+			const refuse = (reason: string) => (tell(reason), { edits: [], rejectReason: reason });
+			if (!isServed(model)) return refuse("Nothing to rename here.");
 			const edits: monaco.languages.IWorkspaceTextEdit[] = [];
-			const changes: Record<string, any[]> = { ...(edit?.changes ?? {}) };
-			for (const change of edit?.documentChanges ?? []) {
-				if (!change?.textDocument?.uri || !Array.isArray(change.edits)) continue;
-				changes[change.textDocument.uri] = [...(changes[change.textDocument.uri] ?? []), ...change.edits];
+			try {
+				const edit: any = await session.request("textDocument/rename", { ...doc(model), position: toPosition(position), newName });
+				const changes: Record<string, any[]> = { ...(edit?.changes ?? {}) };
+				for (const change of edit?.documentChanges ?? []) {
+					if (!change?.textDocument?.uri || !Array.isArray(change.edits)) continue;
+					changes[change.textDocument.uri] = [...(changes[change.textDocument.uri] ?? []), ...change.edits];
+				}
+				for (const [uri, list] of Object.entries(changes)) {
+					if (!list?.length) continue;
+					await session.ensureModel(uri);
+					for (const e of list) edits.push({ resource: monaco.Uri.parse(uri), textEdit: { range: toRange(e.range), text: e.newText }, versionId: undefined });
+				}
+			} catch (err: any) {
+				return refuse(renameFailure(err));
 			}
-			for (const [uri, list] of Object.entries(changes)) {
-				await session.ensureModel(uri);
-				for (const e of list) edits.push({ resource: monaco.Uri.parse(uri), textEdit: { range: toRange(e.range), text: e.newText }, versionId: undefined });
-			}
+			if (!edits.length) return refuse(renameRefusal(renaming.uri === model.uri.toString() ? renaming.name : "", newName));
 			return { edits };
 		},
 		async resolveRenameLocation(model, position) {
-			if (!isFileModel(model)) {
-				return { range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column), text: "", rejectReason: "Save the file before renaming symbols." };
+			if (!isServed(model)) {
+				return { range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column), text: "", rejectReason: "Nothing to rename here." };
 			}
 			let result: any;
 			try {
@@ -754,17 +1028,19 @@ export function registerProviders() {
 			} catch (err: any) {
 				return { range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column), text: "", rejectReason: String(err?.message ?? "Nothing to rename here.") };
 			}
-			if (!result) return { range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column), text: "", rejectReason: "Nothing to rename here." };
+			if (!result || model.isDisposed()) return { range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column), text: "", rejectReason: "Nothing to rename here." };
 			const range = toRange(result.range ?? result);
-			return { range, text: result.placeholder ?? model.getValueInRange(range) };
+			const text = result.placeholder ?? model.getValueInRange(range);
+			renaming = { uri: model.uri.toString(), name: text };
+			return { range, text };
 		},
 	});
 	monaco.languages.registerDocumentSymbolProvider("ssl", {
-		provideDocumentSymbols: (model) => (isFileModel(model) ? quiet(session.documentSymbols(model), []) : []),
+		provideDocumentSymbols: (model) => (isServed(model) ? quiet(session.documentSymbols(model), []) : []),
 	});
 	monaco.languages.registerFoldingRangeProvider("ssl", {
 		async provideFoldingRanges(model) {
-			if (!isFileModel(model)) return [];
+			if (!isServed(model)) return [];
 			const folds = (await quiet(session.request("textDocument/foldingRange", doc(model)), null)) ?? [];
 			const kinds: Record<string, monaco.languages.FoldingRangeKind> = {
 				comment: monaco.languages.FoldingRangeKind.Comment,
@@ -776,17 +1052,34 @@ export function registerProviders() {
 	});
 	monaco.languages.registerDocumentFormattingEditProvider("ssl", {
 		async provideDocumentFormattingEdits(model, options) {
-			if (!isFileModel(model) || model.isDisposed()) return [];
+			if (!isServed(model) || model.isDisposed()) return [];
 			const version = model.getVersionId();
-			const edits = await quiet(session.request("textDocument/formatting", { ...doc(model), options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces } }), null);
+			const uri = model.uri.toString();
+			let edits: any;
+			try {
+				edits = await session.request("textDocument/formatting", { ...doc(model), options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces } });
+				formatFailures.delete(uri);
+			} catch (e: any) {
+				// Said by "Format document" (commands.ts), which saw only that nothing changed.
+				formatFailures.set(uri, String(e?.message ?? e).trim() || "the language server did not answer");
+				return [];
+			}
 			if (!edits || model.isDisposed() || model.getVersionId() !== version) return [];
 			return toMinimalEdits(model, edits);
 		},
 	});
 	monaco.languages.registerDocumentRangeFormattingEditProvider("ssl", {
 		async provideDocumentRangeFormattingEdits(model, range, options) {
-			if (!isFileModel(model) || model.isDisposed()) return [];
+			if (!isServed(model) || model.isDisposed()) return [];
 			const version = model.getVersionId();
+			// The selected lines as "Format document" leaves them, as a save takes its changed lines (ADR 0037, ADR 0043).
+			// The server's range format indents what it is given from its first line: two lines of an :IF, the first
+			// at the wrong depth, both came back at that depth, the right one taken out of its block.
+			if (model.getValueLength() <= FORMAT_WHOLE_UP_TO) {
+				const whole = await quiet(session.formatRangesAsDocument(model, selectedLines(range), options), null);
+				if (model.isDisposed() || model.getVersionId() !== version) return [];
+				if (whole) return whole.map((e) => ({ range: e.range, text: e.text ?? "" }));
+			}
 			const edits = await quiet(
 				session.request("textDocument/rangeFormatting", {
 					...doc(model),
@@ -803,7 +1096,7 @@ export function registerProviders() {
 		onDidChange: onSemanticThemeChange,
 		getLegend: () => LEGEND,
 		async provideDocumentSemanticTokens(model) {
-			if (!isFileModel(model)) return null;
+			if (!isServed(model)) return null;
 			const result = await quiet(session.semanticTokens(model), null);
 			return result && { data: result };
 		},
@@ -811,7 +1104,7 @@ export function registerProviders() {
 	});
 	monaco.languages.registerInlayHintsProvider("ssl", {
 		async provideInlayHints(model, range) {
-			if (!isFileModel(model)) return { hints: [], dispose() {} };
+			if (!isServed(model)) return { hints: [], dispose() {} };
 			const hints = (await quiet(session.request("textDocument/inlayHint", { ...doc(model), range: toLspRange(range) }), null)) ?? [];
 			return {
 				hints: hints.map((h: any) => ({

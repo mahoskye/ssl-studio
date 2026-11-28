@@ -2,15 +2,17 @@
 // Documents are Monaco models; the text in them is the source of truth
 // (ADR 0002).
 import { createSignal, createStore, flush, onFlush, reconcile, snapshot } from "solid-js";
-import { DEFAULT_SETTINGS, type Info, type LspState, type Project, type Settings, type SettingsPatch, type ThemeFile, type Workspace } from "../shared/protocol";
+import { DEFAULT_SETTINGS, type Info, type KeptText, type LspState, type Project, type Settings, type SettingsPatch, type ThemeFile, type Workspace } from "../shared/protocol";
 import { backend, on } from "./backend";
 import { removeRecentGroup, resetRecentTabs } from "./recentTabs";
 import { monaco } from "./editor/monaco";
 import { languageFor, setFormattingHost } from "./editor/languages";
-import { DEFAULT_SQL_DIALECT } from "../shared/format";
+import { DEFAULT_SQL_DIALECT, isSqlLanguage } from "../shared/format";
+import { isDataSourceName } from "../shared/lexicalTokens";
+import { sqlBodyStart } from "../shared/sqlDataSource";
 import { getPath, SERVER_DEFAULTS } from "../shared/styleProfile";
 import { session } from "./lsp/session";
-import { changedRanges, minimalReplace } from "./lsp/edits";
+import { changedRanges, FORMAT_WHOLE_UP_TO, minimalReplace } from "./lsp/edits";
 import { ask, choose } from "./dialogs";
 import { closeComparison, closeReview, openReview } from "./editor/Review";
 import { syncWorkspaceThreads } from "./agent/store";
@@ -79,6 +81,10 @@ type Doc = {
 	binary?: { size: number; image?: string };
 	/** Stops any active non-SSL document validator (plan/doc/json/toml/xml) on language switch or dispose. */
 	validatorDispose?: () => void;
+	/** Of a data source read as SQL: the line (from 0) its SQL starts on (ADR 0038). Not set for one that is SSL. */
+	sqlBodyLine?: number;
+	/** The language mode was chosen by hand. Nothing changes it then but another choice. */
+	languageChosen?: boolean;
 };
 
 const [state, setStore] = createStore({
@@ -112,7 +118,7 @@ const [state, setStore] = createStore({
 	cursor: { line: 1, column: 1 },
 	/** Bumped when the tree should reload a folder. */
 	treeVersion: 0,
-	quickPick: null as null | "files" | "commands" | "symbols" | "outline",
+	quickPick: null as null | "files" | "commands" | "symbols" | "outline" | "line",
 	/** Counts up when an open file turns out to be text where it was not, or the other way round, or a picture changed on disk: what shows it looks again. */
 	kindVersion: 0,
 });
@@ -298,11 +304,169 @@ export async function settleUnsaved(what: string): Promise<boolean> {
 	commitPendingEdits();
 	const unsaved = snapshotUnsavedPaths();
 	if (!unsaved.length) return true;
-	const names = unsaved.slice(0, 3).map(baseName).join(", ") + (unsaved.length > 3 ? ` and ${unsaved.length - 3} more` : "");
+	// By the name on its tab: a document with no file yet is "Untitled-1", not the path the app knows it by.
+	const names = namesOf(unsaved);
 	const answer = await choose(`${unsaved.length === 1 ? "1 file has" : `${unsaved.length} files have`} unsaved changes (${names}). ${what}`, ["Save all", "Discard changes"], { danger: "Discard changes" });
 	if (answer === "Save all") return saveAll();
 	return answer === "Discard changes";
 }
+
+// --- unsaved text, kept while the folder is not open (ADR 0042) ---------------------
+
+/** How long after a change a document's unsaved text is kept, in milliseconds: a second, as VS Code has it. */
+export const KEEP_AFTER = 1000;
+/**
+ * Which text of each document the backend was last given to keep, as the document's version then, with the file
+ * as those edits found it: for the open folder. What is asked to be kept is only what has changed since, and what
+ * was kept for a document that is no longer unsaved is asked to be forgotten. The version is one document's own:
+ * a file closed and opened again is another document, whose versions count from the start again. `language` is
+ * the language mode kept with a document that has no file yet: its name says nothing of what it is.
+ */
+type KeptVersion = { model: monaco.editor.ITextModel; version: number; language?: string };
+const keptVersions = new Map<string, KeptVersion>();
+/** A document's text as it is now, to put on record as kept: with its language mode where it has no file yet. */
+const versionNow = (doc: Doc): KeptVersion => ({
+	model: doc.model,
+	version: doc.model.getAlternativeVersionId(),
+	...(isUntitled(doc.path) ? { language: doc.model.getLanguageId() } : {}),
+});
+/**
+ * Whether the backend has this document as it is now: its text, and for a document that has no file yet its
+ * language mode too. A mode chosen anew changes no text, and was lost with the window until it was typed in again.
+ */
+const isKept = (path: string) => {
+	const doc = docs.get(path);
+	const was = keptVersions.get(path);
+	if (!doc || !was || was.model !== doc.model || was.version !== doc.model.getAlternativeVersionId()) return false;
+	return !isUntitled(path) || was.language === doc.model.getLanguageId();
+};
+const keptBases = new Map<string, { text: string; mtime: number }>();
+/** Counts the folders opened: what a keep learned of one folder is not put on record for the next. */
+let keptEpoch = 0;
+/** The unsaved text kept for the open folder that no document has taken up yet, by path (restoreTabs). */
+const keptPending = new Map<string, KeptText>();
+/** The keep that is waiting to be asked for, and when it is due. */
+let keepTimer: ReturnType<typeof setTimeout> | undefined;
+let keepDue = 0;
+/** The keeps asked for, one after another: each reads the documents as they are when its turn comes. */
+let keeping: Promise<unknown> = Promise.resolve();
+
+/** No record of anything kept: the folder is another, and what was kept was that folder's. (Exported for the tests.) */
+export function forgetKeptRecord() {
+	keptEpoch++;
+	keptVersions.clear();
+	keptBases.clear();
+	keptPending.clear();
+	clearTimeout(keepTimer);
+	keepTimer = undefined;
+}
+
+/** What there is to keep and to forget just now, with what the record of it would then be. Null with nothing to do. */
+function unsavedToKeep(skip?: (path: string) => boolean) {
+	const cur = snapshot(state);
+	const root = cur.workspace?.root;
+	if (!root) return null;
+	const keep: KeptText[] = [];
+	const versions = new Map<string, KeptVersion>();
+	const bases = new Map<string, { text: string; mtime: number }>();
+	for (const path of snapshotUnsavedPaths()) {
+		const doc = docs.get(path);
+		if (!doc || doc.model.isDisposed() || doc.binary || skip?.(path)) continue;
+		const base = keptBases.get(path);
+		const sameBase = isUntitled(path) || (base !== undefined && base.mtime === doc.mtime && base.text === doc.savedText);
+		if (isKept(path) && sameBase) continue;
+		versions.set(path, versionNow(doc));
+		const text = doc.model.getValue();
+		if (isUntitled(path)) keep.push({ path, text, language: doc.model.getLanguageId() });
+		else {
+			// The file as these edits found it goes along once: the backend keeps it with the text until it is told another.
+			bases.set(path, { text: doc.savedText, mtime: doc.mtime });
+			keep.push(sameBase ? { path, text } : { path, text, saved: { text: doc.savedText, mtime: doc.mtime } });
+		}
+	}
+	const drop = [...keptVersions.keys()].filter((path) => !cur.dirty[path] || !docs.has(path) || skip?.(path));
+	return keep.length || drop.length ? { root, keep, drop, versions, bases } : null;
+}
+
+/**
+ * Has the backend keep the text of every document that is unsaved, as it is now, and forget what it kept for those
+ * that no longer are. Answers null when all of it is kept, and else why it is not. `skip` names documents whose
+ * text is not to be kept and is forgotten: those the user has just chosen to discard.
+ */
+export function keepUnsaved(skip?: (path: string) => boolean): Promise<string | null> {
+	clearTimeout(keepTimer);
+	keepTimer = undefined;
+	const run = async (): Promise<string | null> => {
+		const todo = unsavedToKeep(skip);
+		if (!todo) return null;
+		const epoch = keptEpoch;
+		try {
+			await backend.unsavedKeep(todo.root, todo.keep, todo.drop);
+		} catch (e: any) {
+			return String(e?.message ?? e);
+		}
+		if (epoch === keptEpoch) {
+			for (const path of todo.drop) {
+				keptVersions.delete(path);
+				keptBases.delete(path);
+			}
+			for (const [path, version] of todo.versions) keptVersions.set(path, version);
+			for (const [path, base] of todo.bases) keptBases.set(path, base);
+		}
+		return null;
+	};
+	const done = keeping.then(run, run);
+	keeping = done.catch(() => undefined);
+	return done;
+}
+
+/**
+ * Asks for the unsaved text to be kept a moment from now. A change to a document asks for it within the second,
+ * and a further change does not put that off: however long the typing goes on, what a crash can take is the last
+ * second of it. `after` 0 is for when other files are unsaved than before (one saved, one discarded): at once.
+ */
+export function keepUnsavedSoon(after = KEEP_AFTER) {
+	const due = Date.now() + after;
+	if (keepTimer !== undefined) {
+		if (due >= keepDue) return;
+		clearTimeout(keepTimer);
+	}
+	keepDue = due;
+	keepTimer = setTimeout(() => {
+		keepTimer = undefined;
+		void keepUnsaved();
+	}, after);
+}
+
+/**
+ * As the page goes (a reload, a browser tab closed): what is unsaved is sent to be kept, now, without waiting for
+ * a keep that is under way, since nothing after this is sure to run. Nothing is asked: the text comes back with
+ * the folder (ADR 0042).
+ */
+export function keepUnsavedOnLeave() {
+	commitPendingEdits();
+	const todo = unsavedToKeep();
+	if (todo) void backend.unsavedKeep(todo.root, todo.keep, todo.drop).catch(() => undefined);
+}
+
+/**
+ * Before the folder is left with every open document in it (the window closing, another folder opened): what is
+ * unsaved is kept for when the folder is opened again, and nothing is asked (ADR 0042). Only where it could not
+ * be kept is the question of ADR 0009 asked, since going on would then lose it. Says whether to go on.
+ */
+export async function leaveUnsavedKept(what: string): Promise<boolean> {
+	commitPendingEdits();
+	if ((await keepUnsaved()) === null) return true;
+	if (!(await settleUnsaved(`They could not be kept for next time. ${what}`))) return false;
+	// Saved, or given up: what was kept of them before the keeping failed is not to come back as unsaved. Asked
+	// for as it can be: where the folder cannot be written, it cannot be cleared either.
+	const givenUp = new Set(snapshotUnsavedPaths());
+	await keepUnsaved((path) => givenUp.has(path));
+	return true;
+}
+
+/** The names of a few files, and how many more there are. */
+const namesOf = (paths: readonly string[]) => paths.slice(0, 3).map(displayName).join(", ") + (paths.length > 3 ? ` and ${paths.length - 3} more` : "");
 
 let openSeq = 0;
 
@@ -366,10 +530,15 @@ function writeKeptForFolder(): Promise<void> | undefined {
 }
 
 export async function openFolder(path?: string) {
-	if (!(await settleUnsaved("Opening another folder closes them."))) return;
-	// What is still unsaved here was asked about and is to be dropped, as it stands now (see below).
+	// Leaving a folder asks nothing: what is unsaved in it is kept, and comes back when it is opened again (ADR 0042).
+	if (!(await leaveUnsavedKept("Opening another folder closes them."))) return;
+	// What is unsaved here and not kept by now was asked about and is to be dropped, as it stands now (see below).
 	const versionOf = (path: string) => docs.get(path)?.model.getAlternativeVersionId();
-	const droppedByChoice = new Map(snapshotUnsavedPaths().map((path) => [path, versionOf(path)]));
+	const droppedByChoice = new Map(
+		snapshotUnsavedPaths()
+			.filter((path) => !isKept(path))
+			.map((path) => [path, versionOf(path)]),
+	);
 	const seq = ++openSeq;
 	// From here until the folder is open, or the opening is called off, nothing kept for a folder is sent on its
 	// own (keepForFolder): what waits is written now, while the backend is still in this folder.
@@ -406,22 +575,29 @@ async function switchFolder(path: string | undefined, seq: number, droppedByChoi
 		}
 		return;
 	}
-	// Typed in while the folder was being chosen or opened: the question above was answered before these edits
-	// were made, and from here every open document is dropped. The backend is already in the new folder, where the
-	// edited files cannot be saved, so it is sent back to the folder they belong to and the open is called off.
-	// (With no folder open before there is nowhere to go back to: an untitled buffer edited in that gap is not covered.)
-	// Not what the answer above already covered: a file the user chose to discard is dropped, unless it was typed in again.
+	// Typed in while the folder was being chosen or opened: what is unsaved was kept before these edits were made,
+	// and from here every open document is dropped. They are kept as the rest was, for the folder being left, which
+	// the backend still takes them for though it is in the new one by now.
+	// Not what was asked about above: a file the user chose to discard is dropped, unless it was typed in again.
 	commitPendingEdits();
-	const editedMeanwhile = snapshotUnsavedPaths().filter((path) => !droppedByChoice.has(path) || droppedByChoice.get(path) !== versionOf(path));
-	if (editedMeanwhile.length && prevRoot && canonical(workspace.root) !== canonical(prevRoot)) {
-		const back = await guarded(() => backend.openFolder(prevRoot));
+	const dropped = (path: string) => droppedByChoice.has(path) && droppedByChoice.get(path) === versionOf(path);
+	const notKept = () => snapshotUnsavedPaths().filter((path) => !dropped(path) && !isKept(path));
+	if (prevRoot && notKept().length) {
+		await keepUnsaved(dropped);
 		if (seq !== openSeq) return;
-		if (back) {
-			session.setRoot(prevRoot);
-			void restartLsp();
-			const names = editedMeanwhile.length === 1 ? displayName(editedMeanwhile[0]!) : `${editedMeanwhile.length} files`;
-			notify(`${baseName(workspace.root)} was not opened: ${names} changed while it was being opened. Save or discard the changes, then open the folder again.`, "error");
-			return;
+		// And where they could not be kept: the backend is in the new folder, where the edited files cannot be saved,
+		// so it is sent back to the folder they belong to and the open is called off.
+		const editedMeanwhile = notKept();
+		if (editedMeanwhile.length && canonical(workspace.root) !== canonical(prevRoot)) {
+			const back = await guarded(() => backend.openFolder(prevRoot));
+			if (seq !== openSeq) return;
+			if (back) {
+				session.setRoot(prevRoot);
+				void restartLsp();
+				const names = editedMeanwhile.length === 1 ? displayName(editedMeanwhile[0]!) : `${editedMeanwhile.length} files`;
+				notify(`${baseName(workspace.root)} was not opened: ${names} changed while it was being opened, and the changes could not be kept. Save or discard them, then open the folder again.`, "error");
+				return;
+			}
 		}
 	}
 	closeReview();
@@ -435,6 +611,8 @@ async function switchFolder(path: string | undefined, seq: number, droppedByChoi
 	resetRecentTabs();
 	const oldDocs = [...docs.values()];
 	docs.clear();
+	// What was kept of those documents is the folder's that was left: none of it is on record for this one.
+	forgetKeptRecord();
 	// The notices go below, and with them the one that a settings file does not read. It was kept on record as said,
 	// so the reading for this folder passed it over: opening a folder from the Welcome page, the ordinary start,
 	// took the notice away for good while the person's own settings stayed unused. The record goes with the
@@ -503,12 +681,9 @@ export function rememberTabs() {
 	const cur = snapshot(state);
 	const root = cur.workspace?.root;
 	if (!root || !tabsReadyNow) return;
-	// Floating untitled buffers are not persisted across workspace sessions.
-	const savedGroups = cur.groups.map((g) => {
-		const tabs = g.tabs.filter((p) => !isUntitled(p));
-		return { ...g, tabs, active: g.active && !isUntitled(g.active) ? g.active : (tabs[0] ?? null) };
-	});
-	remember(tabsKey(root), packTabs(savedGroups, cur.activeGroup));
+	// A document with no file yet has its place among the tabs too: it comes back there if it has text that was
+	// kept (ADR 0042), and one left empty has nothing to come back with and is passed over (restoreTabs).
+	remember(tabsKey(root), packTabs(cur.groups, cur.activeGroup));
 }
 
 /** The side panels there are, and the bottom ones: what a kept choice must be one of. */
@@ -539,8 +714,8 @@ export function reloadWithoutTabs() {
 		// No session storage: the reload still happens, with the tabs.
 	}
 	window.location.reload();
-	// Still here a moment later: the reload was called off (the question about unsaved changes was answered "stay").
-	// The request goes with it, so that a later, ordinary reload reopens the tabs as usual.
+	// Still here a moment later: the reload did not happen. The request goes with it, so that a later, ordinary
+	// reload reopens the tabs as usual.
 	setTimeout(() => {
 		try {
 			sessionStorage.removeItem(SKIP_TABS_ONCE);
@@ -563,13 +738,20 @@ function takeSkipTabsOnce(): boolean {
 export async function restoreTabs() {
 	const curStart = snapshot(state);
 	const root = curStart.workspace?.root;
-	// A self-test starts from nothing open, and leaves nothing behind for the next run.
-	if (curStart.info?.selftest || curStart.info?.selftestClose) return;
+	// A self-test starts from no tabs remembered, and leaves none behind for the next run. What was unsaved when
+	// the folder was left comes back in one too (ADR 0042): the check of the close reads it (selftestClose.ts).
+	if (curStart.info?.selftest || curStart.info?.selftestClose) {
+		if (root && (await recallUnsaved(root))) await openKeptPending(root);
+		return;
+	}
 	// Asked for once, by the error card: the panels come back, the files do not, and what is remembered below is
 	// then the empty set, so the tab that failed is not reopened next time either.
 	const skipTabs = takeSkipTabsOnce();
 	setTabsReadyFlag(false);
 	try {
+		// What was unsaved when the folder was left, before any of its files is read: a file that is opened below
+		// opens with the text it was left with.
+		if (root && !(await recallUnsaved(root))) return;
 		// The panels first: they are there at once, and the files take a moment to read.
 		const views = root ? unpackViews(recall(viewsKey(root)), LEFT_VIEWS, BOTTOM_VIEWS) : {};
 		if (views.left || views.bottom || views.right) {
@@ -580,14 +762,27 @@ export async function restoreTabs() {
 				if (views.right) s.rightView = views.right as PanelId;
 			});
 		}
+		if (root && skipTabs && keptPending.size) {
+			// The files do not come back this once, and so neither do those with unsaved text: one of them may be
+			// the tab that failed. Their text stays kept, and that it is there is said.
+			const pending = [...keptPending.keys()];
+			notify(`Unsaved text is kept for ${namesOf(pending)}. It comes back when ${pending.length === 1 ? "the file" : "a file"} is opened.`, "info", { label: "Open", run: () => void openKeptPending(root) });
+		}
 		const saved = root && !skipTabs ? unpackTabs(recall(tabsKey(root))) : null;
+		if (root && !saved && !skipTabs) await openKeptPending(root);
 		if (!root || !saved) return;
 		for (const [index, group] of saved.groups.entries()) {
 			const tabs: string[] = [];
 			for (const path of group.tabs) {
+				// A document with no file yet comes back where it was, if it was left with text.
+				if (isUntitled(path)) {
+					const kept = keptPending.get(path);
+					if (kept && attachUntitledKept(kept)) tabs.push(path);
+					continue;
+				}
 				if (!isInside(root, path)) continue;
 				try {
-					const loaded = (await loadDoc(path)).path;
+					const loaded = (await loadDoc(path, true)).path;
 					if (snapshot(state).workspace?.root !== root) {
 						letGoIfOnlyRead(loaded);
 						return;
@@ -631,13 +826,84 @@ export async function restoreTabs() {
 				s.activeGroup = Math.min(saved.activeGroup, s.groups.length - 1);
 			}
 		});
+		// Unsaved text of a file that had no tab among those (the tabs are remembered by the window, the text by the
+		// app: one may be there without the other) gets a tab of its own.
+		await openKeptPending(root);
 	} finally {
 		if (snapshot(state).workspace?.root === root) {
+			sayKeptRestored();
 			setTabsReadyFlag(true);
 			rememberTabs();
 			rememberViews();
 		}
 	}
+}
+
+/**
+ * Asks the backend for the unsaved text it kept for this folder, and puts it where a file that is opened finds it
+ * (loadDoc). Says whether the folder is still the open one. Text that cannot be asked for is not lost by that: it
+ * stays kept, and the files open as they are on disk.
+ */
+async function recallUnsaved(root: string): Promise<boolean> {
+	const epoch = keptEpoch;
+	let kept: KeptText[] = [];
+	try {
+		kept = (await backend.unsavedKept()) ?? [];
+	} catch (e) {
+		log(`the unsaved text kept for ${baseName(root)} could not be read: ${e instanceof Error ? e.message : String(e)}`);
+	}
+	if (epoch !== keptEpoch || snapshot(state).workspace?.root !== root) return false;
+	for (const each of Array.isArray(kept) ? kept : []) {
+		if (!each || typeof each.path !== "string" || typeof each.text !== "string") continue;
+		const path = canonical(each.path);
+		if (isUntitled(path) || isInside(root, path)) keptPending.set(path, { ...each, path });
+	}
+	return true;
+}
+
+/** What came back unsaved from last time with something to say of it: the file changed on disk since, or is gone. */
+let keptRestored: { path: string; file: "changed" | "gone" }[] = [];
+
+/** Says it, once for all the files a folder came back with. */
+function sayKeptRestored() {
+	const of = (file: "changed" | "gone") => keptRestored.filter((each) => each.file === file).map((each) => each.path);
+	const changed = of("changed");
+	const gone = of("gone");
+	keptRestored = [];
+	if (changed.length) notify(`${namesOf(changed)} changed on disk while ${changed.length === 1 ? "its" : "their"} unsaved text was kept. The unsaved text is open: saving will ask which to keep.`, "error");
+	if (gone.length) notify(`${namesOf(gone)} ${gone.length === 1 ? "is" : "are"} no longer on disk. ${gone.length === 1 ? "Its" : "Their"} unsaved text is open: save to put the ${gone.length === 1 ? "file" : "files"} back.`, "error");
+}
+
+/** Opens a tab for each unsaved text that no document has taken up yet, in the group at hand. */
+async function openKeptPending(root: string) {
+	for (const kept of [...keptPending.values()]) {
+		if (snapshot(state).workspace?.root !== root) return;
+		if (keptPending.get(kept.path) !== kept) continue;
+		let path: string;
+		if (isUntitled(kept.path)) {
+			if (!attachUntitledKept(kept)) continue;
+			path = kept.path;
+		} else {
+			try {
+				path = (await loadDoc(kept.path, true)).path;
+			} catch {
+				continue;
+			}
+			if (snapshot(state).workspace?.root !== root) return void letGoIfOnlyRead(path);
+			// The file has that text by now: nothing of it is unsaved, and it needs no tab for it.
+			if (!snapshot(state).dirty[path]) {
+				letGoIfOnlyRead(path);
+				continue;
+			}
+		}
+		setState((s) => {
+			const g = s.groups[s.activeGroup] ?? s.groups[0];
+			if (!g || s.groups.some((each) => each.tabs.includes(path))) return;
+			g.tabs.push(path);
+			g.active ??= path;
+		});
+	}
+	if (snapshot(state).workspace?.root === root) sayKeptRestored();
 }
 
 export async function loadProject() {
@@ -691,7 +957,7 @@ export async function loadSettings(fresh = false) {
  * one gesture) would each be worked out from the value before either, and the later would write the earlier away,
  * however orderly the saving. So the new value is on screen at once, where the next change is worked out from it.
  */
-const WORKED_OUT_HERE = ["keys", "regionColors", "agentOwnModels"] as const;
+const WORKED_OUT_HERE = ["keys", "editorKeys", "markdownKeys", "regionColors", "agentOwnModels"] as const;
 /** How many saves of settings have been asked for: tells the answer to the last from the answers before it. */
 let settingsAsked = 0;
 /** How many of them have not answered yet, and whether one of those that have, failed. */
@@ -868,6 +1134,36 @@ export function setTableTextMode(_path: string, text: boolean, group?: number) {
 /** One spelling per file: Monaco's (on Windows it lowercases the drive letter). Untitled paths stay as-is. */
 export const canonical = (path: string) => (isUntitled(path) ? path : monaco.Uri.file(path).fsPath);
 
+/**
+ * What Tab writes in a script: what the script is indented with already, and where it has no indentation yet (a
+ * new script, an empty one), what the house style says. Left to the editor's own defaults, a new script was
+ * indented with four spaces under a house style of tabs, and the formatter then rewrote every line typed.
+ */
+function setHouseIndent(model: monaco.editor.ITextModel) {
+	if (model.isDisposed() || model.getLanguageId() !== "ssl") return;
+	const ssl = snapshot(state).settings.ssl;
+	const size = Number(getPath(ssl, "format.indentSize") ?? SERVER_DEFAULTS.format.indentSize);
+	const spaces = (getPath(ssl, "format.indentStyle") ?? SERVER_DEFAULTS.format.indentStyle) === "space";
+	model.detectIndentation(spaces, Number.isInteger(size) && size > 0 ? size : 4);
+}
+
+/** The same for every script that is open, when the house style has changed. */
+export function setHouseIndentEverywhere() {
+	for (const doc of docs.values()) setHouseIndent(doc.model);
+}
+
+/**
+ * "Go to line" in the box at the top of the window, as VS Code has it, for every editor and from anywhere (ADR 0044):
+ * the code editor's own box opened inside the editor, unlike every other list of the app's.
+ */
+export function openLinePicker() {
+	const doc = activeDoc();
+	if (!doc || doc.binary) return notify(doc ? "The open file is not text: it has no lines to go to." : "Open a file to go to a line of it.");
+	setState((s) => {
+		s.quickPick = "line";
+	});
+}
+
 /** Opens a floating untitled buffer (Untitled-1, Untitled-2, ...) that stays in memory until saved. */
 export function newUntitled(group = snapshot(state).activeGroup, language = "plaintext"): string {
 	const cur = snapshot(state);
@@ -878,19 +1174,10 @@ export function newUntitled(group = snapshot(state).activeGroup, language = "pla
 	const targetGroup = Math.max(0, Math.min(group, Math.max(0, cur.groups.length - 1)));
 	if (!cur.groups[targetGroup]) return "";
 	let n = 1;
-	while (docs.has(`untitled:Untitled-${n}`)) n++;
+	// Not a name that unsaved text is still kept under, either: the two would be one document the next time.
+	while (docs.has(`untitled:Untitled-${n}`) || keptPending.has(`untitled:Untitled-${n}`)) n++;
 	const path = `untitled:Untitled-${n}`;
-	const uri = monaco.Uri.parse(path);
-	const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel("", language, uri);
-	const doc: Doc = { path, model, savedVersion: model.getAlternativeVersionId(), savedText: "", mtime: 0 };
-	docs.set(path, doc);
-	model.onDidChangeContent(() => {
-		const dirty = model.getAlternativeVersionId() !== doc.savedVersion && model.getValue() !== doc.savedText;
-		setState((s) => {
-			s.dirty[path] = dirty;
-		});
-	});
-	doc.validatorDispose = attachValidator(model, path, language);
+	attachUntitled(path, "", language);
 	closeComparison();
 	setState((s) => {
 		const g = s.groups[targetGroup];
@@ -907,6 +1194,41 @@ export function newUntitled(group = snapshot(state).activeGroup, language = "pla
 		focusEditor();
 	});
 	return path;
+}
+
+/** Makes a model the open document for a name that has no file yet, and follows its edits. With text, it is unsaved from the start. */
+function attachUntitled(path: string, text: string, language: string): Doc {
+	const uri = monaco.Uri.parse(path);
+	const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(text, language, uri);
+	const doc: Doc = { path, model, savedVersion: text === "" ? model.getAlternativeVersionId() : -1, savedText: "", mtime: 0 };
+	docs.set(path, doc);
+	model.onDidChangeContent(() => {
+		const dirty = model.getAlternativeVersionId() !== doc.savedVersion && model.getValue() !== doc.savedText;
+		markDirty(path, dirty);
+		keepUnsavedSoon();
+	});
+	// A script not yet saved is the language server's to read as well: it is told of it here, or when the
+	// document is made a script by its language mode (setDocumentLanguage).
+	session.track(model);
+	setHouseIndent(model);
+	doc.validatorDispose = attachValidator(model, path, language);
+	return doc;
+}
+
+/**
+ * A document with no file yet, as it was left: the text that was kept for it, unsaved (ADR 0042). Says whether
+ * it is there now. Its text is on record as kept, so that it is not written again until it changes.
+ */
+function attachUntitledKept(kept: KeptText): boolean {
+	if (keptPending.get(kept.path) === kept) keptPending.delete(kept.path);
+	if (docs.has(kept.path)) return true;
+	if (!kept.text) return false;
+	const doc = attachUntitled(kept.path, kept.text, kept.language || "plaintext");
+	keptVersions.set(kept.path, versionNow(doc));
+	setState((s) => {
+		s.dirty[kept.path] = true;
+	});
+	return true;
 }
 
 function disposeDoc(doc: Doc) {
@@ -981,43 +1303,172 @@ function attachValidator(model: monaco.editor.ITextModel, path: string, language
 	return stop;
 }
 
+/**
+ * Marks a document unsaved or not, as an edit of it leaves it. Written only when that changes: the store's own
+ * writing of an equal value still set what reads it running, and on every key typed in a script of 1.7 MB that was
+ * a quarter of a second.
+ */
+function markDirty(path: string, dirty: boolean) {
+	if (snapshot(state).dirty[path] === dirty) return;
+	setState((s) => {
+		s.dirty[path] = dirty;
+	});
+}
+
 /** Makes a model the open document for a path, and follows its edits. */
 function attach(path: string, text: string, saved: { text: string; mtime: number }): Doc {
 	const uri = monaco.Uri.file(path);
-	const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(text, languageFor(path), uri);
+	// A data source that is SQL from its first line opens as SQL. One with SSL directives above its SQL is seen
+	// for what it is once the language server has said what it read (`readDataSource`).
+	const sqlFrom = isDataSourceName(path) ? sqlBodyStart(text, null) : null;
+	const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(text, sqlFrom === null ? languageFor(path) : "sql", uri);
 	const doc: Doc = { path, model, savedVersion: text === saved.text ? model.getAlternativeVersionId() : -1, savedText: saved.text, mtime: saved.mtime };
+	if (sqlFrom !== null) doc.sqlBodyLine = sqlFrom;
 	docs.set(path, doc);
 	model.onDidChangeContent(() => {
 		const dirty = model.getAlternativeVersionId() !== doc.savedVersion && model.getValue() !== doc.savedText;
-		setState((s) => {
-			s.dirty[path] = dirty;
-		});
+		markDirty(path, dirty);
 		// A file that is being written in is not one that was only looked at: its tab stays. Asked a moment later: a
 		// reload from disk is an edit too, and says the file is unchanged once it is done.
 		if (dirty) queueMicrotask(() => snapshot(state).dirty[path] && keepTab(path));
+		// And what is unsaved of it is kept, within the second (ADR 0042).
+		keepUnsavedSoon();
 	});
 	session.track(model);
+	setHouseIndent(model);
 	doc.validatorDispose = attachValidator(model, path, model.getLanguageId());
+	if (isDataSourceName(path)) followDataSource(doc);
 	return doc;
 }
 
-async function loadDoc(path: string): Promise<Doc> {
+/** The language mode a document has when none is chosen for it: by its name, and for a data source by what it holds. */
+function detectedLanguage(doc: Doc): string {
+	return isDataSourceName(doc.path) && doc.sqlBodyLine !== undefined ? "sql" : languageFor(doc.path);
+}
+
+/** The same for an open document's path: what "Auto Detect" in the language picker goes back to. */
+export const detectedLanguageOf = (path: string): string => {
+	const doc = docs.get(canonical(path));
+	return doc ? detectedLanguage(doc) : languageFor(path);
+};
+
+/**
+ * Reads an open data source as SQL or as SSL, and shows it in that language mode (ADR 0038).
+ *
+ * The language server says what it read as SSL (its lexical tokens): nothing of an SQL data source, or its
+ * directives alone. What stands below that is the IDE's to read, and is SQL if it opens with an SQL statement
+ * (`sqlBodyStart`). With no server to say, only a file that is SQL from its first line is taken for SQL. A mode
+ * chosen by hand is left as chosen.
+ */
+async function readDataSource(doc: Doc): Promise<void> {
+	const model = doc.model;
+	if (model.isDisposed() || doc.binary || !isDataSourceName(doc.path)) return;
+	const version = model.getVersionId();
+	const lexical = await session.lexicalTokens(model).catch(() => null);
+	if (model.isDisposed() || model.getVersionId() !== version || docs.get(doc.path) !== doc) return;
+	const body = sqlBodyStart(model.getValue(), lexical);
+	doc.sqlBodyLine = body ?? undefined;
+	if (doc.languageChosen) return;
+	const now = model.getLanguageId();
+	const want = body === null ? "ssl" : isSqlLanguage(now) ? now : "sql";
+	if (now !== want && (now === "ssl" || isSqlLanguage(now))) setDocumentLanguage(doc.path, want, false);
+}
+
+/** Reads a data source when it is opened, and again a moment after it is written in. */
+function followDataSource(doc: Doc) {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const written = doc.model.onDidChangeContent(() => {
+		clearTimeout(timer);
+		timer = setTimeout(() => void readDataSource(doc), 400);
+	});
+	doc.model.onWillDispose(() => {
+		clearTimeout(timer);
+		written.dispose();
+	});
+	void readDataSource(doc);
+}
+
+// The server has started, or started again: what it reads of each open data source can be asked now.
+session.onReady(() => {
+	for (const doc of docs.values()) if (isDataSourceName(doc.path)) void readDataSource(doc);
+});
+
+/**
+ * The open document for a file, read from disk if it is not open yet. `forTab` is for a file that is being opened
+ * in a tab: it opens with the unsaved text that was kept for it, if there is any (ADR 0042). A file that is only
+ * read (a definition peeked at) is read as it is on disk, and the kept text waits for its tab.
+ */
+async function loadDoc(path: string, forTab = false): Promise<Doc> {
 	path = canonical(path);
 	const existing = docs.get(path);
 	if (existing) return existing;
-	const file = await backend.read(path);
+	const kept = forTab ? keptPending.get(path) : undefined;
+	let file: Awaited<ReturnType<typeof backend.read>> | null = null;
+	let unread = "";
+	try {
+		file = await backend.read(path);
+	} catch (e: any) {
+		// A file that is gone, or does not read, still has the text that was kept for it.
+		if (!kept) throw e;
+		unread = String(e?.message ?? e);
+	}
 	// Two callers may have asked for the same file while it was being read.
 	const known = docs.get(path);
 	if (known) return known;
+	if (kept && keptPending.get(path) === kept) {
+		keptPending.delete(path);
+		return attachKept(path, kept, file);
+	}
+	if (!file) throw new Error(unread);
 	const doc = attach(path, file.text, file);
 	doc.encoding = file.encoding;
 	doc.binary = file.binary;
 	return doc;
 }
 
+/**
+ * A file's document as it was left: the unsaved text that was kept for it, over the file as those edits found it
+ * (ADR 0042). It is as if the app had stayed open, so what happened to the file meanwhile is met as it is in an
+ * open document: a file that changed on disk is marked, and saving asks which to keep (ADR 0009); one that is gone
+ * is put back by saving. A file that has the kept text already has nothing unsaved, and opens as it is.
+ */
+function attachKept(path: string, kept: KeptText, file: { text: string; mtime: number; encoding?: string; binary?: { size: number; image?: string } } | null): Doc {
+	if (file && !file.binary && file.text === kept.text) {
+		const doc = attach(path, file.text, file);
+		doc.encoding = file.encoding;
+		// On record as kept, and not unsaved: the next keep forgets it.
+		keptVersions.set(path, { model: doc.model, version: doc.model.getAlternativeVersionId() });
+		keepUnsavedSoon(0);
+		return doc;
+	}
+	const same = Boolean(file && !file.binary && kept.saved && file.text === kept.saved.text);
+	// With the file as it was, its date now: a file that was only touched has not changed under these edits. With
+	// another file there, a date that is not its own, so that saving asks whatever the two dates are.
+	const mtime = same ? file!.mtime : kept.saved && kept.saved.mtime !== file?.mtime ? kept.saved.mtime : -1;
+	const base = { text: kept.saved?.text ?? "", mtime };
+	const doc = attach(path, kept.text, base);
+	if (file && !file.binary) doc.encoding = file.encoding;
+	// The backend has this text already, with this file under it.
+	keptVersions.set(path, { model: doc.model, version: doc.model.getAlternativeVersionId() });
+	if (kept.saved) keptBases.set(path, { text: kept.saved.text, mtime: kept.saved.mtime });
+	setState((s) => {
+		s.dirty[path] = true;
+		if (file && !same) s.conflicts[path] = true;
+	});
+	if (!same) keptRestored.push({ path, file: file ? "changed" : "gone" });
+	return doc;
+}
+
 session.sslSettings = () => snapshot(state).settings.ssl ?? {};
 
 setFormattingHost({
+	sqlBodyLine: async (model) => {
+		const doc = model.uri.scheme === "file" ? docs.get(canonical(model.uri.fsPath)) : undefined;
+		if (!doc) return undefined;
+		// Read again now: the text may have been written in since it was last read.
+		await readDataSource(doc);
+		return doc.sqlBodyLine;
+	},
 	options: () => ({
 		printWidth: Number(getPath(state.settings.ssl, "format.maxLineLength") ?? SERVER_DEFAULTS.format.maxLineLength),
 		sqlDialect: state.settings.sqlDialect ?? DEFAULT_SQL_DIALECT,
@@ -1093,7 +1544,7 @@ export async function openFile(path: string, options: { group?: number; reveal?:
 	// What was only read (a definition peeked at) had no tab to keep it true, and the file may have changed, gone, or
 	// been made anew since. It is let go, and the file is read as it is now: nothing of the old reading is left to undo.
 	letGoIfOnlyRead(path);
-	const doc = await guarded(() => loadDoc(path));
+	const doc = await guarded(() => loadDoc(path, true));
 	if (!doc) return;
 	const curAfterRead = snapshot(state);
 	// The folder changed while this file was being read: let the loaded model go instead of opening it in the new workspace.
@@ -1726,7 +2177,7 @@ export async function save(
 		const text = doc.model.getValue();
 		const created = await guarded(async () => {
 			await backend.create(target, "file").catch(() => undefined);
-			return backend.write(target, text, true);
+			return backend.write(target, text, true, doc.encoding);
 		});
 		if (!created) return false;
 		if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
@@ -1802,7 +2253,7 @@ export async function save(
 	// "It was read as text": a file that holds a zero byte the user typed is still theirs to save.
 	let result: { mtime: number };
 	try {
-		result = await backend.write(path, text, true);
+		result = await backend.write(path, text, true, doc.encoding);
 	} catch (e: any) {
 		// Said as a notice, as every failure is, and told to whoever cannot see one.
 		const message = String(e?.message ?? e);
@@ -1837,24 +2288,98 @@ export const historyChanged = (() => {
 	};
 })();
 
-/** Format on save formats only the lines changed since the last save (ARCHITECTURE). */
+/**
+ * How long a save waits for the language server to format its changed lines, in milliseconds. The server is the only
+ * formatter (ADR 0003) and a save does not depend on it: when the time is up the file is written as it was typed.
+ * `silent` is the wait while the server is not answering, so that "Save all" over a server that says nothing does
+ * not wait the long time once for every file. Whether it answers is the session's to say (`session.answering`): a
+ * save that gives up tells it, and reads it. (An object, so that a test can shorten the waits.)
+ */
+export const formatOnSaveWait = { answering: 2000, silent: 250 };
+/** The silence, by the session's count of them, in which a save last said that files are saved without formatting. */
+let saidUnformatted = 0;
+
+/**
+ * Format on save formats only the lines changed since the last save (ARCHITECTURE), and leaves them as "Format
+ * document" would: they are taken from a format of the whole document (`formatRangesAsDocument`). It holds the
+ * save no longer than `formatOnSaveWait`: a server that runs and does not answer once kept Ctrl+S from writing
+ * the file at all.
+ */
 async function formatChanged(doc: Doc) {
 	if (doc.model.isDisposed()) return;
 	const eol = doc.model.getEOL();
 	const version = doc.model.getAlternativeVersionId();
-	let ranges = changedRanges(doc.savedText.split(/\r?\n/), doc.model.getValue().split(eol));
+	const ranges = changedRanges(doc.savedText.split(/\r?\n/), doc.model.getValue().split(eol));
 	if (!ranges.length) return;
-	try {
+	// Set when the save has gone on without the answer: one that comes later is not put into a file already written.
+	let left = false;
+	const wanted = () => !left && !doc.model.isDisposed() && doc.model.getAlternativeVersionId() === version;
+	const answered = (async () => {
 		// A lone line formats without its block's indentation: widen each range
 		// to the procedure the server says it is in.
-		ranges = widenToProcedures(ranges, await session.documentSymbols(doc.model).catch(() => []));
-		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== version) return;
-		const edits = await session.formatRanges(doc.model, ranges, doc.model.getOptions());
-		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== version) return;
-		if (edits.length) doc.model.pushEditOperations([], edits, () => null);
-	} catch (e: any) {
-		log(`format on save skipped: ${e?.message ?? e}`);
+		const widened = widenToProcedures(ranges, await session.documentSymbols(doc.model).catch(() => []));
+		if (!wanted()) return;
+		// Where the whole document is too large to format on every save, or its formatted text cannot be set beside
+		// it, the ranges are formatted on their own: the server then leaves out its whole-document passes.
+		const whole = doc.model.getValueLength() <= FORMAT_WHOLE_UP_TO ? await session.formatRangesAsDocument(doc.model, widened, doc.model.getOptions()) : null;
+		if (!wanted()) return;
+		const edits = whole ?? (await session.formatRanges(doc.model, widened, doc.model.getOptions(), true));
+		if (wanted() && edits.length) applyAsOneStep(doc.model, edits, "format-on-save");
+	})().then(
+		() => "answered" as const,
+		(e: any) => {
+			if (!left) log(`format on save skipped: ${e?.message ?? e}`);
+			return "answered" as const;
+		},
+	);
+	// A silence ends with any answer, late or a refusal (a restart refuses what was asked of the old server): the
+	// session knows of it, and the long wait and the notice then apply anew.
+	const wait = session.answering ? formatOnSaveWait.answering : formatOnSaveWait.silent;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const waited = new Promise<"waited">((resolve) => {
+		timer = setTimeout(() => resolve("waited"), wait);
+	});
+	const outcome = await Promise.race([answered, waited]);
+	clearTimeout(timer);
+	if (outcome === "answered") return;
+	left = true;
+	log(`format on save skipped: the language server did not answer in ${wait / 1000} s`);
+	// The save has waited as long as it will. The session is told, so that the status bar and the panels say what
+	// the notice says, and the saves after this one wait the short time.
+	session.unanswered();
+	if (session.answering) {
+		// It has answered something else since it was asked for this: the server is there, and slow over this file.
+		notify(`${displayName(doc.path)} was saved without formatting: the language server took longer than ${wait / 1000} s over it.`);
+		return;
 	}
+	// Said once for a silence, not at every save of it: Output has each.
+	if (saidUnformatted === session.silences) return;
+	saidUnformatted = session.silences;
+	notify("The language server is not answering: files are saved without formatting until it does.", "info", {
+		label: "Restart",
+		run: () => (notify("Restarting the language server."), void restartLsp()),
+	});
+}
+
+/**
+ * Edits made for the user and not by them, as one step of undo of their own. Without the stops on either side
+ * the formatting of a save joined the typing before it, and one undo took both away: the formatting, and the
+ * last words typed.
+ *
+ * They go through an editor that shows the document, where there is one, so that the step holds where the cursor
+ * was and undo puts it back there.
+ */
+function applyAsOneStep(model: monaco.editor.ITextModel, edits: monaco.editor.IIdentifiedSingleEditOperation[], source: string) {
+	const showing = monaco.editor.getEditors().filter((editor) => editor.getModel() === model);
+	const editor = showing.find((candidate) => candidate.hasTextFocus()) ?? showing[0];
+	if (editor) {
+		editor.pushUndoStop();
+		// False from an editor that may not be written in (a read-only view of the file): the model takes them.
+		if (editor.executeEdits(source, edits)) return void editor.pushUndoStop();
+	}
+	model.pushStackElement();
+	model.pushEditOperations([], edits, () => null);
+	model.pushStackElement();
 }
 
 const PROCEDURE_KINDS = new Set([monaco.languages.SymbolKind.Function, monaco.languages.SymbolKind.Method, monaco.languages.SymbolKind.Constructor]);
@@ -1883,18 +2408,29 @@ export function widenToProcedures(ranges: [number, number][], symbols: monaco.la
 		}, []);
 }
 
-/** Switches an open text document's Monaco language mode (VS Code "Change Language Mode") and updates LSP & reactive views. */
-export function setDocumentLanguage(path: string, languageId: string): boolean {
+/**
+ * Switches an open text document's Monaco language mode (VS Code "Change Language Mode") and updates LSP & reactive views.
+ * `chosen` says a person picked the mode: it then stays until they pick another, unless what they picked is the
+ * mode the document would have anyway, which is to go back to having it worked out.
+ */
+export function setDocumentLanguage(path: string, languageId: string, chosen = true): boolean {
 	const doc = docs.get(canonical(path));
 	if (!doc || doc.binary || doc.model.isDisposed()) return false;
+	if (chosen) doc.languageChosen = languageId !== detectedLanguage(doc);
 	const prev = doc.model.getLanguageId();
 	if (prev === languageId) return false;
-	if (prev === "ssl" && languageId !== "ssl") session.untrack(doc.model);
 	doc.validatorDispose?.();
 	doc.validatorDispose = undefined;
 	monaco.editor.setModelLanguage(doc.model, languageId);
-	if (languageId === "ssl" && prev !== "ssl") session.track(doc.model);
+	// The server is told of what it reads in the new mode, and no longer of what it does not. A data source shown
+	// as SQL it reads still, so its findings there are kept.
+	if (session.reads(doc.model)) session.track(doc.model);
+	else session.untrack(doc.model);
+	if (languageId === "ssl") setHouseIndent(doc.model);
 	else doc.validatorDispose = attachValidator(doc.model, doc.path, languageId);
+	// The mode of a document that has no file yet is kept with its unsaved text (ADR 0042), and this changes none of
+	// that text: the keep is asked for here.
+	if (isUntitled(doc.path)) keepUnsavedSoon();
 	setState((s) => {
 		s.kindVersion += 1;
 	});
@@ -2083,13 +2619,14 @@ on("notice", (said) => {
 });
 
 // The desktop window was asked to close with edits that are not on disk, or with a view open that may hold text
-// still being typed: `settleUnsaved` puts that text in its document first, and asks only if something is then unsaved.
+// still being typed: `leaveUnsavedKept` puts that text in its document, has what is unsaved kept, and the app is
+// closed without a question (ADR 0042). It asks only where the text could not be kept.
 let closePromptOpen = false;
 on("closeRequested", async () => {
 	if (closePromptOpen) return;
 	closePromptOpen = true;
 	try {
-		if (await settleUnsaved("Closing the window would lose them.")) await backend.closeWindow();
+		if (await leaveUnsavedKept("Closing the window would lose them.")) await backend.closeWindow();
 	} finally {
 		closePromptOpen = false;
 	}

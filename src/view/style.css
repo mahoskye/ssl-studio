@@ -52,16 +52,18 @@
 	   60: Non-floating dropdowns (.menu-pop: 60)
 	   65: Lightbox backdrop (.md-lightbox-backdrop: 65)
 	   70: Floating menus (.menu-pop-floating: 70)
-	   80: Modals / QuickPick / Dialogs / Settings (.overlay: 80)
-	   84-85: Context menus above modals (.row-menu-shade: 84, .row-menu-host: 85)
-	   95: Toast notifications (.toasts: 95) */
+	   80: Modals / Settings, and the shade of what is asked (.overlay: 80, .overlay-shade: 80)
+	   82: Toast notifications (.toasts: 82)
+	   83: What is asked, over the notices: questions and picks (.overlay.asked: 83)
+	   84-85: Context menus above modals (.row-menu-shade: 84, .row-menu-host: 85) */
 	--z-editor-overlay: 15;
 	--z-popover: 58;
 	--z-lightbox: 65;
 	--z-menu: 70;
 	--z-modal: 80;
+	--z-toast: 82;
+	--z-asked: 83;
 	--z-row-menu: 85;
-	--z-toast: 95;
 	/* Font slots (ADR 0027): pure system defaults unless customized in Settings. */
 	--ui-font: system-ui, -apple-system, "Segoe UI", sans-serif;
 	--code-font: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
@@ -376,7 +378,9 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .panel-title > span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .panel-title .menu-pop { text-transform: none; letter-spacing: 0; font-size: var(--text-base); color: var(--side-fg); }
 .filter { margin: 0 var(--space-4) var(--space-3); }
-.panel-body .tree { overflow: auto; flex: 1; min-height: 0; padding-bottom: var(--space-5); }
+/* Positioned, so what a row holds out of sight (a line for a screen reader) is clipped with the rows: one that was not
+   stood below the window and made the page taller than it, and a scroll into view then lifted the whole app. */
+.panel-body .tree { position: relative; overflow: auto; flex: 1; min-height: 0; padding-bottom: var(--space-5); }
 /* Isolate Monaco's own .tree (suggest widget list) from panel tree scrolling and padding. */
 .monaco-editor .tree, .monaco-editor .suggest-widget > .tree { padding: 0; overflow: visible; flex: initial; }
 .tree-row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-1) var(--space-4); cursor: pointer; white-space: nowrap; }
@@ -445,6 +449,14 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .tree-row.problem .label { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
 .tree-row.problem .code { font-family: var(--code-font); white-space: nowrap; align-self: start; padding-top: 1px; }
 .tree-row.problem .meta { font-family: var(--code-font); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; min-width: 5ch; align-self: start; padding-top: 1px; }
+/* A narrow list: the code and the place go on a line under the message. Beside it, a long code
+   (iif_guard_ineffective) left the message no width at all. */
+@container problems (max-width: 420px) {
+	.tree-row.problem { grid-template-columns: calc(18px * var(--ui-scale)) minmax(0, 1fr) auto; row-gap: 2px; }
+	.tree-row.problem .label { grid-column: 2 / -1; }
+	.tree-row.problem .code { grid-column: 2; grid-row: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+	.tree-row.problem .meta { grid-column: 3; grid-row: 2; }
+}
 /* Reusable vertical section splitter inside side panels (Explorer, Palette, Reference).
    1px zero-net-flow sash overlaid directly on the divider border so mounting/unmounting
    never shifts section spacing while staying visible to assistive tools. */
@@ -483,13 +495,15 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .doc-folder-badge .codicon { font-size: 11px; }
 .docs-filter-bar { display: flex; flex-direction: column; gap: 4px; margin: 0 var(--space-3) var(--space-2); flex: none; }
 .docs-filter-bar .filter { margin: 0; width: 100%; }
-.docs-filter-pills, .search-scopes { display: flex; flex-wrap: wrap; gap: 4px; }
+.search-scopes { display: flex; flex-wrap: wrap; gap: 4px; }
 .search-scopes { padding-left: calc(20px * var(--ui-scale) + var(--space-1)); }
-.docs-filter-pills button, .search-scopes button { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--border) 90%, transparent); background: transparent; color: var(--muted); font-size: var(--text-xs); font-family: var(--ui-font); line-height: 1.45; }
-.docs-filter-pills button:hover, .search-scopes button:hover { color: var(--fg); background: var(--hover); }
-.docs-filter-pills button.on, .search-scopes button.on { color: var(--strong-fg); background: var(--selected); border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); font-weight: 500; }
-.docs-pill-count { display: inline-flex; align-items: center; justify-content: center; min-width: 14px; padding: 0 4px; border-radius: 999px; font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; background: color-mix(in srgb, var(--warning) 16%, transparent); border: 1px solid color-mix(in srgb, var(--warning) 42%, transparent); color: var(--strong-fg); line-height: 1.35; }
-.docs-filter-pills button.on .docs-pill-count { background: color-mix(in srgb, var(--warning) 20%, transparent); color: var(--strong-fg); }
+.search-scopes button { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--border) 90%, transparent); background: transparent; color: var(--muted); font-size: var(--text-xs); font-family: var(--ui-font); line-height: 1.45; }
+.search-scopes button:hover { color: var(--fg); background: var(--hover); }
+.search-scopes button.on { color: var(--strong-fg); background: var(--selected); border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); font-weight: 500; }
+/* A filter that is on, other than the text: a chip that names it and clears it (ADR 0050). */
+.docs-filter-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+/* The filter menu's button is in the accent while a filter is on, its funnel filled. */
+.panel-title .docs-filter-menu.on > button { color: var(--accent); }
 .docs-tag-active { display: inline-flex; align-items: center; gap: 3px; align-self: flex-start; padding: 1px 7px; border-radius: 999px; font-size: var(--text-xs); color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--border)); cursor: pointer; }
 .docs-tag-active .codicon { font-size: 11px; }
 .git-ticket-chips { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -501,7 +515,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .docs-stale-actions { display: inline-flex; align-items: center; gap: 4px; flex: none; }
 .docs-stale-btn { padding: 1px 7px; border-radius: var(--radius-sm); border: 1px solid color-mix(in srgb, var(--border) 95%, transparent); background: var(--panel-bg, var(--bg)); color: var(--fg); font-size: var(--text-xs); font-weight: 500; line-height: 1.45; }
 .docs-stale-btn:hover { color: var(--strong-fg); border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); background: var(--hover); }
-.explorer-outline-body .tree { flex: 1; min-height: 0; overflow: auto; padding-bottom: var(--space-3); }
+.explorer-outline-body .tree { position: relative; flex: 1; min-height: 0; overflow: auto; padding-bottom: var(--space-3); }
 .explorer-open-list { flex: 1; min-height: 0; overflow: auto; padding-bottom: var(--space-2); }
 .explorer-empty-hint { margin: var(--space-2) var(--space-5); }
 .open-editor-row { gap: var(--space-2); padding-left: var(--space-2); }
@@ -652,6 +666,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .review-error { margin: 0; padding: var(--space-3) var(--space-5); font-size: var(--text-md); color: var(--error); background: var(--panel-bg); border-bottom: 1px solid var(--border); }
 
 .problems, .output { overflow: auto; flex: 1; margin: 0; padding: var(--space-2) 0; }
+.problems { container: problems / inline-size; }
 .problems-filter { display: flex; align-items: center; gap: var(--space-2); padding: 0 var(--space-4) var(--space-2); border-bottom: 1px solid var(--border); margin-bottom: var(--space-2); }
 .problems-filter button { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: var(--text-xs); color: var(--muted); background: transparent; border: 1px solid transparent; cursor: pointer; }
 .problems-filter button:hover { color: var(--fg); background: var(--hover); }
@@ -709,6 +724,10 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 
 .overlay { position: fixed; inset: 0; background: var(--overlay); display: grid; place-items: center; z-index: 80; }
 .overlay.top { place-items: start center; padding-top: 10vh; }
+/* What is asked (a question, a pick) stands over the notices and its shade under them: no notice covers it, and one beside it is still read and dismissed (modal.tsx). */
+.overlay-shade { position: fixed; inset: 0; background: var(--overlay); z-index: 80; }
+.overlay.asked { background: none; pointer-events: none; z-index: 83; }
+.overlay.asked > * { pointer-events: auto; }
 .dialog { background: var(--side-bg); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: var(--space-6); min-width: min(360px, 94vw); max-width: min(560px, 94vw); max-height: 90vh; overflow: auto; display: flex; flex-direction: column; gap: var(--space-5); box-shadow: var(--shadow); }
 .dialog h2 { margin: 0 0 var(--space-2); font-size: var(--text-lg); font-weight: 600; }
 .dialog label { display: flex; flex-direction: column; gap: var(--space-2); }
@@ -778,7 +797,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .quick-checkbox .codicon-glyph { font-size: calc(11px * var(--ui-scale)); line-height: 1; }
 .quick-checkbox.checked { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 
-.toasts { position: fixed; right: 16px; bottom: calc(var(--status-height) + var(--space-5)); display: flex; flex-direction: column; gap: var(--space-4); z-index: 95; max-width: 420px; }
+.toasts { position: fixed; right: 16px; bottom: calc(var(--status-height) + var(--space-5)); display: flex; flex-direction: column; gap: var(--space-4); z-index: 82; max-width: 420px; }
 .toast { background: var(--side-bg); border: 1px solid var(--input-border); border-left: 3px solid var(--info); padding: var(--space-4) var(--space-2) var(--space-4) var(--space-5); border-radius: var(--radius-md); box-shadow: var(--shadow); display: flex; align-items: flex-start; gap: var(--space-4); }
 .toast.error { border-left-color: var(--error); }
 .toast-text { flex: 1; min-width: 0; overflow-wrap: break-word; white-space: pre-line; user-select: text; }
@@ -1092,7 +1111,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 /* Closing the graph is a cross, as closing a panel is: a word took the room of a button the bar needs. */
 .graph-close { min-width: var(--target); min-height: var(--target); padding: 0 var(--space-3); font-size: var(--text-lg); line-height: 1; }
 /* The bar's menu of what is used now and then. */
-.graph-more > button { min-width: var(--target); min-height: var(--target); padding: 0 var(--space-3); }
+.graph-more > button, .graph-find-open { min-width: var(--target); min-height: var(--target); padding: 0 var(--space-3); }
 .graph-bar input.graph-find { width: clamp(92px, 10vw, 140px); }
 /* The finder and, under it while something is typed, the procedures that match. */
 .graph-find-box { position: relative; display: inline-flex; }
@@ -1376,8 +1395,10 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .plan-assist > button.primary { margin: var(--space-2) 0; }
 
 /* Project: the set-up offer, the Docs panel and rendered Markdown. */
-.setup-bar { display: flex; align-items: center; gap: var(--space-4); padding: var(--space-3) var(--space-5); font-size: var(--text-md); background: var(--side-bg); border-bottom: 1px solid var(--border); }
-.setup-bar span { flex: 1; min-width: 0; }
+/* The text keeps a readable measure: where there is less than that beside the two answers, they go under it, to the right, instead of leaving it a word to a line. */
+.setup-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-3) var(--space-4); padding: var(--space-3) var(--space-5); font-size: var(--text-md); background: var(--side-bg); border-bottom: 1px solid var(--border); }
+.setup-bar span { flex: 1 1 calc(260px * var(--ui-scale)); min-width: 0; }
+.setup-actions { flex: none; display: flex; align-items: center; gap: var(--space-4); }
 .setup-bar button { white-space: nowrap; }
 .setup-bar button:not(.primary) { padding: var(--space-3) var(--space-5); color: var(--muted); }
 .docs-setup { padding: 0 var(--space-5) var(--space-4); }
@@ -1423,10 +1444,11 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 /* In a narrow panel the title has the room: a state is a dot in its tone (the word is in the row's tooltip), and a note that only repeats where the row sits is left out. */
 [data-panel="docs"] { container: docs / inline-size; }
 @container docs (max-width: 380px) {
-	.doc-row .doc-status { flex: none; width: 8px; height: 8px; padding: 0; overflow: hidden; font-size: 0; border-radius: 50%; border-color: var(--muted); }
+	/* Every dot keeps the room the ringed one needs (3px each side), so done, waiting and under way line up in one column. */
+	.doc-row .doc-status { flex: none; box-sizing: border-box; width: 8px; height: 8px; margin: 0 3px; padding: 0; overflow: hidden; font-size: 0; border-radius: 50%; border-color: var(--muted); }
 	.doc-row .doc-status.tone-done { background: var(--ok, var(--fg)); border-color: transparent; }
 	/* Under way has a ring round it: done and under way are not told apart by colour alone (ADR 0010). */
-	.doc-row .doc-status.tone-active { background: var(--accent); border-color: transparent; box-shadow: 0 0 0 2px var(--side-bg), 0 0 0 3px var(--accent); margin: 0 3px; }
+	.doc-row .doc-status.tone-active { background: var(--accent); border-color: transparent; box-shadow: 0 0 0 2px var(--side-bg), 0 0 0 3px var(--accent); }
 	.doc-row .doc-status.tone-off { opacity: .45; background: var(--muted); border-color: transparent; }
 	.doc-row .meta.aside { display: none; }
 	.doc-row .meta.shortens .long { display: none; }
@@ -1562,12 +1584,19 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .table-view th .table-th-filter.active { color: var(--accent); }
 .table-view th .table-th-filter.open { background: var(--hover); color: var(--strong-fg); }
 .table-view th.table-sel-col,
-.table-view td.table-sel-col { position: sticky; left: 0; width: 32px; min-width: 32px; max-width: 32px; padding: 0; text-align: center; vertical-align: middle; }
+.table-view td.table-sel-col { position: sticky; left: 0; width: calc(60px * var(--ui-scale)); min-width: calc(60px * var(--ui-scale)); max-width: calc(60px * var(--ui-scale)); padding: 0; text-align: center; vertical-align: middle; }
 .table-view th.table-sel-col { z-index: 6; background: var(--side-bg); }
 .table-view td.table-sel-col { z-index: 2; background: var(--bg); }
 .table-view th.table-sel-col input[type="checkbox"],
-.table-view td.table-sel-col input[type="checkbox"] { width: 14px; height: 14px; min-width: 0; margin: 0; padding: 0; border: 0; accent-color: var(--accent); cursor: pointer; vertical-align: middle; }
-.table-bulk-bar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-1) var(--space-4); border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--accent) 10%, var(--tab-bg)); font-size: var(--text-sm); }
+.table-view td.table-sel-col input[type="checkbox"] { flex: none; width: calc(16px * var(--ui-scale)); height: calc(16px * var(--ui-scale)); min-width: 0; margin: 0; padding: 0; border: 0; accent-color: var(--accent); cursor: pointer; vertical-align: middle; }
+/* The selection column holds the row number and the checkbox. Its width is here alone: a second rule in a stylesheet
+   bundled with the table loaded before this one and lost, and the number squeezed the box to under 3px. */
+.table-sel-inner { display: flex; align-items: center; justify-content: flex-end; gap: 2px; width: 100%; padding: 0 2px 0 4px; box-sizing: border-box; }
+/* The box is 16px; the label round it is the target, 24px square (--target), so a click near the box still ticks it. */
+.table-sel-hit { flex: none; display: inline-flex; align-items: center; justify-content: center; width: var(--target); height: var(--target); border-radius: var(--radius-sm, 3px); cursor: pointer; user-select: none; }
+.table-sel-hit:hover { background: var(--hover); }
+.table-sel-hit:has(input:disabled) { cursor: default; background: none; }
+.table-bulk-bar { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-1) var(--space-4); border-top: 1px solid var(--border); background: color-mix(in srgb, var(--accent) 10%, var(--tab-bg)); font-size: var(--text-sm); }
 .table-bulk-count { font-weight: 600; color: var(--strong-fg); margin-right: var(--space-1); }
 .table-bulk-btn { display: inline-flex; align-items: center; gap: 4px; padding: 2px var(--space-2); min-height: 0; font-size: var(--text-sm); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--side-bg); color: var(--fg); }
 .table-bulk-btn:hover { border-color: var(--accent); color: var(--strong-fg); }
@@ -1870,23 +1899,6 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 
 /* --- Round 5: Docs Facets & Bulk Bar, Health, Plan/Graph Badges, Review MD Diff, Blocks, Reference, Outline & Search --- */
 
-.docs-facet-row {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: var(--space-2);
-	padding: 0 var(--space-3) var(--space-2);
-}
-.docs-facet-row select {
-	flex: 1;
-	min-width: 84px;
-	font-size: var(--text-xs);
-	padding: 2px 6px;
-	border-radius: var(--radius-sm);
-	border: 1px solid var(--input-border);
-	background: var(--input-bg);
-	color: var(--fg);
-}
 .docs-bulk-bar {
 	display: flex;
 	flex-wrap: wrap;
@@ -3064,6 +3076,10 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 	font-size: var(--text-sm);
 	padding: 0;
 }
+
+/* The box has its own clear button; the search field's own would be a second. */
+.md-usage-filter input::-webkit-search-cancel-button { display: none; }
+.md-insp-mini-btn.on { color: var(--accent); }
 
 .md-usage-filter input:focus:not(:focus-visible) {
 	outline: none;

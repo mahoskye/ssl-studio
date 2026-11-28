@@ -89,6 +89,33 @@ export function fileTier(query: string, path: string): number | null {
 }
 
 /**
+ * The symbols that answer a query, best first, by the ranks `fileTier` gives a name: the name itself, its start,
+ * the starts of its words ("awd" for AddWorkingDays), anywhere in it, then its letters in order. Each word of the
+ * query has to answer. The language server matches a part of the name only, so the procedures the app has whole are
+ * ranked here (ADR 0047), as VS Code ranks a server's answer with its own fuzzy matching.
+ */
+export function rankSymbols<S extends { name: string }>(query: string, list: readonly S[]): S[] {
+	const words = query.trim().split(/\s+/).filter(Boolean);
+	if (!words.length) return [...list];
+	const ranked: { symbol: S; tier: number }[] = [];
+	for (const symbol of list) {
+		let tier = 0;
+		for (const word of words) {
+			const t = fileTier(word, symbol.name);
+			if (t === null || t === 4) {
+				tier = -1;
+				break;
+			}
+			tier = Math.max(tier, t);
+		}
+		if (tier >= 0) ranked.push({ symbol, tier });
+	}
+	return ranked
+		.sort((a, b) => a.tier - b.tier || a.symbol.name.length - b.symbol.name.length || a.symbol.name.localeCompare(b.symbol.name, undefined, { sensitivity: "base" }))
+		.map((each) => each.symbol);
+}
+
+/**
  * The files that answer a query, best first. Among equal matches scripts
  * come before other files, then shorter paths, then the alphabet.
  */

@@ -1034,6 +1034,8 @@
 
 .cm-md-code-header {
 	display: flex;
+	flex-wrap: wrap;
+	gap: 2px 8px;
 	align-items: center;
 	justify-content: space-between;
 	font-family: var(--ui-font);
@@ -1046,6 +1048,7 @@
 }
 
 .cm-md-code-lang {
+	white-space: nowrap;
 	text-transform: uppercase;
 	letter-spacing: 0.06em;
 	font-weight: 600;
@@ -1053,12 +1056,16 @@
 
 .cm-md-code-actions {
 	display: inline-flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
 	align-items: center;
 	gap: 4px;
+	margin-left: auto;
 }
 
 .cm-md-code-btn,
 .cm-md-code-copy {
+	white-space: nowrap;
 	font-family: var(--ui-font);
 	font-size: var(--text-xs);
 	color: color-mix(in srgb, var(--editor-strong, var(--strong-fg)) 78%, var(--editor-muted, var(--muted)));

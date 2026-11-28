@@ -13,6 +13,7 @@ import { review, ReviewView } from "./editor/Review";
 import { RegionBoundary } from "./RegionBoundary";
 import { CenterTabStrip } from "./editor/CenterTabStrip";
 import { EditorGroup } from "./editor/EditorGroup";
+import { applyEditorKeys } from "./editor/editorKeys";
 import { commands, keysFor } from "./commands";
 import { clampScale } from "./uiScale";
 import { Explorer } from "./panels/Explorer";
@@ -37,7 +38,7 @@ import { MenuBar } from "./MenuBar";
 import { useNavigation } from "./navigation";
 import { StatusBar } from "./StatusBar";
 import { applyFonts, applyTheme, resolveTheme } from "./themes/themes";
-import { activePath, dismiss, focusEditor, focusRequest, isTabsReady, keepForFolder, markdownMode, notify, openFolder, planMode, rememberTabs, rememberViews, setState, state, tableTextMode, unsavedPaths, type PanelId } from "./state";
+import { activePath, dismiss, focusEditor, focusRequest, isTabsReady, keepForFolder, keepUnsavedSoon, markdownMode, notify, openFolder, planMode, rememberTabs, rememberViews, setHouseIndentEverywhere, setState, state, tableTextMode, unsavedPaths, type PanelId } from "./state";
 import { focusPanel, getOutlineMemory, getPlanPaletteMemory, isPanelAvailable, isPlanChartActive, isShown, lastShown, loadOutlineMemory, loadPlanPaletteMemory, movePanel, narrowHosted, narrowPanels, panelOn, PANELS, recordOutlineActive, recordPlanPaletteActive, setCrowded, setNarrowHosted, setNarrowPanels, setOutlineMemory, setPlanPaletteMemory, sideOf, togglePanel } from "./panels/registry";
 import { transitionOutlineAvailability, transitionPanelAvailability } from "./panels/outlineState";
 import { isPlanPath } from "./plan/model";
@@ -154,6 +155,13 @@ function useTheme() {
 		() => ({ uiFont: state.settings.uiFont, codeFont: state.settings.codeFont, readFont: state.settings.readFont }),
 		(fonts) => {
 			applyFonts(fonts);
+		},
+	);
+	// The code editor's keys follow the setting: a key changed in Settings works at once, and one set back does too.
+	createEffect(
+		() => JSON.stringify(state.settings.editorKeys ?? {}),
+		() => {
+			applyEditorKeys();
 		},
 	);
 }
@@ -292,12 +300,14 @@ function PanelButton(props: { id: PanelId; badge?: string; badgeNote?: string })
 
 export function App() {
 	useTheme();
-	// A changed style profile goes to the language server, which re-checks.
+	// A changed style profile goes to the language server, which re-checks, and to the scripts that are open:
+	// what Tab writes in one that has no indentation yet is the profile's.
 	const sslJson = createMemo(() => JSON.stringify(state.settings.ssl));
 	createEffect(
 		() => sslJson(),
 		() => {
 			session.configure();
+			setHouseIndentEverywhere();
 		},
 		{ defer: true },
 	);
@@ -540,12 +550,21 @@ export function App() {
 			rememberViews();
 		},
 	);
-	// The app is told how much is unsaved, so that it can refuse to close its window until the user has been asked.
+	// The app is told how much is unsaved, so that it does not close its window before that text has been kept.
 	const unsavedCount = createMemo(() => unsavedPaths().length);
 	createEffect(
 		() => unsavedCount(),
 		(count) => {
 			void backend.unsavedChanged(count).catch(() => undefined);
+		},
+	);
+	// When other files are unsaved than before (one saved, discarded, closed, renamed), what is kept of them follows
+	// at once: the text of one that is no longer unsaved is not to come back the next time (ADR 0042).
+	const unsavedFiles = createMemo(() => unsavedPaths().join("\n"));
+	createEffect(
+		() => unsavedFiles(),
+		() => {
+			keepUnsavedSoon(0);
 		},
 	);
 	// A review takes the editors' place: one opened while the call graph is showing must not open behind it.
@@ -1026,10 +1045,13 @@ export function App() {
 				<Show when={state.project && !state.project.configured && !state.setupDismissed && !state.info?.selftest}>
 					<div class="setup-bar" role="status">
 						<span>This folder is not set up as a project. Setting it up adds project settings, a README and an AGENTS file; nothing is overwritten.</span>
-						<button class="primary" onClick={() => void setUpProject()}>
-							Set up project
-						</button>
-						<button onClick={() => setState((s) => { s.setupDismissed = true; })}>Not now</button>
+						{/* The two answers keep together: where the text has too little room beside them, they go under it as a pair. */}
+						<div class="setup-actions">
+							<button class="primary" onClick={() => void setUpProject()}>
+								Set up project
+							</button>
+							<button onClick={() => setState((s) => { s.setupDismissed = true; })}>Not now</button>
+						</div>
 					</div>
 				</Show>
 				<div class={["editors", { "panel-maximized": layout().bottom && Boolean(state.workspace) && isBottomMaximized() }]}>

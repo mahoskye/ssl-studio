@@ -25,7 +25,7 @@ export default {
 		selftest: `hutch electrobun prepare && bun scripts/assets.ts && ${vite} && bun scripts/selftest.ts`,
 		// The same, plus a plan built, changed and rebuilt in the window, with the fake in place of a model.
 		"selftest-cycle": `hutch electrobun prepare && bun scripts/assets.ts && ${vite} && bun scripts/selftest.ts --cycle`,
-		// The close guard (ADR 0009): an unsaved edit, then the window's close button, twice. Linux with X11, or Windows.
+		// Closing over unsaved text (ADR 0042): the window's close button, and the app started again. Linux with X11, or Windows.
 		"selftest-close": `hutch electrobun prepare && bun scripts/assets.ts && ${vite} && bun scripts/selftest.ts --close`,
 		check: `${tsc} --noEmit -p .`,
 		// A release: the pinned language server goes inside (bun scripts/bundle-lsp.ts --download fetches it).

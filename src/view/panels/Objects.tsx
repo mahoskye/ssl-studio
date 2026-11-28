@@ -39,6 +39,7 @@ import {
 import { baseName, dirName, relativeTo } from "../../shared/paths";
 import { recall, remember } from "../graph/canvas";
 import { Menu, type MenuItem } from "../Menu";
+import { FilterBox, filterKey, filterMenuItem, filterToggle } from "../FilterBox";
 import {
 	activeMarkdownTab,
 	chooseMarkdownPanelTab,
@@ -53,7 +54,7 @@ import { MarkdownInspector } from "./MarkdownInspector";
 import { showPanel } from "./registry";
 import { chooseFromMenu, type RowMenuEntry } from "./RowMenu";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows, type Point, type RowsApi } from "./Rows";
-import { serverDown } from "./server";
+import { serverDown, serverSilent, sslOutlineEmpty } from "./server";
 
 registerMarkdownPanelOpener(() => showPanel("objects"));
 
@@ -259,6 +260,7 @@ function Procedures(props: { filter: string }) {
 	const fileOf = (uri: string) => relativeTo(state.workspace?.root, monaco.Uri.parse(uri).fsPath);
 	const empty = () => {
 		if (serverDown()) return `${serverDown()} The workspace's procedures come from it.`;
+		if (serverSilent() && !all()) return `${serverSilent()} The workspace's procedures come from it.`;
 		if ((all.loading || (state.lsp.state === "running" && lspReadyEpoch() === 0)) && !all()) return "Reading the workspace's procedures…";
 		if (all()?.error) return `The language server could not list the workspace's procedures: ${all()!.error}`;
 		if (!procedures().length) return "The language server found no procedures in the workspace.";
@@ -1131,12 +1133,16 @@ export function SymbolOutline(props: { filter?: string; compact?: boolean; label
 			return next;
 		});
 	const matches = (s: Sym): boolean => !filter() || s.name.toLowerCase().includes(filter().toLowerCase()) || (s.children ?? []).some(matches);
-	/** The innermost region or procedure the editor's cursor is in: its row says "you are here" when Follow cursor is on. */
-	const here = () => {
+	/**
+	 * The innermost region or procedure the editor's cursor is in: its row says "you are here" when Follow cursor is on.
+	 * Worked out once for each place of the cursor. Asked by every row for itself, it was worked out once for each row:
+	 * on a script of 9,200 procedures every key typed went through all of them 9,200 times, a fifth of a second.
+	 */
+	const here = createMemo(() => {
 		if (!outlineFollow()) return undefined;
 		const p = symbolPath(symbols(), state.cursor.line).filter((s) => !isVariable(s));
 		return p[p.length - 1];
-	};
+	});
 	const keyMap = createMemo(() => buildSymbolKeyMap(symbols(), path()));
 	const TreeRow = (rowProps: { symbol: Sym; depth: number; parent: string }) => {
 		const key = () =>
@@ -1228,11 +1234,7 @@ export function SymbolOutline(props: { filter?: string; compact?: boolean; label
 		if (doc && hasOutline(language) && !filter()) return `This file has no ${outlineOf[language!] ?? "outline"} yet.`;
 		if (doc && hasOutline(language)) return `Nothing here matches “${filter()}”. Clear the filter to see everything.`;
 		if (!doc || language !== "ssl") return props.compact ? "No outline for this file." : "This kind of file has no outline: SSL, Markdown, CSV, Plan, TOML, INI, JSON, SQL and YAML files do.";
-		if (serverDown()) return `${serverDown()} This file's outline comes from it.`;
-		if (reading() === "failed") return `The language server could not list this file's outline: ${failure()}`;
-		if (reading() !== "read") return "Reading this file's outline…";
-		if (!symbols().length) return props.compact ? "No regions or procedures yet." : "This file has no regions, procedures or public variables yet.";
-		return `Nothing here matches “${filter()}”. Clear the filter to see everything.`;
+		return sslOutlineEmpty({ reading: reading(), failure: failure(), count: symbols().length, filter: filter(), compact: props.compact });
 	};
 	const top = () => sortSymbols(symbols().filter(matches), outlineSort());
 	return (
@@ -1262,6 +1264,8 @@ export function SymbolOutline(props: { filter?: string; compact?: boolean; label
 /** Unified Document panel (internal id "objects"): shares Info | Outline for Markdown, Outline for all other files. */
 export function Objects() {
 	const [filter, setFilter] = createSignal("");
+	// Out of sight until the panel's menu or Ctrl+F asks for it (ADR 0050).
+	const filterBox = filterToggle(filter, setFilter);
 	const [planTab, setPlanTab] = createSignal<"outline" | "procedures">("outline");
 	const isPlan = () => isPlanPath(activePath());
 	const isMd = () => isMarkdown(activePath());
@@ -1322,13 +1326,21 @@ export function Objects() {
 	});
 
 	return (
-		<div class="panel-body doc-outline-panel" data-panel="objects">
+		<div class="panel-body doc-outline-panel" data-panel="objects" onKeyDown={(e) => showFilterInput() && filterKey(e, filterBox)}>
 			<div class="panel-title">
 				<span>{isMd() ? "Document" : "Document outline"}</span>
-				<Show when={showOutlineControls()}>
-					<Menu floating label="Outline options" title="Outline options: follow cursor, sort order" class="outline-more" items={outlineMenuItems}>
+				<Show when={showFilterInput()}>
+					<Menu
+						floating
+						label={showOutlineControls() ? "Outline options" : "Procedure options"}
+						title={showOutlineControls() ? "Outline options: filter, follow cursor, sort order" : "Filter the procedures"}
+						class="outline-more"
+						items={() => [filterMenuItem(filterBox), ...(showOutlineControls() ? (["separator", ...outlineMenuItems()] as MenuItem[]) : [])]}
+					>
 						<Icon name="ellipsis" />
 					</Menu>
+				</Show>
+				<Show when={showOutlineControls()}>
 					<Show when={outlineHasExpandable()}>
 						<IconButton
 							label={outlineAnyOpen() ? "Collapse all outline items" : "Expand all outline items"}
@@ -1417,14 +1429,14 @@ export function Objects() {
 				</div>
 			</Show>
 			<Show when={showFilterInput()}>
-				<input
-					class="filter"
-					data-autofocus=""
-					aria-label={isPlan() && planTab() === "procedures" ? "Filter the workspace's procedures" : "Filter this document's outline"}
+				<FilterBox
+					toggle={filterBox}
+					label={isPlan() && planTab() === "procedures" ? "Filter the workspace's procedures" : "Filter this document's outline"}
 					placeholder="Filter"
 					value={filter()}
-					onInput={(e) => setFilter(e.currentTarget.value)}
+					onInput={setFilter}
 					onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
+					onDismiss={(box) => focusRowsBelow(box)}
 				/>
 			</Show>
 			<Show

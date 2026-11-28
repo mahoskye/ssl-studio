@@ -1,5 +1,5 @@
 // Lean, view-aware bottom status bar (VS Code precedent, ADR 0032):
-// Left: Git branch, Code Problems, compact LSP & Agent status indicators.
+// Left: the language server and the Agent, compact status dots; then the Git branch and the Problems counts (ADR 0049).
 // Right: view-appropriate essentials only (hides text/JSON metadata in visual modes;
 // keeps encoding, LF/CRLF, cursor, and clickable Language Mode selector in code/text views).
 import { Icon } from "./Icon";
@@ -19,19 +19,19 @@ import { countHistoryEntries, type SizeReport } from "../shared/houseStyle";
 import { encodingName, eolName } from "../shared/fileKind";
 import { agent } from "./agent/store";
 import { useDocAudit } from "./docAudit";
-import { activeLiveEditor } from "./editor/liveBridge";
 import { pickLanguageMode } from "./editor/languagePicker";
 import { languageName } from "./editor/languages";
 import { monaco } from "./editor/monaco";
 import { review } from "./editor/Review";
-import { measure } from "./editor/textmate";
+import { measureKept } from "./editor/textmate";
 import { branchText, changedCount, gitStatus } from "./git";
+import { lspAnswering } from "./lsp/session";
 import { counts } from "./panels/Problems";
 import { showPanel } from "./panels/registry";
 import { chooseFromMenu } from "./panels/RowMenu";
 import { isPlanPath } from "./plan/model";
 import { isMarkdown, isTable } from "./project";
-import { activeDoc, activePath, displayName, markdownMode, notify, planMode, restartLsp, setState, state, tableTextMode } from "./state";
+import { activeDoc, activePath, displayName, markdownMode, notify, openLinePicker, planMode, restartLsp, setState, state, tableTextMode } from "./state";
 
 const [size, setSize] = createSignal<SizeReport | null>(null);
 export { size };
@@ -50,7 +50,7 @@ function useSizeMeter() {
 			const update = () => {
 				if (doc.model.isDisposed()) return;
 				const text = doc.model.getValue();
-				const { codeLines, bannerLines } = measure(text);
+				const { codeLines, bannerLines } = measureKept(doc.model, text);
 				setSize({ bytes: new TextEncoder().encode(text).length, codeLines, historyEntries: countHistoryEntries(bannerLines) });
 			};
 			update();
@@ -66,18 +66,9 @@ function useSizeMeter() {
 	);
 }
 
-/** Opens the text editor's "go to line". Works in both CodeMirror Live Preview and Monaco. */
+/** Opens "go to line": the app's box at the top of the window, for every editor (ADR 0044). */
 async function goToLine() {
-	const live = activeLiveEditor();
-	if (live) {
-		live.runAction("editor.action.gotoLine");
-		return;
-	}
-	const { activeEditor } = await import("./editor/EditorGroup");
-	const editor = activeEditor();
-	if (!editor) return;
-	editor.focus();
-	await editor.getAction("editor.action.gotoLine")?.run();
+	openLinePicker();
 }
 
 /** The open file's line ends, as the editor has them now: they change with the text, and by hand. */
@@ -100,28 +91,104 @@ function useLineEnds() {
 	);
 }
 
+/** How the open file is indented, as the editor has it: what Tab writes, and how wide a tab is drawn. */
+const [indent, setIndent] = createSignal<{ spaces: boolean; size: number } | null>(null);
+function useIndentation() {
+	const active = createMemo(
+		() => ({ key: `${activePath() ?? ""}\0${state.kindVersion}`, doc: activeDoc() }),
+		{ equals: (a, b) => a.key === b.key },
+	);
+	createEffect(
+		() => active(),
+		({ doc }) => {
+			const read = () => {
+				if (!doc || doc.binary || doc.model.isDisposed()) return setIndent(null);
+				const options = doc.model.getOptions();
+				setIndent({ spaces: options.insertSpaces, size: options.tabSize });
+			};
+			read();
+			if (!doc || doc.binary || doc.model.isDisposed()) return;
+			const sub = doc.model.onDidChangeOptions(read);
+			return () => sub.dispose();
+		},
+	);
+}
+
+/** "1 warning", "2 warnings": what the Problems item is read out as. */
+export const problemCount = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
+
+/** "Spaces: 4" or "Tab size: 4", as VS Code's status bar has it. */
+export const indentName = (spaces: boolean, size: number) => (spaces ? `Spaces: ${size}` : `Tab size: ${size}`);
+
+/**
+ * Where a status bar item's menu opens: against the item, or at the top centre, where the command palette was, when
+ * it is asked for from there. A narrow window leaves the item out of the bar, so the palette is the way to it then.
+ */
+function menuPoint(anchor: HTMLElement | undefined, height: number) {
+	const scale = state.settings.uiScale ?? 1;
+	const size = { width: Math.round(280 * scale), height: Math.round(height * scale) };
+	if (!anchor?.isConnected || !anchor.getClientRects().length) return { x: Math.max(8, Math.round((window.innerWidth - size.width) / 2)), y: Math.round(48 * scale) };
+	const box = anchor.getBoundingClientRect();
+	const placed = placeAnchoredMenu({ left: box.left, right: box.right, top: box.top, bottom: box.bottom }, size, { width: window.innerWidth, height: window.innerHeight });
+	return { x: placed.left, y: placed.top };
+}
+
+/** The open file's indentation: tabs or spaces, how wide, turning the one into the other, or worked out from the text. */
+export async function chooseIndentation(anchor?: HTMLElement) {
+	const doc = activeDoc();
+	if (!doc || doc.binary || doc.model.isDisposed()) return;
+	const now = doc.model.getOptions();
+	const { activeEditor } = await import("./editor/EditorGroup");
+	const editor = activeEditor();
+	const shown = editor?.getModel() === doc.model ? editor : null;
+	const at = (height: number) => menuPoint(anchor, height);
+	const choices = [
+		{ label: "Indent using spaces", value: "spaces", checked: now.insertSpaces },
+		{ label: "Indent using tabs", value: "tabs", checked: !now.insertSpaces },
+		{ label: "Change the tab size", value: "size" },
+		// Turning the one into the other is an edit of the text: the code editor makes it.
+		...(shown
+			? [
+					{ label: "Convert indentation to spaces", value: "to-spaces" },
+					{ label: "Convert indentation to tabs", value: "to-tabs" },
+				]
+			: []),
+		{ label: "Detect from the content", value: "detect" },
+	];
+	const picked = await chooseFromMenu(`Indentation of this file, now ${indentName(now.insertSpaces, now.tabSize).toLowerCase()}`, choices, at(36 * choices.length + 4));
+	if (!picked || doc.model.isDisposed()) return;
+	if (picked === "to-spaces" || picked === "to-tabs") {
+		shown?.focus();
+		await shown?.getAction(picked === "to-spaces" ? "editor.action.indentationToSpaces" : "editor.action.indentationToTabs")?.run();
+		return;
+	}
+	if (picked === "detect") {
+		doc.model.detectIndentation(now.insertSpaces, now.tabSize);
+		const found = doc.model.getOptions();
+		notify(`${displayName(doc.path)} is indented with ${found.insertSpaces ? `spaces, ${found.tabSize} to a level` : `tabs, drawn ${found.tabSize} wide`}.`);
+		return;
+	}
+	const sizes = [1, 2, 3, 4, 5, 6, 7, 8].map((size) => ({ label: String(size), value: String(size), checked: size === now.tabSize }));
+	const size = Number(await chooseFromMenu(picked === "size" ? "Tab size" : picked === "spaces" ? "Spaces to a level" : "Tab size", sizes, at(36 * sizes.length + 4)));
+	if (!size || doc.model.isDisposed()) return;
+	doc.model.updateOptions({ insertSpaces: picked === "size" ? now.insertSpaces : picked === "spaces", tabSize: size, indentSize: size });
+}
+
 const LF = "LF: one character, as on Linux and macOS";
 const CRLF = "CRLF: two characters, as on Windows";
 
 /** Changes every line end of the open file to the other kind. It is an edit: it can be undone, and is kept by saving. */
-async function chooseLineEnds(anchor: HTMLElement) {
+export async function chooseLineEnds(anchor?: HTMLElement) {
 	const doc = activeDoc();
 	if (!doc || doc.binary || doc.model.isDisposed()) return;
 	const now = eolName(doc.model.getEOL());
-	const box = anchor.getBoundingClientRect();
-	const scale = state.settings.uiScale ?? 1;
-	const placed = placeAnchoredMenu(
-		{ left: box.left, right: box.right, top: box.top, bottom: box.bottom },
-		{ width: Math.round(280 * scale), height: Math.round(76 * scale) },
-		{ width: window.innerWidth, height: window.innerHeight },
-	);
 	const picked = await chooseFromMenu(
 		`Line ends of this file, now ${now}`,
 		[
 			{ label: LF, value: LF, checked: now === "LF" },
 			{ label: CRLF, value: CRLF, checked: now === "CRLF" },
 		],
-		{ x: placed.left, y: placed.top },
+		menuPoint(anchor, 76),
 	);
 	const want = picked === LF ? "LF" : picked === CRLF ? "CRLF" : null;
 	if (!want || want === now || doc.model.isDisposed()) return;
@@ -134,13 +201,14 @@ async function chooseLineEnds(anchor: HTMLElement) {
 export function StatusBar() {
 	useSizeMeter();
 	useLineEnds();
+	useIndentation();
 	useDocAudit();
 
 	// Loaded dynamically to avoid a static import cycle (commands -> EditorGroup -> StatusBar -> commands).
 	const [cmds] = createAsyncQuery(() => import("./commands").catch(() => null));
 	const problemsKeys = () => cmds()?.keysFor("problems") ?? "";
 
-	const lsp = createMemo(() => lspIndicator(state.lsp, state.info?.lsp, Boolean(state.workspace)));
+	const lsp = createMemo(() => lspIndicator(state.lsp, state.info?.lsp, Boolean(state.workspace), lspAnswering()));
 	const agentInfo = createMemo(() => agentIndicator(agent.status, state.info?.opencode));
 
 	const surface = createMemo(() => {
@@ -239,39 +307,6 @@ export function StatusBar() {
 
 	return (
 		<footer class="statusbar">
-			<Show when={gitStatus()}>
-				<button
-					class="item git-item"
-					title={`On the branch ${branchText()}${changedCount() ? `; ${changedCount()} ${changedCount() === 1 ? "file has" : "files have"} changed since the last commit` : "; nothing has changed since the last commit"}. Show Source control.`}
-					aria-label={`Branch ${gitStatus()!.branch || "none"}${gitStatus()!.ahead ? `, ${gitStatus()!.ahead} ahead` : ""}${gitStatus()!.behind ? `, ${gitStatus()!.behind} behind` : ""}, ${changedCount()} changed ${changedCount() === 1 ? "file" : "files"}. Show Source control.`}
-					onClick={() => showPanel("git")}
-				>
-					<span class="codicon-glyph" aria-hidden="true">
-						{"\uec6f"}
-					</span>
-					{branchText()}
-					<Show when={changedCount()}>
-						<span class="git-count">{changedCount()}</span>
-					</Show>
-				</button>
-			</Show>
-			<button
-				class="item"
-				disabled={!state.workspace}
-				title={state.workspace ? `Show Problems${problemsKeys() ? ` (${problemsKeys()})` : ""}` : "Problems: open a folder first"}
-				aria-label={state.workspace ? `${counts().errors} errors, ${counts().warnings} warnings. Show Problems.` : "Problems: open a folder first."}
-				onClick={() => {
-					if (!state.workspace) return;
-					setState((s) => {
-						s.bottomView = "problems";
-						s.settings.layout.bottom = true;
-					});
-				}}
-			>
-				<span class="problem-counts" aria-hidden="true">
-					<Icon name="error" /> {counts().errors} <Icon name="warning" /> {counts().warnings}
-				</span>
-			</button>
 			<button
 				class={["item", "status-service", { warn: lsp().tone === "warn", err: lsp().tone === "error" }]}
 				disabled={!lsp().actionable}
@@ -309,6 +344,39 @@ export function StatusBar() {
 			>
 				<span class={`status-dot ${agentInfo().tone}`} aria-hidden="true" />
 				<span>{agentInfo().label}</span>
+			</button>
+			<Show when={gitStatus()}>
+				<button
+					class="item git-item"
+					title={`On the branch ${branchText()}${changedCount() ? `; ${changedCount()} ${changedCount() === 1 ? "file has" : "files have"} changed since the last commit` : "; nothing has changed since the last commit"}. Show Source control.`}
+					aria-label={`Branch ${gitStatus()!.branch || "none"}${gitStatus()!.ahead ? `, ${gitStatus()!.ahead} ahead` : ""}${gitStatus()!.behind ? `, ${gitStatus()!.behind} behind` : ""}, ${changedCount()} changed ${changedCount() === 1 ? "file" : "files"}. Show Source control.`}
+					onClick={() => showPanel("git")}
+				>
+					<span class="codicon-glyph" aria-hidden="true">
+						{"\uec6f"}
+					</span>
+					{branchText()}
+					<Show when={changedCount()}>
+						<span class="git-count">{changedCount()}</span>
+					</Show>
+				</button>
+			</Show>
+			<button
+				class="item"
+				disabled={!state.workspace}
+				title={state.workspace ? `Show Problems${problemsKeys() ? ` (${problemsKeys()})` : ""}` : "Problems: open a folder first"}
+				aria-label={state.workspace ? `${problemCount(counts().errors, "error")}, ${problemCount(counts().warnings, "warning")}. Show Problems.` : "Problems: open a folder first."}
+				onClick={() => {
+					if (!state.workspace) return;
+					setState((s) => {
+						s.bottomView = "problems";
+						s.settings.layout.bottom = true;
+					});
+				}}
+			>
+				<span class="problem-counts" aria-hidden="true">
+					<Icon name="error" /> {counts().errors} <Icon name="warning" /> {counts().warnings}
+				</span>
 			</button>
 			<span class="spacer" />
 			<Show when={sizeWarning()}>
@@ -364,6 +432,21 @@ export function StatusBar() {
 					<span class="item tier-3" title={`This file is written in ${encoding()}, and is saved in it.`}>
 						{encoding()}
 					</span>
+				)}
+			</Show>
+			<Show when={surface().showTextMeta && indent()}>
+				{(now) => (
+					<button
+						class="item tier-3"
+						aria-haspopup="menu"
+						title={`${now().spaces ? `Indented with spaces, ${now().size} to a level` : `Indented with tabs, drawn ${now().size} wide`}. Click to change it.`}
+						aria-label={`Indentation: ${indentName(now().spaces, now().size)}. Change it.`}
+						onClick={(e) => {
+							void chooseIndentation(e.currentTarget);
+						}}
+					>
+						{indentName(now().spaces, now().size)}
+					</button>
 				)}
 			</Show>
 			<Show when={shownEol()}>

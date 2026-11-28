@@ -179,7 +179,7 @@ function QuickPickModal(props: { req: QuickPickRequest }) {
 	};
 
 	return (
-		<Modal class="quickpick quickpick-dialog" top label={req.title} onClose={() => finish(null)}>
+		<Modal class="quickpick quickpick-dialog" top asked label={req.title} onClose={() => finish(null)}>
 			<div class="quickpick-head">
 				<span class="quickpick-title">{req.title}</span>
 				<button type="button" class="quickpick-close" aria-label="Close" title="Close (Escape)" onClick={() => finish(null)}>
@@ -387,7 +387,7 @@ function QuickPickManyModal(props: { req: QuickPickManyRequest }) {
 	};
 
 	return (
-		<Modal class="quickpick quickpick-dialog quickpick-many" top label={req.title} onClose={() => finish(null)} onKey={onModalKey}>
+		<Modal class="quickpick quickpick-dialog quickpick-many" top asked label={req.title} onClose={() => finish(null)} onKey={onModalKey}>
 			<div class="quickpick-head">
 				<span class="quickpick-title">{req.title}</span>
 				<div class="quickpick-many-actions">
@@ -666,7 +666,7 @@ function FileBrowserModal(props: { req: FileBrowserRequest }) {
 	};
 
 	return (
-		<Modal class="quickpick quickpick-dialog file-browser-pick" top label={req.title} onClose={() => finish(null)}>
+		<Modal class="quickpick quickpick-dialog file-browser-pick" top asked label={req.title} onClose={() => finish(null)}>
 			<div class="quickpick-head">
 				<span class="quickpick-title">{req.title}</span>
 				<button type="button" class="quickpick-close" aria-label="Close" title="Close (Escape)" onClick={() => finish(null)}>
@@ -842,7 +842,7 @@ function ChooseQuickPick(props: { request: Request }) {
 	};
 
 	return (
-		<Modal class="quickpick quickpick-dialog" top label={request.title} onClose={() => finish(null)}>
+		<Modal class="quickpick quickpick-dialog" top asked label={request.title} onClose={() => finish(null)}>
 			<div class="quickpick-head">
 				<span class="quickpick-title">{longPrompt ? "Choose an option" : request.title}</span>
 				<button type="button" class="quickpick-close" aria-label="Cancel" title="Cancel (Escape)" onClick={() => finish(null)}>
@@ -947,6 +947,7 @@ function Dialog(props: { request: Request }) {
 	return (
 		<Modal
 			class="dialog"
+			asked
 			labelledBy={titleId}
 			onClose={() => finish(null)}
 			onSubmit={(e) => {

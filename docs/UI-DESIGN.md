@@ -167,7 +167,7 @@ Current color tokens (`studio-dark.json` / `studio-light.json`):
 
 ![Settings modal dialog](images/ui-baseline/12-settings-dark.png)
 
-- **What exists (`Settings.tsx`):** Centered modal (`max-width: 560px`) with `Search settings`, section jump pills (`Appearance`, `Editor`, `Language server`, `Keyboard`), sticky section headers, Theme dropdown + `Import…` button for VS Code themes, `Interface size` stepper (`80%–160%`), `Font size`, and editor toggles. Clean, well-structured, and keyboard-accessible — the OKLCH Tone × Material selector slots naturally into the `Appearance` section alongside `Import…`.
+- **What exists (`Settings.tsx`):** Centered modal (`max-width: 560px`) with `Search settings`, section jump pills (`Appearance`, `Editor`, `Language server`, `Keyboard`, `Editor keys`, `Markdown keys`), sticky section headers, Theme dropdown + `Import…` button for VS Code themes, `Interface size` stepper (`80%–160%`), `Font size`, and editor toggles. Clean, well-structured, and keyboard-accessible — the OKLCH Tone × Material selector slots naturally into the `Appearance` section alongside `Import…`.
 
 ### 4. Summary of Baseline Defects That Justify Changes
 

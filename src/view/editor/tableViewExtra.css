@@ -240,22 +240,7 @@
 
 /* --- Round 5 & Consolidated Table Power Styles: Selection, Row Reorder, Custom Cell Picker, Grouping & Warnings --- */
 
-.table-view th.table-sel-col,
-.table-view td.table-sel-col {
-	width: 56px;
-	min-width: 56px;
-	max-width: 56px;
-}
-
-.table-sel-inner {
-	display: inline-flex;
-	align-items: center;
-	justify-content: flex-end;
-	gap: 5px;
-	width: 100%;
-	padding: 0 6px;
-	box-sizing: border-box;
-}
+/* The selection column's width and the checkbox's target are in style.css, which loads after this file. */
 .table-row-num {
 	font-family: var(--ui-font);
 	font-size: var(--text-xs);

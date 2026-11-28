@@ -1,6 +1,8 @@
 # ADR 0032: Design precedents and interaction standards
 
-**Status:** Accepted
+**Status:** Accepted; one point superseded by
+[ADR 0049](0049-the-status-bar-starts-with-the-services.md)
+(the order of the status bar's left items)
 **Date:** 2026-11-23
 **Decided by:** the user (extending [ADR 0007](0007-design-is-held-to-a-standard-that-serves-starlims-work.md) and [ADR 0020](0020-the-shell-does-what-vs-code-does-and-stays-its-own.md)).
 

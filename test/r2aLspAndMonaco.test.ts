@@ -9,6 +9,8 @@ import { LspProcess } from "../src/bun/lsp";
 import { LEGEND, semanticRules, tokenStyle, translateTokens } from "../src/view/editor/semantic";
 import { LspClient } from "../src/view/lsp/client";
 import { applyTextEdits, changedRanges } from "../src/view/lsp/edits";
+import { LSP_PIN } from "../src/bun/tools";
+import { formatter, pinnedServer } from "./pinnedFormatter";
 
 // Minimal browser & Monaco shims so editor/LSP view modules load cleanly under Bun tests.
 if (typeof (globalThis as any).window === "undefined") {
@@ -147,6 +149,8 @@ function makeFakeModel(text: string, uriStr = "file:///ws/test.ssl", eol = "\n")
 		getEOL: () => eol,
 		getValue: () => value,
 		getLineCount: () => lines().length,
+		getLinesContent: () => lines(),
+		getValueLength: () => value.length,
 		getLineMaxColumn: (lineNumber: number) => (lines()[lineNumber - 1]?.length ?? 0) + 1,
 		validateRange: (r: MockRange) => {
 			const ls = lines();
@@ -676,7 +680,16 @@ describe("session.ts toMinimalEdits, multi-owner diagnostics, and untrack owner 
 		expect(mockMarkers.get(uri)?.get("starlims-lsp")).toEqual([]);
 		expect(diagnostics[uri]).toBeUndefined();
 
-		// Publish again and verify reset() clears LSP diagnostics and markers.
+		// What the server sends for a document after it was told of the close is not put back.
+		(sess as any).publish({
+			uri,
+			diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, severity: 2, message: "Late" }],
+		});
+		flush();
+		expect(diagnostics[uri]).toBeUndefined();
+
+		// Tracked again, publish again and verify reset() clears LSP diagnostics and markers.
+		sess.track(model);
 		(sess as any).publish({
 			uri,
 			diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, severity: 2, message: "Warn" }],
@@ -778,5 +791,636 @@ describe("LspSession: where a document's comments and names are (starlims-lsp 0.
 		expect(sent.filter((m) => m.method === "textDocument/didClose").map((m) => m.params.textDocument.uri)).toEqual(opened);
 		// Each is asked about between its opening and its closing.
 		expect(sent.filter((m) => !["initialize", "initialized"].includes(m.method)).map((m) => m.method).slice(0, 3)).toEqual(["textDocument/didOpen", "ssl/lexicalTokens", "textDocument/didClose"]);
+	});
+});
+
+describe("The code editor's everyday editing: completion ranges, format on save, scripts not yet saved", () => {
+	test("toSmallEdits makes the formatter's text and leaves alone the lines it did not change", async () => {
+		const { toSmallEdits } = await import("../src/view/lsp/session");
+		const before = [":PROCEDURE  foo ;", ":DECLARE x;", "x:=5 ;", ":RETURN x;", ":ENDPROC;", "", "y := 1;"];
+		const after = [":PROCEDURE foo;", "\t:DECLARE x;", "", "\tx := 5;", "\t:RETURN x;", ":ENDPROC;"];
+		for (const eol of ["\n", "\r\n"]) {
+			const model = makeFakeModel(before.join(eol), `file:///ws/small-${eol.length}.ssl`, eol);
+			// As the server sends a range formatting: one edit over the whole range, its lines ended with a bare LF.
+			const edits = toSmallEdits(model, [{ range: { start: { line: 0, character: 0 }, end: { line: 4, character: 9 } }, newText: after.join("\n") }]);
+			// The line typed last ("x:=5 ;", line 3) is changed within itself, before its semicolon: a cursor at its end stays.
+			const onTyped = edits.filter((e) => e.range.endLineNumber === 3);
+			expect(onTyped.length).toBeGreaterThan(0);
+			expect(onTyped.every((e) => e.range.startLineNumber === 3 && e.range.endColumn <= 6)).toBe(true);
+			// ":ENDPROC;" and what follows the range are the same: nothing reaches them.
+			expect(edits.every((e) => e.range.endLineNumber < 5)).toBe(true);
+			expect(edits.every((e) => !/(^|[^\r])\n/.test(e.text ?? "") || eol === "\n")).toBe(true);
+			expect(model.applyEdits(edits)).toBe([...after, "", "y := 1;"].join(eol));
+			model.dispose();
+		}
+	});
+
+	test("toSmallEdits gives lines only added or only taken out as the one edit they are, and nothing for no change", async () => {
+		const { toSmallEdits } = await import("../src/view/lsp/session");
+		const whole = (text: string, newText: string, name: string) => {
+			const model = makeFakeModel(text, `file:///ws/${name}.ssl`);
+			const edits = toSmallEdits(model, [{ range: { start: { line: 0, character: 0 }, end: { line: 99, character: 0 } }, newText }]);
+			const out = model.applyEdits(edits);
+			model.dispose();
+			return { edits, out };
+		};
+		expect(whole("a;\nb;", "a;\n\nb;", "added").out).toBe("a;\n\nb;");
+		expect(whole("a;\n\n\nb;", "a;\nb;", "taken").out).toBe("a;\nb;");
+		expect(whole("a;\nb;", "a;\nb;", "same").edits).toEqual([]);
+	});
+
+	test("the session asks once for a document's symbols for each version, leaves out its own scratch copies from a symbol search, and takes no findings for a closed document", async () => {
+		const { session: shared } = await import("../src/view/lsp/session");
+		const request = shared.request;
+		const asked: string[] = [];
+		(shared as any).request = async (method: string) => {
+			asked.push(method);
+			if (method === "textDocument/documentSymbol") return [{ name: "Main", kind: 12, range: { start: { line: 0, character: 0 }, end: { line: 1, character: 0 } }, selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } } }];
+			if (method === "workspace/symbol") return [{ name: "Main", kind: 12, location: { uri: "file:///ws/a.ssl", range: {} } }, { name: "Main", kind: 12, location: { uri: "file:///ws/.ssl-studio/format-3.ssl", range: {} } }];
+			return null;
+		};
+		try {
+			const model = makeFakeModel(":PROCEDURE Main;\n:ENDPROC;", "file:///ws/symbols.ssl");
+			let version = 1;
+			model.getVersionId = () => version;
+			const [one, two] = await Promise.all([shared.documentSymbols(model), shared.documentSymbols(model)]);
+			expect(asked.filter((m) => m === "textDocument/documentSymbol").length).toBe(1);
+			// Each asker has a copy of its own.
+			expect(one).not.toBe(two);
+			expect(one.map((s) => s.name)).toEqual(["Main"]);
+			version = 2;
+			await shared.documentSymbols(model);
+			expect(asked.filter((m) => m === "textDocument/documentSymbol").length).toBe(2);
+			model.dispose();
+
+			expect((await shared.workspaceSymbols("")).map((s) => s.location.uri)).toEqual(["file:///ws/a.ssl"]);
+
+			// What the server found in the edit before a close comes after the close: it is not put back.
+			const { diagnostics } = await import("../src/view/lsp/session");
+			(shared as any).publish({ uri: "file:///ws/closed.ssl", diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, message: "late", severity: 1 }] });
+			expect(Object.keys(diagnostics).some((uri) => uri.includes("closed.ssl"))).toBe(false);
+		} finally {
+			(shared as any).request = request;
+		}
+	});
+
+	test("a symbol search past the server's cap is matched loosely over the open documents' own symbol lists", async () => {
+		const { session: shared, WORKSPACE_SYMBOL_CAP } = await import("../src/view/lsp/session");
+		const request = shared.request;
+		const versions: Map<string, number> = (shared as any).versions;
+		const openUri = "file:///ws/open.ssl";
+		const range = { start: { line: 4, character: 0 }, end: { line: 9, character: 0 } };
+		const symbol = (name: string, uri: string) => ({ name, kind: 12, location: { uri, range } });
+		let total = 3;
+		const asked: string[] = [];
+		(shared as any).request = async (method: string) => {
+			asked.push(method);
+			// Procedures sit in a region, and a procedure's own children are not procedures.
+			if (method === "textDocument/documentSymbol") return [{ name: "Counting", kind: 3, range, children: [{ name: "AddWorkingDays", kind: 12, range, children: [{ name: "nDays", kind: 13, range }] }] }];
+			return Array.from({ length: total }, (_, i) => symbol(`Proc${i}`, `file:///ws/f${i}.ssl`));
+		};
+		const model = makeFakeModel(":PROCEDURE AddWorkingDays;\n:ENDPROC;", openUri);
+		versions.set(openUri, 1);
+		try {
+			const small = await shared.looseSymbols();
+			expect(small.capped).toBe(false);
+			expect(small.loose).toBe(small.all);
+			expect(asked).not.toContain("textDocument/documentSymbol");
+			// At the cap, which symbols the server listed is chance, open documents' too.
+			total = WORKSPACE_SYMBOL_CAP;
+			const large = await shared.looseSymbols();
+			expect(large.capped).toBe(true);
+			expect(large.all.length).toBe(WORKSPACE_SYMBOL_CAP);
+			expect(large.loose).toEqual([{ name: "AddWorkingDays", kind: 12, location: { uri: openUri, range } }]);
+		} finally {
+			versions.delete(openUri);
+			model.dispose();
+			(shared as any).request = request;
+		}
+	});
+
+	test("a format of a script that the server refuses is kept, for \"Format document\" to say why", async () => {
+		const { registerProviders, session: shared, sslFormatFailure } = await import("../src/view/lsp/session");
+		const { monaco } = await import("../src/view/editor/monaco");
+		let provider: any;
+		const languages = monaco.languages as any;
+		const registered = languages.registerDocumentFormattingEditProvider;
+		languages.registerDocumentFormattingEditProvider = (_language: string, given: any) => ((provider = given), { dispose() {} });
+		registerProviders();
+		languages.registerDocumentFormattingEditProvider = registered;
+		const request = shared.request;
+		const model = makeFakeModel(":RETURN 1;", "file:///ws/refused.ssl");
+		try {
+			(shared as any).request = async () => {
+				throw new Error("the document could not be read to its end");
+			};
+			expect(await provider.provideDocumentFormattingEdits(model, { tabSize: 4, insertSpaces: false })).toEqual([]);
+			expect(sslFormatFailure(model)).toBe("the document could not be read to its end");
+			(shared as any).request = async () => [];
+			await provider.provideDocumentFormattingEdits(model, { tabSize: 4, insertSpaces: false });
+			expect(sslFormatFailure(model)).toBeUndefined();
+		} finally {
+			(shared as any).request = request;
+			model.dispose();
+		}
+	});
+
+	test("a completion for a document closed while the server was asked gives nothing, and raises nothing", async () => {
+		const { registerProviders, session: shared } = await import("../src/view/lsp/session");
+		const { monaco } = await import("../src/view/editor/monaco");
+		let provider: any;
+		const languages = monaco.languages as any;
+		const registered = languages.registerCompletionItemProvider;
+		languages.registerCompletionItemProvider = (_language: string, given: any) => ((provider = given), { dispose() {} });
+		registerProviders();
+		languages.registerCompletionItemProvider = registered;
+		const request = shared.request;
+		const model = makeFakeModel("Le", "file:///ws/closing.ssl");
+		// The tab is closed while the server works out its answer: the document is gone when the answer comes.
+		(shared as any).request = async () => (model.dispose(), { items: [{ label: "Len", kind: 3, insertText: "Len" }] });
+		// What read it then: a closed document's text raises, as Monaco's does ("TextModelPart is disposed!").
+		model.getWordUntilPosition = () => {
+			if (model.isDisposed()) throw new Error("TextModelPart is disposed!");
+			return { word: "Le", startColumn: 1, endColumn: 3 };
+		};
+		try {
+			expect(await provider.provideCompletionItems(model, { lineNumber: 1, column: 3 }, { triggerKind: 0 })).toEqual({ suggestions: [] });
+		} finally {
+			(shared as any).request = request;
+		}
+	});
+
+	test("Format Selection gives the selected lines as a format of the whole document leaves them, and only those", async () => {
+		const { registerProviders, session: shared } = await import("../src/view/lsp/session");
+		const { monaco } = await import("../src/view/editor/monaco");
+		let provider: any;
+		const languages = monaco.languages as any;
+		const registered = languages.registerDocumentRangeFormattingEditProvider;
+		languages.registerDocumentRangeFormattingEditProvider = (_language: string, given: any) => ((provider = given), { dispose() {} });
+		registerProviders();
+		languages.registerDocumentRangeFormattingEditProvider = registered;
+		// Line 4 is at the wrong depth, line 5 at the right one; line 2 is wrong too, and is not selected.
+		const text = ":PROCEDURE A;\n:PARAMETERS x;\n\t:IF x > 1;\ny := 1;\n\t\tz := 3;\n\t:ENDIF;\n:ENDPROC;";
+		const formatted = ":PROCEDURE A;\n\t:PARAMETERS x;\n\t:IF x > 1;\n\t\ty := 1;\n\t\tz := 3;\n\t:ENDIF;\n:ENDPROC;";
+		const request = shared.request;
+		const asked: string[] = [];
+		const answers: Record<string, unknown> = {
+			"textDocument/formatting": [{ range: { start: { line: 0, character: 0 }, end: { line: 6, character: 9 } }, newText: formatted }],
+			// What the server's range format gives for lines 4 and 5: both from the first one's depth.
+			"textDocument/rangeFormatting": [{ range: { start: { line: 3, character: 0 }, end: { line: 4, character: 9 } }, newText: "y := 1;\nz := 3;" }],
+		};
+		(shared as any).request = async (method: string) => (asked.push(method), answers[method] ?? null);
+		const select = async (startLine: number, endLine: number, endColumn: number) => {
+			const model = makeFakeModel(text, "file:///ws/select.ssl");
+			const edits = await provider.provideDocumentRangeFormattingEdits(model, new MockRange(startLine, 1, endLine, endColumn), { tabSize: 4, insertSpaces: false });
+			const out = model.applyEdits(edits.map((e: any) => ({ range: new MockRange(e.range.startLineNumber, e.range.startColumn, e.range.endLineNumber, e.range.endColumn), text: e.text })));
+			model.dispose();
+			return out.split("\n");
+		};
+		try {
+			const lines = await select(4, 5, 9);
+			expect(lines[3]).toBe("\t\ty := 1;");
+			expect(lines[4]).toBe("\t\tz := 3;");
+			// What was not selected is as it was.
+			expect(lines[1]).toBe(":PARAMETERS x;");
+			expect(asked).toEqual(["textDocument/formatting"]);
+			// A selection that ends at the very start of a line does not take that line in.
+			expect((await select(1, 3, 1))[1]).toBe("\t:PARAMETERS x;");
+			expect((await select(1, 3, 1))[3]).toBe("y := 1;");
+			// With no whole-document format to be had, the range format, as before.
+			asked.length = 0;
+			delete answers["textDocument/formatting"];
+			(shared as any).request = async (method: string) => {
+				asked.push(method);
+				if (method === "textDocument/formatting") throw new Error("not this time");
+				return answers[method] ?? null;
+			};
+			expect((await select(4, 5, 9))[4]).toBe("z := 3;");
+			expect(asked).toEqual(["textDocument/formatting", "textDocument/rangeFormatting"]);
+		} finally {
+			(shared as any).request = request;
+		}
+	});
+
+	test("a completion with no range from the server replaces the punctuation typed before the word, and is still found by it", async () => {
+		const { registerProviders, session: shared } = await import("../src/view/lsp/session");
+		const { monaco } = await import("../src/view/editor/monaco");
+		let provider: any;
+		const languages = monaco.languages as any;
+		const registered = languages.registerCompletionItemProvider;
+		languages.registerCompletionItemProvider = (_language: string, given: any) => ((provider = given), { dispose() {} });
+		registerProviders();
+		languages.registerCompletionItemProvider = registered;
+
+		const items = [
+			{ label: ":WHILE", kind: 14, insertText: ":WHILE", insertTextFormat: 1 },
+			{ label: "while", kind: 15, insertText: ":WHILE ${1:condition};\n\t${0}\n:ENDWHILE;", insertTextFormat: 2 },
+			{ label: "WhileAway", kind: 3, insertText: "WhileAway", insertTextFormat: 1 },
+			{ label: ".T.", kind: 21, insertText: ".T.", insertTextFormat: 1 },
+			{ label: ":WITH", kind: 14, textEdit: { newText: ":WITH", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } } } },
+		];
+		const request = shared.request;
+		const asked: any[] = [];
+		(shared as any).request = async (_method: string, params: any) => (asked.push(params), { items });
+		try {
+			const ask = async (line: string, context?: { triggerKind: number; triggerCharacter?: string }) => {
+				const model = makeFakeModel(line, "file:///ws/complete.ssl");
+				const start = line.length - (/[A-Za-z0-9_]*$/.exec(line)?.[0].length ?? 0);
+				model.getLineContent = () => line;
+				model.getWordUntilPosition = () => ({ word: line.slice(start), startColumn: start + 1, endColumn: line.length + 1 });
+				const result = await provider.provideCompletionItems(model, { lineNumber: 1, column: line.length + 1 }, context);
+				model.dispose();
+				return Object.fromEntries(result.suggestions.map((s: any) => [s.label, s])) as Record<string, any>;
+			};
+			const cols = (s: any) => [s.range.startColumn, s.range.endColumn];
+
+			// ":wh": the keyword takes the colon with it; so does the snippet, which is found by ":wh" for it.
+			const afterColon = await ask(":wh");
+			expect(cols(afterColon[":WHILE"])).toEqual([1, 4]);
+			expect(afterColon[":WHILE"].filterText).toBeUndefined();
+			expect(cols(afterColon.while)).toEqual([1, 4]);
+			expect(afterColon.while.filterText).toBe(":while");
+			// A name that opens with no punctuation replaces the word alone, as before.
+			expect(cols(afterColon.WhileAway)).toEqual([2, 4]);
+			expect(cols(afterColon[".T."])).toEqual([2, 4]);
+			// A range the server names is the server's.
+			expect(cols(afterColon[":WITH"])).toEqual([1, 4]);
+
+			// "wh" with no colon typed: nothing before the word to take.
+			const bare = await ask("\twh");
+			expect(cols(bare[":WHILE"])).toEqual([2, 4]);
+			expect(cols(bare.while)).toEqual([2, 4]);
+			expect(bare.while.filterText).toBeUndefined();
+
+			// A colon alone, and a dot before a word.
+			expect(cols((await ask("x := 1;:"))[":WHILE"])).toEqual([8, 9]);
+			const afterDot = await ask("b := .t");
+			expect(cols(afterDot[".T."])).toEqual([6, 8]);
+			expect(cols(afterDot[":WHILE"])).toEqual([7, 8]);
+
+			// The server is told what set the list off, in the protocol's numbers (the editor's plus one): it
+			// answers a typed ":" with members or keywords, and with nothing said it gave everything it knows.
+			asked.length = 0;
+			await ask("oMail:", { triggerKind: 1, triggerCharacter: ":" });
+			await ask("wh", { triggerKind: 0 });
+			await ask("wh", { triggerKind: 2 });
+			await ask("wh");
+			expect(asked.map((params) => params.context)).toEqual([{ triggerKind: 2, triggerCharacter: ":" }, { triggerKind: 1 }, { triggerKind: 3 }, { triggerKind: 1 }]);
+			expect(asked[0].position).toEqual({ line: 0, character: 6 });
+		} finally {
+			(shared as any).request = request;
+		}
+	});
+
+	test("a rename the server makes nothing of is said, with what was asked; one it makes is not", async () => {
+		const { registerProviders, renameFailure, renameRefusal, session: shared } = await import("../src/view/lsp/session");
+		const { monaco } = await import("../src/view/editor/monaco");
+		let provider: any;
+		const languages = monaco.languages as any;
+		const registered = languages.registerRenameProvider;
+		languages.registerRenameProvider = (_language: string, given: any) => ((provider = given), { dispose() {} });
+		const told: string[] = [];
+		registerProviders((text) => void told.push(text));
+		languages.registerRenameProvider = registered;
+
+		const model = makeFakeModel("dResult := dStart + nCount;", "file:///ws/rename.ssl");
+		const uri = model.uri.toString();
+		const at = { lineNumber: 1, column: 3 };
+		const whole = { start: { line: 0, character: 0 }, end: { line: 0, character: 7 } };
+		const request = shared.request;
+		const ensureModel = shared.ensureModel;
+		let answer: (method: string) => any = () => null;
+		(shared as any).request = async (method: string) => answer(method);
+		shared.ensureModel = async () => model;
+		try {
+			// Before the editor asks for the name: with no name from the server, the new one alone is said.
+			expect(await provider.provideRenameEdits(model, at, "IF")).toEqual({ edits: [], rejectReason: renameRefusal("", "IF") });
+			expect(told).toEqual(["The language server would not take “IF” as the new name. Nothing was changed."]);
+
+			// The editor asks where the name is, then for the edits. No answer, and an answer with nothing in it.
+			answer = (method) => (method === "textDocument/prepareRename" ? { range: whole, placeholder: "dResult" } : null);
+			expect((await provider.resolveRenameLocation(model, at)).text).toBe("dResult");
+			told.length = 0;
+			expect(await provider.provideRenameEdits(model, at, "IF")).toEqual({ edits: [], rejectReason: renameRefusal("dResult", "IF") });
+			answer = () => ({ changes: { [uri]: [] }, documentChanges: [{ textDocument: { uri }, edits: [] }] });
+			expect((await provider.provideRenameEdits(model, at, "my-var")).rejectReason).toBe(renameRefusal("dResult", "my-var"));
+			expect(told).toEqual(["The language server would not rename “dResult” to “IF”. Nothing was changed.", "The language server would not rename “dResult” to “my-var”. Nothing was changed."]);
+
+			// The name asked about in one document is not said of a rename in another.
+			const other = makeFakeModel("x := 1;", "file:///ws/other.ssl");
+			answer = () => null;
+			expect((await provider.provideRenameEdits(other, at, "IF")).rejectReason).toBe(renameRefusal("", "IF"));
+			other.dispose();
+
+			// A failure is said in the server's words, where it gave any.
+			told.length = 0;
+			answer = () => {
+				throw new Error("“IF” is a keyword.");
+			};
+			expect(await provider.provideRenameEdits(model, at, "IF")).toEqual({ edits: [], rejectReason: "Nothing was renamed: “IF” is a keyword." });
+			expect(told).toEqual(["Nothing was renamed: “IF” is a keyword."]);
+			expect(renameFailure(null)).toBe("Nothing was renamed: the language server did not answer.");
+			expect(renameFailure(new Error("  "))).toBe("Nothing was renamed: the language server did not answer.");
+
+			// A rename the server makes: its edits, in whichever of the protocol's two ways it gives them, and not a word.
+			told.length = 0;
+			for (const given of [{ changes: { [uri]: [{ range: whole, newText: "dOut" }] } }, { documentChanges: [{ textDocument: { uri }, edits: [{ range: whole, newText: "dOut" }] }] }]) {
+				answer = () => given;
+				const made = await provider.provideRenameEdits(model, at, "dOut");
+				expect(made.rejectReason).toBeUndefined();
+				expect(made.edits.map((e: any) => [e.resource.toString(), e.textEdit.text, e.textEdit.range.startColumn, e.textEdit.range.endColumn])).toEqual([[uri, "dOut", 1, 8]]);
+			}
+			expect(told).toEqual([]);
+
+			// A model that is no document of the user's has nothing to rename, and that is said too.
+			const preview = makeFakeModel("x := 1;", "inmemory://model/7");
+			expect((await provider.provideRenameEdits(preview, at, "y")).rejectReason).toBe("Nothing to rename here.");
+			expect(told).toEqual(["Nothing to rename here."]);
+			preview.dispose();
+		} finally {
+			(shared as any).request = request;
+			shared.ensureModel = ensureModel;
+			model.dispose();
+		}
+	});
+
+	test("a script not yet saved is the server's to read; a model that is no document of the user's is not", async () => {
+		const sess = new LspSession();
+		const sent: { method: string; params: any }[] = [];
+		let hello: any;
+		(sess.client as any).notify = (method: string, params: any) => void sent.push({ method, params });
+		(sess.client as any).request = async (method: string, params: any) => (method === "initialize" ? ((hello = params), { capabilities: {} }) : null);
+		const untitled = makeFakeModel(":DECLARE x;", "untitled:Untitled-1");
+		const preview = makeFakeModel(":DECLARE y;", "inmemory://model/1");
+		sess.track(untitled);
+		sess.track(preview);
+		await sess.start("/ws");
+		const opened = sent.filter((m) => m.method === "textDocument/didOpen").map((m) => m.params.textDocument.uri);
+		expect(opened).toEqual([untitled.uri.toString()]);
+		expect(untitled.uri.toString()).toBe("untitled:Untitled-1");
+		// The server is told at the start that each completion request says what set it off.
+		expect(hello.capabilities.textDocument.completion.contextSupport).toBe(true);
+		sess.untrack(untitled);
+		expect(sent.at(-1)).toEqual({ method: "textDocument/didClose", params: { textDocument: { uri: "untitled:Untitled-1" } } });
+		untitled.dispose();
+		preview.dispose();
+	});
+});
+
+describe("The code editor's keys are Sublime Text's for editing (ADR 0034)", () => {
+	type Rule = { keybinding: number; command: string; when?: string };
+	const CODES = { KeyD: 34, KeyG: 37, KeyJ: 40, KeyK: 41, KeyL: 42, KeyM: 43, KeyU: 51, UpArrow: 16, DownArrow: 18, Delete: 20, Backspace: 1, Digit0: 21, F3: 61, F5: 63, F9: 67, Slash: 90 };
+	const CTRL = 2048;
+	const SHIFT = 1024;
+	const ALT = 512;
+	const WIN = 256;
+	const chord = (first: number, second: number) => (first | ((second & 0xffff) << 16)) >>> 0;
+
+	/** The rules `setEditorKeys` gives the editor, on a system named as the browser names it. */
+	async function rulesOn(platform: string, taken?: (keybinding: number, command: string) => boolean, more: Rule[] = []): Promise<Rule[]> {
+		const { monaco, setEditorKeys } = await import("../src/view/editor/monaco");
+		Object.assign(monaco.KeyMod as any, { CtrlCmd: CTRL, Shift: SHIFT, Alt: ALT, WinCtrl: WIN, chord });
+		Object.assign(monaco.KeyCode as any, CODES);
+		const editorApi = monaco.editor as any;
+		const real = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+		let given: Rule[] = [];
+		editorApi.addKeybindingRules = (rules: Rule[]) => ((given = rules), { dispose() {} });
+		Object.defineProperty(globalThis, "navigator", { value: { platform }, configurable: true });
+		try {
+			setEditorKeys(taken, more);
+		} finally {
+			if (real) Object.defineProperty(globalThis, "navigator", real);
+			delete editorApi.addKeybindingRules;
+		}
+		return given;
+	}
+	const bound = (rules: Rule[], key: number) => rules.filter((r) => r.keybinding === key && !r.command.startsWith("-")).map((r) => r.command);
+	const freed = (rules: Rule[], key: number) => rules.filter((r) => r.keybinding === key && r.command.startsWith("-")).map((r) => r.command.slice(1));
+
+	test("on Windows and Linux: each of Sublime Text's keys runs its command, and the command the key had is let go", async () => {
+		const rules = await rulesOn("Linux x86_64");
+		expect(bound(rules, CTRL | SHIFT | CODES.KeyD)).toEqual(["editor.action.duplicateSelection"]);
+		expect(bound(rules, CTRL | CODES.KeyJ)).toEqual(["editor.action.joinLines"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.UpArrow)).toEqual(["editor.action.moveLinesUpAction"]);
+		expect(freed(rules, CTRL | SHIFT | CODES.UpArrow)).toEqual(["editor.action.insertCursorAbove"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.DownArrow)).toEqual(["editor.action.moveLinesDownAction"]);
+		expect(bound(rules, CODES.F9)).toEqual(["editor.action.sortLinesAscending"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.Backspace)).toEqual(["deleteAllLeft"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.Delete)).toEqual(["deleteAllRight"]);
+		expect(bound(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.KeyK))).toEqual(["deleteAllRight"]);
+		expect(bound(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.KeyU))).toEqual(["editor.action.transformToUppercase"]);
+		expect(freed(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.KeyU))).toEqual(["editor.action.removeCommentLine"]);
+		expect(bound(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.KeyL))).toEqual(["editor.action.transformToLowercase"]);
+		expect(freed(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.KeyL))).toEqual(["editor.toggleFold"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.KeyL)).toEqual(["editor.action.insertCursorAtEndOfEachLineSelected"]);
+		expect(freed(rules, CTRL | SHIFT | CODES.KeyL)).toEqual(["editor.action.selectHighlights"]);
+		expect(bound(rules, ALT | CODES.F3)).toEqual(["editor.action.selectHighlights"]);
+		expect(bound(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.Digit0))).toEqual(["editor.unfoldAll"]);
+		expect(freed(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.Digit0))).toEqual(["editor.foldAll"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.Slash)).toEqual(["editor.action.blockComment"]);
+		// The bracket keys: Ctrl+M no longer turns Tab off.
+		expect(bound(rules, CTRL | CODES.KeyM)).toEqual(["editor.action.jumpToBracket"]);
+		expect(freed(rules, CTRL | CODES.KeyM)).toEqual(["editor.action.toggleTabFocusMode"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.KeyM)).toEqual(["editor.action.selectToBracket"]);
+	});
+
+	test("every key runs one command, in the editor's text only, and a command that changes text not where text may not be changed", async () => {
+		for (const platform of ["Win32", "MacIntel"]) {
+			const rules = await rulesOn(platform);
+			const adds = rules.filter((r) => !r.command.startsWith("-"));
+			expect(adds.length).toBeGreaterThan(12);
+			expect(new Set(adds.map((r) => r.keybinding)).size).toBe(adds.length);
+			for (const rule of adds) expect(rule.when?.startsWith("editorTextFocus")).toBe(true);
+			const changes = adds.filter((r) => /duplicate|joinLines|moveLines|sortLines|deleteAll|transformTo|blockComment/.test(r.command));
+			expect(changes.length).toBeGreaterThan(8);
+			for (const rule of changes) expect(rule.when).toBe("editorTextFocus && !editorReadonly");
+			// A command is let go from a key before the key is given: the order the editor reads them in.
+			for (const rule of rules.filter((r) => r.command.startsWith("-"))) {
+				const at = rules.indexOf(rule);
+				expect(rules.findIndex((r) => r.keybinding === rule.keybinding && !r.command.startsWith("-"))).toBeGreaterThan(at);
+			}
+		}
+	});
+
+	test("a key the user changed is left out, what it had before stays let go, and the user's rules come last (ADR 0039)", async () => {
+		const upper = chord(CTRL | CODES.KeyK, CTRL | CODES.KeyU);
+		const mine: Rule[] = [{ keybinding: CTRL | ALT | CODES.KeyJ, command: "editor.action.joinLines", when: "editorTextFocus && !editorReadonly" }];
+		// "Join lines" moved off Ctrl+J, and "Upper case" cleared: the editor passes over a rule that takes a command
+		// off a key it did not come with, so these are not put in at all.
+		const taken = (keybinding: number, command: string) => (keybinding === (CTRL | CODES.KeyJ) && command === "editor.action.joinLines") || keybinding === upper;
+		const rules = await rulesOn("Linux x86_64", taken, mine);
+		expect(bound(rules, CTRL | CODES.KeyJ)).toEqual([]);
+		expect(bound(rules, upper)).toEqual([]);
+		// The key does nothing now, and not what the editor had on it before Sublime Text's command.
+		expect(freed(rules, upper)).toEqual(["editor.action.removeCommentLine"]);
+		// The others are as they were, and the user's own rule is the last of all.
+		expect(bound(rules, CTRL | SHIFT | CODES.KeyD)).toEqual(["editor.action.duplicateSelection"]);
+		expect(bound(rules, chord(CTRL | CODES.KeyK, CTRL | CODES.KeyL))).toEqual(["editor.action.transformToLowercase"]);
+		expect(rules.at(-1)).toEqual(mine[0]!);
+		const all = await rulesOn("Linux x86_64");
+		expect(rules.length).toBe(all.length - 2 + 1);
+	});
+
+	test("the keys are put in afresh each time: the set before is taken out first", async () => {
+		const { monaco, setEditorKeys } = await import("../src/view/editor/monaco");
+		const editorApi = monaco.editor as any;
+		const steps: string[] = [];
+		let sets = 0;
+		editorApi.addKeybindingRules = () => {
+			const mine = ++sets;
+			steps.push(`in ${mine}`);
+			return { dispose: () => steps.push(`out ${mine}`) };
+		};
+		try {
+			setEditorKeys();
+			setEditorKeys();
+			setEditorKeys();
+		} finally {
+			delete editorApi.addKeybindingRules;
+		}
+		// Each set is taken out before the next goes in: left in, a key the user changed would still run its old command.
+		expect(steps).toEqual(["in 1", "out 1", "in 2", "out 2", "in 3"]);
+	});
+
+	test("on a Mac the keys are Sublime Text's for a Mac", async () => {
+		const rules = await rulesOn("MacIntel");
+		// Cmd (the editor's CtrlCmd) where the others have Ctrl.
+		expect(bound(rules, CTRL | SHIFT | CODES.KeyD)).toEqual(["editor.action.duplicateSelection"]);
+		// A line is moved with Ctrl+Cmd and an arrow: Cmd+Shift with one selects to the start or end of the file.
+		expect(bound(rules, WIN | CTRL | CODES.UpArrow)).toEqual(["editor.action.moveLinesUpAction"]);
+		expect(bound(rules, CTRL | SHIFT | CODES.UpArrow)).toEqual([]);
+		expect(bound(rules, CODES.F5)).toEqual(["editor.action.sortLinesAscending"]);
+		expect(bound(rules, CODES.F9)).toEqual([]);
+		expect(bound(rules, WIN | CTRL | CODES.KeyG)).toEqual(["editor.action.selectHighlights"]);
+		// The editor has its own keys there for deleting to either end of the line.
+		expect(bound(rules, CTRL | SHIFT | CODES.Backspace)).toEqual([]);
+		// The bracket keys are on Ctrl itself, and "Tab moves focus" is let go of the one it was on there.
+		expect(bound(rules, WIN | CODES.KeyM)).toEqual(["editor.action.jumpToBracket"]);
+		expect(freed(rules, WIN | CODES.KeyM)).toEqual([]);
+		expect(bound(rules, WIN | SHIFT | CODES.KeyM)).toEqual(["editor.action.selectToBracket"]);
+		expect(freed(rules, WIN | SHIFT | CODES.KeyM)).toEqual(["editor.action.toggleTabFocusMode"]);
+	});
+});
+
+describe("Format on save takes the changed lines from a format of the whole document (formatRangesAsDocument)", () => {
+	const OLD = [":PROCEDURE one;", "x:=sqlexecute(a) ;", ":RETURN x;", ":ENDPROC;", ":PROCEDURE two;", "y:=1 ;", ":ENDPROC;"];
+	const NEW = [":PROCEDURE one;", "\tx := SQLExecute(a);", "", "\t:RETURN x;", ":ENDPROC;", "", ":PROCEDURE two;", "\ty := 1;", ":ENDPROC;"];
+
+	/** A session whose server formats any document to `formatted`, as one edit over the whole of it. */
+	async function sessionThatFormats(formatted: string[] | null) {
+		const sess = new LspSession();
+		const asked: { method: string; params: any }[] = [];
+		(sess.client as any).notify = () => {};
+		(sess.client as any).request = async (method: string, params: any) => {
+			asked.push({ method, params });
+			if (method === "initialize") return { capabilities: {} };
+			if (method !== "textDocument/formatting" || !formatted) return null;
+			return [{ range: { start: { line: 0, character: 0 }, end: { line: 9999, character: 0 } }, newText: formatted.join("\n") }];
+		};
+		await sess.start("/ws");
+		return { sess, asked };
+	}
+	const modelOf = (lines: string[], name: string, eol = "\n") => {
+		const model = makeFakeModel(lines.join(eol), `file:///ws/${name}.ssl`, eol);
+		model.getLinesContent = () => model.getValue().split(eol);
+		return model;
+	};
+	const OPTIONS = { tabSize: 4, insertSpaces: false } as any;
+
+	test("the lines asked for become the formatter's; the rest of the document is not touched", async () => {
+		for (const eol of ["\n", "\r\n"]) {
+			const { sess, asked } = await sessionThatFormats(NEW);
+			const model = modelOf(OLD, `whole-${eol.length}`, eol);
+			const edits = (await sess.formatRangesAsDocument(model, [[0, 3]], OPTIONS))!;
+			// The document itself is formatted, not a range of it.
+			expect(asked.at(-1)!.method).toBe("textDocument/formatting");
+			expect(asked.at(-1)!.params.textDocument.uri).toBe(model.uri.toString());
+			// Nothing reaches the second procedure, and a line that is kept is changed within itself.
+			expect(edits.every((e) => e.range.endLineNumber <= 5)).toBe(true);
+			expect(edits.length).toBeGreaterThan(1);
+			expect(model.applyEdits(edits)).toBe([":PROCEDURE one;", "\tx := SQLExecute(a);", "", "\t:RETURN x;", ":ENDPROC;", "", ":PROCEDURE two;", "y:=1 ;", ":ENDPROC;"].join(eol));
+			model.dispose();
+		}
+	});
+
+	test("a document the formatter leaves alone, or does not answer for, gives no edits", async () => {
+		const same = await sessionThatFormats(OLD);
+		const model = modelOf(OLD, "same");
+		expect(await same.sess.formatRangesAsDocument(model, [[0, 6]], OPTIONS)).toEqual([]);
+		const silent = await sessionThatFormats(null);
+		expect(await silent.sess.formatRangesAsDocument(model, [[0, 6]], OPTIONS)).toEqual([]);
+		model.dispose();
+	});
+
+	test("lines the formatter has none of any more go with their line break, wherever they stand", async () => {
+		// Blank lines beyond the one the formatter keeps, in the middle of the text and at its end.
+		const middle = modelOf(["a := 1;", "", "", "b := 2;"], "gone-middle");
+		const { sess } = await sessionThatFormats(["a := 1;", "", "b := 2;"]);
+		expect(middle.applyEdits((await sess.formatRangesAsDocument(middle, [[1, 2]], OPTIONS))!)).toBe("a := 1;\n\nb := 2;");
+		middle.dispose();
+		const end = modelOf(["a := 1;", "", ""], "gone-end");
+		const trimmed = await sessionThatFormats(["a := 1;"]);
+		expect(end.applyEdits((await trimmed.sess.formatRangesAsDocument(end, [[1, 2]], OPTIONS))!)).toBe("a := 1;");
+		end.dispose();
+	});
+});
+
+describe("A data source shown as SQL is still the server's to read (ADR 0038)", () => {
+	test("it is told of as before, under its own name; an SQL file is not, nor a data source in any other mode", async () => {
+		const sess = new LspSession();
+		const sent: { method: string; params: any }[] = [];
+		(sess.client as any).notify = (method: string, params: any) => void sent.push({ method, params });
+		(sess.client as any).request = async (method: string) => (method === "initialize" ? { capabilities: {} } : null);
+		const inMode = (uri: string, language: string) => {
+			const model = makeFakeModel("SELECT 1", uri);
+			model.getLanguageId = () => language;
+			return model;
+		};
+		const dataSource = inMode("file:///ws/src/Orders/OpenSamples.ds", "sql");
+		const asText = inMode("file:///ws/src/Orders/Other.ds.txt", "mysql");
+		const query = inMode("file:///ws/schema/query.sql", "sql");
+		const otherMode = inMode("file:///ws/src/Orders/Odd.ds", "javascript");
+		const script = inMode("file:///ws/src/Orders/Save.ssl", "ssl");
+		expect([dataSource, asText, query, otherMode, script].map((model) => sess.reads(model))).toEqual([true, true, false, false, true]);
+		for (const model of [dataSource, asText, query, otherMode, script]) sess.track(model);
+		await sess.start("/ws");
+		const opened = sent.filter((m) => m.method === "textDocument/didOpen").map((m) => [m.params.textDocument.uri.split("/").pop(), m.params.textDocument.languageId]);
+		// The server is given each as SSL by language id: it tells what a data source is by the file itself.
+		expect(opened.sort()).toEqual([["OpenSamples.ds", "ssl"], ["Other.ds.txt", "ssl"], ["Save.ssl", "ssl"]]);
+		for (const model of [dataSource, asText, query, otherMode, script]) model.dispose();
+	});
+
+	test("onReady tells its listeners each time the server has started, until they leave", async () => {
+		const sess = new LspSession();
+		(sess.client as any).notify = () => {};
+		(sess.client as any).request = async (method: string) => (method === "initialize" ? { capabilities: {} } : null);
+		let told = 0;
+		const leave = sess.onReady(() => void told++);
+		await sess.start("/ws");
+		await sess.start("/ws");
+		expect(told).toBe(2);
+		leave();
+		await sess.start("/ws");
+		expect(told).toBe(2);
+	});
+});
+
+// The server itself: what the notice above rests on.
+const pinned = pinnedServer();
+
+describe.skipIf(!pinned)(`starlims-lsp ${LSP_PIN}: a rename to a name it will not take is answered with nothing`, () => {
+	const lsp = pinned ? formatter(pinned) : null;
+	afterAll(() => lsp?.stop());
+	const SCRIPT = [":PROCEDURE AddDays;", ":PARAMETERS dStart, nCount;", ":DECLARE dResult;", "dResult := dStart + nCount;", ":RETURN dResult;", ":ENDPROC;", ""].join("\n");
+	const onResult = { line: 3, character: 2 };
+
+	test("no edits and no reason, for a keyword, a built-in name and what is no name; edits for a name it takes", async () => {
+		// Should the server come to give a reason (an error with its words), this fails with them, and the app
+		// already says a failure's words: the notice then needs nothing but this test rewritten.
+		for (const name of ["IF", "Len", "NIL", "my-var", "1 bad name"]) expect([name, await lsp!.rename(SCRIPT, onResult, name)]).toEqual([name, null]);
+		const made = await lsp!.rename(SCRIPT, onResult, "dOut");
+		const edits = Object.values(made?.changes ?? {}).flat() as { newText: string }[];
+		expect(edits.length).toBe(3);
+		expect(edits.every((edit) => edit.newText === "dOut")).toBe(true);
 	});
 });

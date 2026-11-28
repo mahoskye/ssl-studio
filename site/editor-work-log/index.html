@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Editor Work Log · SSL Studio</title>
+<meta name="description" content="Two days of adversarial review and repair on SSL Studio's editor, 26–27 November 2026.">
+<style>
+:root {
+	--bg: #fbf8f3;
+	--surface: #ffffff;
+	--fg: #23201c;
+	--muted: #6b645a;
+	--rule: #e6dfd3;
+	--accent: #a4471d;
+	--accent-soft: #f6e6db;
+	--code-bg: #f1ece4;
+	--good: #2f6f3e;
+	--good-soft: #e3f0e4;
+	--warn: #8a5a00;
+	--warn-soft: #f8edd3;
+	--shadow: 0 1px 2px rgba(40, 30, 20, .06), 0 4px 16px rgba(40, 30, 20, .05);
+	color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme="light"]) {
+		--bg: #1b1916;
+		--surface: #24211d;
+		--fg: #ece6dc;
+		--muted: #a49b8e;
+		--rule: #38332c;
+		--accent: #e88a5a;
+		--accent-soft: #3a2a20;
+		--code-bg: #2c2823;
+		--good: #8fcf9c;
+		--good-soft: #1f3324;
+		--warn: #e2b55c;
+		--warn-soft: #3a2f18;
+		--shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 16px rgba(0, 0, 0, .25);
+		color-scheme: dark;
+	}
+}
+:root[data-theme="dark"] {
+	--bg: #1b1916;
+	--surface: #24211d;
+	--fg: #ece6dc;
+	--muted: #a49b8e;
+	--rule: #38332c;
+	--accent: #e88a5a;
+	--accent-soft: #3a2a20;
+	--code-bg: #2c2823;
+	--good: #8fcf9c;
+	--good-soft: #1f3324;
+	--warn: #e2b55c;
+	--warn-soft: #3a2f18;
+	--shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 16px rgba(0, 0, 0, .25);
+	color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--fg);
+	font: 17px/1.65 Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
+}
+.ui { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif; }
+code, kbd, pre { font-family: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace; font-size: .86em; }
+code { background: var(--code-bg); padding: .1em .35em; border-radius: 4px; overflow-wrap: anywhere; }
+kbd {
+	display: inline-block;
+	padding: .05em .4em;
+	border: 1px solid var(--rule);
+	border-bottom-width: 2px;
+	border-radius: 5px;
+	background: var(--surface);
+	font-size: .8em;
+	line-height: 1.4;
+	white-space: nowrap;
+}
+pre {
+	background: var(--code-bg);
+	padding: 14px 16px;
+	border-radius: 8px;
+	overflow-x: auto;
+	line-height: 1.5;
+	margin: 1.2em 0;
+}
+pre code { background: none; padding: 0; font-size: 1em; }
+a { color: var(--accent); text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+
+.wrap { max-width: 720px; margin: 0 auto; padding: 0 16px; }
+header.masthead { padding: 56px 0 28px; border-bottom: 1px solid var(--rule); }
+.kicker a { color: inherit; text-decoration: none; }
+.kicker a:hover { text-decoration: underline; }
+.kicker { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); font-weight: 600; margin: 0 0 14px; }
+h1 { font-size: clamp(30px, 5.4vw, 44px); line-height: 1.12; letter-spacing: -.01em; margin: 0 0 16px; font-weight: 700; }
+.dek { font-size: 20px; line-height: 1.5; color: var(--muted); margin: 0 0 22px; }
+.byline { font-size: 14px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.byline span { min-width: 0; }
+
+.stats {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 12px;
+	margin: 28px 0 8px;
+}
+.stat { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 14px 12px; box-shadow: var(--shadow); }
+.stat b { display: block; font-size: 26px; line-height: 1.1; letter-spacing: -.01em; }
+.stat span { display: block; font-size: 13px; color: var(--muted); margin-top: 6px; line-height: 1.35; }
+@media (max-width: 640px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+nav.toc { margin: 32px 0 8px; padding: 18px 20px; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; }
+nav.toc h2 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+nav.toc ol { margin: 0; padding-left: 22px; font-size: 15px; line-height: 1.7; columns: 2; column-gap: 28px; }
+nav.toc li { break-inside: avoid; }
+@media (max-width: 640px) { nav.toc ol { columns: 1; } }
+
+article h2 {
+	font-size: 27px;
+	line-height: 1.25;
+	margin: 56px 0 14px;
+	letter-spacing: -.005em;
+	scroll-margin-top: 16px;
+}
+article h2 .num { color: var(--accent); font-weight: 600; margin-right: 8px; font-size: .8em; }
+article h3 { font-size: 19px; margin: 32px 0 8px; line-height: 1.35; }
+article p, article li { margin: 0 0 1em; }
+article ul, article ol { padding-left: 24px; margin: 0 0 1.2em; }
+article li { margin-bottom: .55em; }
+article li::marker { color: var(--muted); }
+
+.adr { font-size: 12px; font-weight: 600; letter-spacing: .03em; color: var(--accent); background: var(--accent-soft); padding: 2px 7px; border-radius: 999px; white-space: nowrap; vertical-align: 2px; margin-left: 4px; }
+
+.callout { border-left: 3px solid var(--accent); background: var(--surface); padding: 14px 18px; margin: 1.6em 0; border-radius: 0 8px 8px 0; box-shadow: var(--shadow); }
+.callout p:last-child { margin-bottom: 0; }
+.callout .label { display: block; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); font-weight: 700; margin-bottom: 4px; }
+.callout.lesson { border-left-color: var(--warn); }
+.callout.lesson .label { color: var(--warn); }
+
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 1.4em 0; }
+.compare > div { border-radius: 8px; padding: 12px 14px; font-size: 15px; line-height: 1.5; }
+.compare .before { background: var(--warn-soft); }
+.compare .after { background: var(--good-soft); }
+.compare h4 { margin: 0 0 4px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+.compare .before h4 { color: var(--warn); }
+.compare .after h4 { color: var(--good); }
+.compare p { margin: 0; }
+@media (max-width: 560px) { .compare { grid-template-columns: 1fr; } }
+
+.keys { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; font-size: 15px; margin: 1.2em 0 1.6em; align-items: baseline; }
+.keys dt { white-space: nowrap; }
+.keys dd { margin: 0; color: var(--fg); }
+@media (max-width: 480px) { .keys { grid-template-columns: 1fr; gap: 2px; } .keys dd { margin-bottom: 8px; color: var(--muted); } }
+
+.timeline { list-style: none; padding: 0 !important; margin: 1.4em 0; border-left: 2px solid var(--rule); }
+.timeline li { position: relative; padding: 0 0 0 20px; margin: 0 0 14px; font-size: 15.5px; }
+.timeline li::before { content: ""; position: absolute; left: -6px; top: .55em; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+.timeline time { display: block; font-size: 12.5px; color: var(--muted); }
+
+figure.bar { margin: 1.6em 0; padding: 16px 18px; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; }
+figure.bar figcaption { font-size: 14px; color: var(--muted); margin-bottom: 12px; }
+.barrow { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 10px; margin: 8px 0; font-size: 14px; }
+.barrow .track { position: relative; height: 26px; }
+.barrow .fill { height: 100%; border-radius: 5px; display: flex; align-items: center; padding-left: 10px; color: #fff; font-weight: 600; font-size: 13px; white-space: nowrap; }
+.barrow .fill.old { background: #b0603a; }
+.barrow .fill.new { background: #3f7f52; }
+
+footer { margin: 64px 0 0; padding: 28px 0 56px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 14px; }
+footer p { margin: 0 0 .6em; }
+.theme-toggle {
+	position: absolute; top: 12px; right: 12px;
+	border: 1px solid var(--rule); background: var(--surface); color: var(--fg);
+	border-radius: 999px; padding: 6px 12px; font-size: 13px; cursor: pointer; box-shadow: var(--shadow);
+}
+.theme-toggle:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 480px) { body { font-size: 16.5px; } .dek { font-size: 18px; } header.masthead { padding-top: 52px; } }
+@media print { .theme-toggle { display: none; } }
+</style>
+</head>
+<body>
+<button class="theme-toggle ui" type="button" aria-label="Switch between light and dark">Theme</button>
+
+<div class="wrap">
+<header class="masthead">
+	<p class="kicker ui"><a href="../">SSL Studio</a> · Editor work log · 26–27 November 2026</p>
+	<h1>An editor that behaves like VS Code, types like Sublime Text, and says what it cannot do</h1>
+	<p class="dek">Two days of adversarial review and repair on SSL Studio's code editor: completion that knows where it is, Sublime Text's keys, formatting you can trust, a language server whose silence is said out loud, and a last round that went looking for what was still broken or missing.</p>
+	<div class="byline ui">
+		<span>Branch <code>editor-everyday-fixes</code></span>
+		<span><a href="https://github.com/mahoskye/ssl-studio/pull/5">mahoskye/ssl-studio pull request 5</a></span>
+		<span>Written by Claude, from the session's commits and checks</span>
+	</div>
+
+	<div class="stats ui" role="list">
+		<div class="stat" role="listitem"><b>28</b><span>commits when first written, all in pull request 5</span></div>
+		<div class="stat" role="listitem"><b>18</b><span>decision records, ADR 0034 to 0051</span></div>
+		<div class="stat" role="listitem"><b>4,147</b><span>unit tests when first written, up from 3,896</span></div>
+		<div class="stat" role="listitem"><b>3</b><span>language server defects reported upstream, all fixed</span></div>
+	</div>
+</header>
+
+<nav class="toc ui" aria-label="Contents">
+	<h2>Contents</h2>
+	<ol>
+		<li><a href="#brief">The brief</a></li>
+		<li><a href="#method">How the work was done</a></li>
+		<li><a href="#round-one">Five everyday defects</a></li>
+		<li><a href="#sublime">Sublime Text's keys</a></li>
+		<li><a href="#intellisense">Completion that knows what set it off</a></li>
+		<li><a href="#ssl-aware">Editing that is right for SSL</a></li>
+		<li><a href="#keys-settings">Keys you can change</a></li>
+		<li><a href="#merges">Bringing the parallel work home</a></li>
+		<li><a href="#second-review">The second review: eight defects</a></li>
+		<li><a href="#whose-bug">Whose bug is it?</a></li>
+		<li><a href="#last-round">The last round</a></li>
+		<li><a href="#lsp033">A new language server, 0.33.0</a></li>
+		<li><a href="#filters">Filters out of sight, marks that say what a document is</a></li>
+		<li><a href="#lsp0331">The three defects, fixed upstream</a></li>
+		<li><a href="#checks">How it was checked</a></li>
+		<li><a href="#open">What is still open</a></li>
+	</ol>
+</nav>
+
+<article>
+
+<h2 id="brief"><span class="num ui">1</span>The brief</h2>
+<p>SSL Studio is a desktop IDE for STARLIMS SSL. Its code editor is Monaco, the editor inside VS Code, and its Markdown editor is CodeMirror. Everything it knows about SSL comes from one place, the <code>starlims-lsp</code> language server. The IDE writes no SSL parser, tokenizer or formatter of its own.</p>
+<p>The ask was plain: make editing feel like VS Code with IntelliSense, with Sublime Text's keys. One thing was explicitly out of scope. There would be no Copilot-style ghost text: AI while editing should be something you ask for on purpose, and AI integrations are a later project.</p>
+<p>The work went in rounds. Each started with an adversarial review, trying to break the editor the way a developer would by accident. The findings were fixed and the fixes checked before the next round began.</p>
+
+<h2 id="method"><span class="num ui">2</span>How the work was done</h2>
+<ul>
+	<li><strong>Real keys in a throwaway instance.</strong> Every review ran in an isolated copy of the app on its own port, with its own state folders and a scratch copy of the example project, so nothing typed could touch real work.</li>
+	<li><strong>Server or client?</strong> Before calling anything a language-server gap, the same request went to <code>starlims-lsp</code> 0.32.0 directly over standard input and output, sent the way a full client sends it. That check overturned several early conclusions.</li>
+	<li><strong>Look at it, at two widths and in two themes.</strong> Every visible change was looked at in the running app, 720 and 1400 pixels wide, light and dark, as the project's rules require.</li>
+	<li><strong>Desktop self-tests on two systems.</strong> Three self-tests drive the real desktop window on Linux: a plain run, a close-and-restore run, and a long cycle. The same three, with the unit suite, run in a Windows 11 virtual machine on the same computer.</li>
+</ul>
+
+<h2 id="round-one"><span class="num ui">3</span>Five everyday defects</h2>
+<p>The first review typed into the code editor the way a developer does. Five defects needed nothing from the server:</p>
+<ul>
+	<li><strong>The doubled colon.</strong> Typing <code>:wh</code> and taking <code>:WHILE</code> from the list left <code>::WHILE</code>. Punctuation typed just before a word is now replaced along with it when the chosen text opens with that punctuation.</li>
+	<li><strong>Format on save stole the undo.</strong> The formatter's edit over a whole procedure joined the last words typed, so one undo removed both. The edit is now made as the smallest changes that give the same text, as an undo step of its own, and the cursor stays on its line.</li>
+	<li><strong><kbd>Ctrl</kbd>+<kbd>M</kbd> was a trap.</strong> It was the editor's "Tab moves focus" toggle. Pressed by accident, <kbd>Tab</kbd> left the editor instead of indenting, with nothing on screen to say so. It now jumps to the matching bracket, as in Sublime Text.</li>
+	<li><strong>Unsaved scripts were second-class.</strong> A script with no file yet got no completion, diagnostics or outline. The server reads an <code>untitled:</code> document as it reads a file; only the client had held it back.</li>
+	<li><strong>New scripts were indented with spaces</strong> under a house style of tabs. A script with no indentation yet now takes the house style's.</li>
+</ul>
+
+<h2 id="sublime"><span class="num ui">4</span>Sublime Text's keys, without losing VS Code's shell <span class="adr ui">ADR 0034</span></h2>
+<p>The project's design precedents name VS Code for the IDE's shell and Sublime Text for editing keys. Monaco came with VS Code's keys, and the shell had taken three of Sublime Text's for itself: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> opened the Docs panel and <kbd>Ctrl</kbd>+<kbd>J</kbd> the bottom panel. The rule that settled it: while a text editor has the keyboard, a key that edits text does what it does in Sublime Text. Everywhere else, the shell's keys are VS Code's.</p>
+<dl class="keys">
+	<dt><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd></dt><dd>Duplicate the line or selection</dd>
+	<dt><kbd>Ctrl</kbd>+<kbd>J</kbd></dt><dd>Join lines</dd>
+	<dt><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>↑</kbd> / <kbd>↓</kbd></dt><dd>Move a line</dd>
+	<dt><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd></dt><dd>Split a selection into lines</dd>
+	<dt><kbd>Alt</kbd>+<kbd>F3</kbd></dt><dd>Select every occurrence</dd>
+	<dt><kbd>F9</kbd></dt><dd>Sort lines</dd>
+	<dt><kbd>Ctrl</kbd>+<kbd>K</kbd> <kbd>Ctrl</kbd>+<kbd>U</kbd> / <kbd>L</kbd></dt><dd>Upper and lower case</dd>
+	<dt><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd></dt><dd>Select to the bracket</dd>
+	<dt><kbd>Ctrl</kbd>+<kbd>R</kbd>, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></dt><dd>Go to a symbol, in the file or the workspace</dd>
+	<dt><kbd>Alt</kbd>+<kbd>-</kbd>, <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>-</kbd></dt><dd>Go back and forward</dd>
+</dl>
+<p>Two-key shortcuts had never worked. The shell read one key at a time and took the second press for itself: <kbd>Ctrl</kbd>+<kbd>K</kbd> <kbd>Ctrl</kbd>+<kbd>0</kbd> focused the side panel instead of unfolding. Now the second press reaches the editor. A setting swaps <kbd>Ctrl</kbd>+click and <kbd>Alt</kbd>+click between adding a cursor and going to a definition, as VS Code allows.</p>
+
+<h2 id="intellisense"><span class="num ui">5</span>Completion that knows what set it off</h2>
+<div class="compare ui">
+	<div class="before"><h4>Before</h4><p>After <code>oMail:</code> the list held the whole language: every keyword, function, class and snippet, some 520 names, the same anywhere in a script.</p></div>
+	<div class="after"><h4>After</h4><p>The members of <code>Email</code> alone, narrowed by what follows. After <code>:</code> at the start of a statement, the keywords alone. Nothing after a variable of unknown class.</p></div>
+</div>
+<p>This had first been put down to the server. It was the client's fault. The protocol lets a client say what set off a completion request: typing, a trigger character such as <code>:</code>, or a list that was not complete. The app never said, and never declared that it could. Told the trigger, the server answers precisely, including the range each keyword replaces.</p>
+<div class="callout lesson"><span class="label ui">Lesson</span><p>Ask the server the way a real client would before you blame it. A request sent without its context gets a generic answer, and that answer looks like a server limitation.</p></div>
+
+<h2 id="ssl-aware"><span class="num ui">6</span>Editing that is right for SSL</h2>
+<h3>Toggling a comment <span class="adr ui">ADR 0035</span></h3>
+<p>An SSL comment is <code>/* … ;</code>: it ends at the first semicolon, and every statement ends with one too. Monaco wraps a selection in a language's two comment tokens, so commenting out two statements made a comment that ended at the first statement's own <code>;</code>. The second statement stayed code, with a stray <code>;</code> after it. The app now toggles comments itself, using only the language configuration's tokens and the grammar's view of where comments already are. Each statement becomes its own comment, a statement spread over several lines is one comment, and an opener that would land inside a string is refused with a notice naming the line. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>/</kbd>, Sublime Text's block-comment key, came in once the command was right.</p>
+<h3>Indentation while typing comes from the formatter <span class="adr ui">ADR 0036</span></h3>
+<p>Enter after <code>:IF …;</code> left the new line level with the <code>:IF</code>, and <code>:ENDIF;</code> stayed where it was typed. VS Code's usual answer, a pair of patterns, would be a second, weaker account of SSL indentation beside the formatter's. Instead, after <kbd>Enter</kbd> the text above is given to the formatter with a probe statement at the end, and wherever the formatter puts the probe is the new line's indentation. Typing the <code>;</code> of <code>:ENDIF;</code> brings it back out the same way. The answer took 14 ms on a small script. Only leading whitespace changes, and only if the text it was computed for is still there.</p>
+<h3>A save formats changed lines the way "Format document" would <span class="adr ui">ADR 0037</span></h3>
+<p>Format on save asked the server to format only the changed ranges. The server's range format deliberately skips what it does only to whole documents: built-in function casing and blank lines between blocks. So a file saved as formatted changed again under "Format document", for example <code>SqlExecute</code> becoming <code>SQLExecute</code>. A save now formats the whole document and takes just the changed lines from the result, so the two always agree.</p>
+<h3>SQL data sources are SQL <span class="adr ui">ADR 0038</span></h3>
+<p>A <code>.ds</code> file is either SSL or SQL, and its name does not say which; an SQL one may open with a few SSL directives. Every data source opened as SSL. The server's lexical tokens already show what it read as SSL, so whatever stands below that, when it opens with an SQL statement, is now treated as SQL: SQL colours, an SQL outline, and SQL formatting that leaves the directives alone.</p>
+<h3>Smaller ones</h3>
+<ul>
+	<li><strong>A refused rename says so.</strong> Renaming to a keyword closed the box, changed nothing and said nothing. It now says the server would not rename it, and that nothing changed.</li>
+	<li><strong>One-line JSON is laid out</strong> by "Format document" (<span class="adr ui">ADR 0040</span>). A payload pasted as one line now opens out, while a document that already has lines keeps its layout.</li>
+</ul>
+
+<h2 id="keys-settings"><span class="num ui">7</span>Keys you can change <span class="adr ui">ADR 0039 · 0041</span></h2>
+<p>Settings gained "Editor keys": fifty of the code editor's commands, each with its key on this system, and Set and Clear buttons. A change becomes a rule in the editor's own key list, so its menus and command list show the new key. A desktop self-test caught a subtle bug that the browser hid. Monaco removes a key by rule only if it came with that key, so a cleared Sublime Text key went on working. The fix rebuilds the Sublime Text set without the user's changes each time.</p>
+<p>The Markdown Live editor then took the same keys for the thirty-six commands the two editors share, so a change applies in both. Markdown's own keys (bold, italic, link, checkbox and the rest) got their own list in Settings. Before, the editor keys were written in four places that had drifted apart.</p>
+
+<h2 id="merges"><span class="num ui">8</span>Bringing the parallel work home</h2>
+<p>Several pieces had been built in side sessions on their own branches. Reconciling them meant three merges, a renumbered ADR (the close work's 0034 became 0042, since the editor work already had a 0034), and adapting tests that had been written against the other branch's behaviour.</p>
+<ul class="timeline">
+	<li><time>Closing</time><strong>Closing keeps unsaved work and asks nothing</strong> <span class="adr ui">ADR 0042</span>. As in VS Code, unsaved text is kept in the app's state folder, written within a second of each change, and comes back unsaved when the folder is opened again. Nothing is written into the workspace.</li>
+	<li><time>Language server</time><strong>A save does not wait on a silent server.</strong> A server that ran but stopped answering kept <kbd>Ctrl</kbd>+<kbd>S</kbd> from writing the file at all. A save now waits two seconds at most, writes the file as typed, and says so once, with a restart button.</li>
+	<li><time>Language server</time><strong>"LSP not answering" is one fact, shown everywhere.</strong> After five seconds with no answer, the status bar turns red. The outlines, Problems, Procedures, Blocks and the call graph say so instead of "Reading…" forever. A late answer clears it by itself.</li>
+	<li><time>Narrow window</time><strong>A question stands over the notices.</strong> At 640 wide, a stack of error notices could hide a dialog's buttons. A question, prompt or pick is now drawn above them.</li>
+	<li><time>Self-test</time><strong>The long self-test reaches its end</strong> and closes by itself, in under a minute.</li>
+	<li><time>Follow-up</time><strong>A new document's language mode is kept</strong> when the window closes, even when the mode was chosen after the last key typed.</li>
+</ul>
+
+<h2 id="second-review"><span class="num ui">9</span>The second review: eight defects</h2>
+<p>With the merges in, a second adversarial review ran against the real formatters and language server. It found eight defects, all fixed in the app:</p>
+<ul>
+	<li><strong>Markdown formatting changed code samples</strong> <span class="adr ui">ADR 0045</span>. Prettier trims every line it prints, so <code>s := "x&nbsp;&nbsp;&nbsp;</code> in an SSL block lost the spaces in its string. Fenced blocks now keep their trailing spaces wherever nothing else in them changed.</li>
+	<li><strong>Oracle SQL was broken by the default dialect.</strong> A <code>.pkb</code> formatted as T-SQL came out as <code>v_due: = SYSDATE</code>. Oracle's files now use Oracle's dialect. Any SQL format that would split <code>:=</code>, <code>&lt;&gt;</code> or a bound <code>:name</code> is refused with a notice.</li>
+	<li><strong>Format Selection on SSL</strong> moved a correct line out of its block <span class="adr ui">ADR 0043</span>. Selected lines now come from a format of the whole document, as a save's do.</li>
+	<li><strong>Format Selection did nothing outside SSL.</strong> JSON, JavaScript, CSS and the rest now format a selection too.</li>
+	<li><strong>A Windows-1252 file could become UTF-8</strong> <span class="adr ui">ADR 0046</span>. Each save re-guessed the encoding from the bytes on disk. A save now writes the encoding the text was read in.</li>
+	<li><strong>Closing a tab mid-completion</strong> raised "Something went wrong" with a stack trace. Completion, rename and the schema hover now stop quietly.</li>
+	<li><strong>The size meter</strong> re-read the whole script on the main thread after every pause in typing: 770 ms on a 52,000-line script. It now reads only what changed.</li>
+	<li><strong>Two command palettes became one</strong> <span class="adr ui">ADR 0044</span>. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> and <kbd>F1</kbd> open one palette with the app's and the editor's commands, and <kbd>Ctrl</kbd>+<kbd>G</kbd> opens "Go to line" in the same box.</li>
+</ul>
+
+<h2 id="whose-bug"><span class="num ui">10</span>Whose bug is it?</h2>
+<p>The second review had listed several findings as the language server's. That list was challenged: the Markdown item plainly was not the server's responsibility. So each finding was reviewed again, this time against the server's own specification at 0.32.0 rather than against what the IDE would have liked. Three broke a rule the specification states, and were reported upstream:</p>
+<ul>
+	<li><a href="https://github.com/mahoskye/starlims-lsp/issues/378">mahoskye/starlims-lsp#378</a>. Rename accepts <code>.T.</code>, <code>.F.</code>, <code>.AND.</code>, <code>.OR.</code> and <code>.NOT.</code> and rewrites every one, although the specification lists them as not renameable.</li>
+	<li><a href="https://github.com/mahoskye/starlims-lsp/issues/379">mahoskye/starlims-lsp#379</a>. Signature help and the SQL-placeholder hover count a token's end in bytes against character columns, so a <code>°</code> or <code>µ</code> in a string shifts them.</li>
+	<li><a href="https://github.com/mahoskye/starlims-lsp/issues/380">mahoskye/starlims-lsp#380</a>. <code>Me:</code> inside a class written in the workspace lists none of the class's own members; only the built-in classes are looked up.</li>
+</ul>
+<p>The rest were either what the specification asks for or the app's own. One record, ADR 0043, had called the range format's first-line indentation a server defect; the specification calls it intended, and the record now carries a dated correction.</p>
+<div class="callout lesson"><span class="label ui">Lesson</span><p>Quote the specification's line before calling something a server defect. Keep the app's own findings out of a list addressed to the server.</p></div>
+
+<h2 id="last-round"><span class="num ui">11</span>The last round: review every area, fix what's broken, add what's missing</h2>
+<p>The final goal was broader: review each area again, adversarially, fix everything that needed it, and add what was missing. It is commit <code>86db205</code>.</p>
+
+<h3>Formatting says what happened</h3>
+<ul>
+	<li><strong>"Format document" on SSL that changed nothing</strong> used to say nothing. Now it gives the server's reason when it gave one. Otherwise it says the file has errors that can stop the formatter, or that it is already formatted.</li>
+	<li><strong>A Markdown document whose one code block could not be formatted</strong> said "Could not format", though the document had been formatted. It now names the file, says it was formatted, and says which block was not.</li>
+	<li><strong>An SQL data source's formatting error</strong> named a line counted from the start of the SQL, not of the file. It now names the line of the file.</li>
+	<li><strong>Indented code blocks</strong> (four spaces, no fence) now keep their trailing spaces like fenced ones. Prettier's own Markdown reader finds them.</li>
+</ul>
+
+<h3>Finding a procedure by its initials <span class="adr ui">ADR 0047</span></h3>
+<p>In VS Code, typing <code>awd</code> finds <code>AddWorkingDays</code>. Here it found nothing: the server matches part of a name only, and its catalog says fuzzy matching is not provided. The app now does the loose matching itself, ranking the way quick open ranks files: the exact name, its start, the starts of its words, anywhere in it, then letters in order.</p>
+<p>The first version matched over the server's answer for an empty query. In the example workspace it listed copies of <code>AddWorkingDays</code> from two large generated files and missed the real one in <code>WorkCalendar.ssl</code>. Reading the server's code explained it. The answer stops at 500 symbols, open documents included, and they are drawn from a Go map in no fixed order, so each search sees a different 500. A list that finds some copies of a name and misses others is worse than an empty one.</p>
+<p>The rule now: initials are matched only over a list known to be complete. That is the server's full answer when it came back under the cap. Past the cap, it is the open documents' own symbol lists, which the server always gives in full. If nothing matches in a workspace that large, the box says that initials cover only open files and that typing part of the name searches everything. With that, <code>awd</code> puts <code>WorkCalendar.ssl</code>'s procedure first, and <kbd>Enter</kbd> lands on its <code>:PROCEDURE</code> line.</p>
+
+<h3>Indentation you can see and change <span class="adr ui">ADR 0048</span></h3>
+<p>The status bar now says "Spaces: 4" or "Tab size: 4", as VS Code does. Its menu offers spaces or tabs, the tab size, converting the file's indentation, and detecting it from the content. A narrow window drops that item, and the line-ends item, from the status bar. The palette had no way to reach either, so it gained "Change Indentation…" and "Change End of Line Sequence…". From the palette, the menu opens at the top of the window, where the palette was.</p>
+
+<h3>Typing in a very large script</h3>
+<p>On a generated 52,680-line script, typing lagged. Measuring long tasks in the page pointed to three causes:</p>
+<ul>
+	<li>The outline worked out which procedure holds the cursor once per row instead of once per cursor move. With 9,200 procedures, that ran 9,200 times on every key.</li>
+	<li>The Agent panel recomputed its context, which scans the whole file, on every key. It now waits for a 250 ms pause.</li>
+	<li>Every key rewrote the document's unsaved flag even when it had not changed, which still woke everything reading it. It is now written only when it changes.</li>
+</ul>
+<figure class="bar ui">
+	<figcaption>Time to type 12 keys into the 52,680-line script</figcaption>
+	<div class="barrow"><span>Before</span><div class="track"><div class="fill old" style="width: 100%">3.6 s</div></div></div>
+	<div class="barrow"><span>After</span><div class="track"><div class="fill new" style="width: 52.8%">1.9 s</div></div></div>
+</figure>
+<p>A 6,585-line script now has no long tasks per key at all. On the 52,680-line one, about 40 ms of editor rendering and 45 ms of layout remain per key, most of it from the roughly 18,000 outline rows on the page.</p>
+
+<h3>The language server session</h3>
+<ul>
+	<li>A document's symbols are now asked for once per version and shared by the outline, breadcrumbs and search, instead of once per asker. The cache clears when the server restarts.</li>
+	<li>Symbol search no longer lists the temporary copies the app has the server read during a format or a check.</li>
+	<li>Findings the server sends for a document after it closed are no longer put back.</li>
+</ul>
+
+<h3>Smaller additions</h3>
+<ul>
+	<li><strong><kbd>Ctrl</kbd>+<kbd>.</kbd></strong> did nothing and said nothing; the server offers no quick fixes. It now says "No code actions available", as VS Code does.</li>
+	<li><strong>Enter after an opening fence</strong> in the Live editor opens a line inside and puts the closing fence below it, as Obsidian does. Before, every line after an unclosed fence read as code.</li>
+	<li><strong>A code block's toolbar</strong> broke its button names letter by letter in a narrow window. Words now stay whole and wrap as buttons.</li>
+</ul>
+
+<h3>The page that scrolled</h3>
+<p>Opening a status bar menu lifted the whole app 155 pixels, pushing the menu bar off the top and leaving a blank band under the status bar. The cause was a one-pixel line meant for screen readers, inside the outline's "you are here" marker. It was absolutely positioned and escaped the outline's scroll clip, so it sat at y 954 in an 800-pixel window and made the page taller than the window. Any scroll-into-view could then move the page. The scrolling trees now clip what their rows hold, and the page stays exactly the window's height.</p>
+
+<h3>A test that read other sessions' work</h3>
+<p>The documentation-table check timed out because it read every Markdown file under the repository, including 1,919 in old side-session worktrees that git ignores. It now skips those folders, as it already skipped the build and self-test ones, and runs in under two seconds.</p>
+
+<h2 id="lsp033"><span class="num ui">12</span>A new language server, 0.33.0</h2>
+<p>As the last round was committed, <code>starlims-lsp</code> 0.33.0 came out. It answers the rest of a request the IDE had made after the demo project validated clean and then failed to run: three things the server accepted that STARLIMS does not (request L8, <a href="https://github.com/mahoskye/starlims-lsp/issues/372">mahoskye/starlims-lsp#372</a>). Each was settled by a run on STARLIMS 12:</p>
+<ul>
+	<li><strong>A guard in <code>IIf</code> that guards nothing</strong> is a new warning, <code>iif_guard_ineffective</code>. <code>IIf</code> works out both of its value arguments, so <code>IIf(Empty(aDates), CToD(""), aDates[1])</code> reads <code>aDates[1]</code> even when the list is empty, and raises.</li>
+	<li><strong>A variable from an include, read in a procedure entered by name,</strong> gets no rule, by the server's decision D22. A procedure entered by its three-part name reads variables declared anywhere up the call stack, so one call site cannot show whether the name is there.</li>
+	<li><strong><code>doproc_in_class</code> stands.</strong> The sandbox runner had run what STARLIMS refuses to compile.</li>
+</ul>
+<p>Four more <code>DoProc</code> shapes, <code>DoProc("Name",)</code> among them, and a quoted <code>:INHERIT</code> parent now fail validation too. Bringing it in meant building 0.33.0 from its tag and pinning it. The demo project stays clean under <code>--validate --strict</code>, and the suites pass on both systems. The IDE keeps no list of diagnostic codes, so the warning needed no code of its own: it shows in the editor and in Problems as the server sends it. Seeing it there turned up two small defects, fixed in commit <code>a36275a</code>:</p>
+<ul>
+	<li>The status bar's Problems item was read out as "0 errors, 1 warnings". It now says "1 warning".</li>
+	<li>In a narrow Problems list, the 21-character code took the whole row and the message had no width at all. Below 420 pixels the code and position now go on a line under the message.</li>
+</ul>
+<p>The three defects reported from the second review (<a href="https://github.com/mahoskye/starlims-lsp/issues/378">#378</a>, <a href="https://github.com/mahoskye/starlims-lsp/issues/379">#379</a>, <a href="https://github.com/mahoskye/starlims-lsp/issues/380">#380</a>) are not in this release. They came in 0.33.1 later the same day (section 14).</p>
+
+<h2 id="filters"><span class="num ui">13</span>Filters out of sight, marks that say what a document is <span class="adr ui">ADR 0049 · 0050 · 0051</span></h2>
+<p>With the new server in, the user looked over the rest of the app and asked for six things before any of this was written up for the public. Three were about how the side panels read, one was a defect that made a table hard to use, and two were for the roadmap.</p>
+
+<h3>A filter is out of sight until it is asked for</h3>
+<p>An empty filter box sat at the top of most lists: the Explorer's Outline, the Document panel, Docs, Health, the table view, the list of a schema's uses. Docs and Health also kept a row of filter pills on show, and the plan and the call graph a "Find a step" box that cut the plan's title short. A box nobody is typing in still takes a row and draws the eye.</p>
+<p>Now each list's own menu has "Filter…", and Ctrl+F inside the list does the same, as in VS Code's trees. The box opens with the keyboard in it. Left empty, it goes again when the keyboard leaves it, or on Escape, which hands the keyboard back to the list. While it holds text it stays, so what is hiding rows is always in sight. Docs' and Health's pills became ticked items in a funnel menu. A filter that is on shows under the title as a chip that names it and turns it off with a click, and the funnel fills in the accent colour. Search, Reference and the pickers keep their boxes: finding is what they are for. In the table, Ctrl+F stays Find, so the row filter lives in the table's ⋯ menu.</p>
+
+<h3>Docs marks a document by its kind</h3>
+<p>Every Markdown file in the Docs panel had the same mark, so a ticket, a spec, a catalog and a decision looked alike. The panel already knows what each one is, from its folder and its name. Each kind now has its own glyph from the icon set the app already uses: a bulleted list for a catalog, a task list for a ticket, a laid-out sheet for a spec, scales for a decision, a question mark for a question. A robot marks the Agent's instructions, a dashboard the project's state, a table a registry. None of them repeats an activity bar icon, and the colour still follows the file type.</p>
+<p>The first choice for a spec was a ruler. Drawn large it read well. At row size it was a thin sliver, so the spec mark changed after a look at the real panel.</p>
+
+<h3>A checkbox you can hit</h3>
+<p>The user said a table's row checkbox was extremely hard to target. Measured, it was 2.6 pixels wide. The selection column was meant to be 56 pixels, but that rule lived in a stylesheet the build places in a chunk that loads before the app's own. An older 32-pixel rule for the same selector won, and the row number squeezed the checkbox to a sliver. The column is now 60 pixels, set in one place. Each checkbox is 16 pixels with a 24-pixel target around it, so a click near the box still ticks it, and Shift still selects a run. A new test fails if an editor's stylesheet sets anything the app's stylesheet sets differently. Putting the old rule back makes it fail.</p>
+<p>Trying it by hand turned up a worse problem. Ticking the first row brought a bar of actions in above the table, which pushed every row down about 100 pixels. The next click meant for a checkbox landed on that bar, on its Delete button. The bar now sits under the rows, so ticking a row moves nothing.</p>
+
+<h3>Smaller ones</h3>
+<ul>
+	<li><strong>The status bar starts with the services:</strong> the language server, the Agent, then the Git branch and the Problems counts (ADR 0049).</li>
+	<li><strong>Docs' state dots line up.</strong> In a narrow panel the dot for work under way has a ring, which needed 3 pixels each side. The other dots had none, so they sat 3 pixels to the right. All dots now keep that room and share one column.</li>
+	<li><strong>A menu with ticks lines up its words.</strong> "Filter…" sat further left than the ticked items below it. Every item in such a menu now keeps the tick's room.</li>
+	<li><strong>On the roadmap:</strong> an adversarial review of its own for each panel the editor work did not cover (Explorer, Docs, the Document panel, Palette, Reference, Search, Source control, History, Agent, Health, Output) and for the Settings dialog.</li>
+</ul>
+
+<h2 id="lsp0331"><span class="num ui">14</span>The three defects, fixed upstream</h2>
+<p>Later the same day, <code>starlims-lsp</code> 0.33.1 closed all three issues from the second review. Nothing in the IDE had to change, since it applies what the server answers. What changed is how the editor behaves:</p>
+<ul>
+	<li><strong>Rename on <code>.T.</code></strong> now says "Nothing to rename here." Renaming a variable called <code>t</code> edits the variable and leaves every <code>.T.</code> alone.</li>
+	<li><strong>After <code>Left("25 °C",</code></strong> signature help moves to <code>nLength</code> at the comma itself. A SQL placeholder after <code>'°C → µg/L'</code> hovers from its first letter. One on the second line of a multi-line string hovers too, which it never had.</li>
+	<li><strong><code>Me:</code> in a class of the workspace</strong> lists the class's fields and methods. Accepting a method writes its call with the parameters as placeholders: <code>Me:Bump(nBy)</code>, with <code>nBy</code> selected.</li>
+</ul>
+<p>Six new tests ask the pinned server each case. Run against 0.33.0, every one of them fails, so they will notice if a defect comes back.</p>
+
+<h2 id="checks"><span class="num ui">15</span>How it was checked</h2>
+<ul>
+	<li><strong>Unit tests</strong> grew from 3,896 at the start to 4,153 on Linux once 0.33.1 was in, with 2 skipped and none failing, and the type check clean throughout. In the Windows 11 VM at that point, with 0.33.1 built for Windows, it had 4,121 passing, 35 skipped and none failing.</li>
+	<li><strong>Desktop self-tests</strong> (plain, close-and-restore, long cycle) pass on Linux and in the Windows VM, all three with 0.33.1 on both.</li>
+	<li><strong>One Windows-only failure</strong> turned up on the way: a closing test that opens a folder, and so starts the language server, took 5.3 seconds under the whole suite against a 5-second limit. It passed three times out of three on its own, and its limit is now 30 seconds.</li>
+	<li><strong>In the running app</strong>, each visible change was looked at 720 and 1400 wide, light and dark, by real clicks and keys where the browser tool can send them, and by dispatched key events where it cannot.</li>
+</ul>
+
+<h2 id="open"><span class="num ui">16</span>What is still open</h2>
+<ul>
+	<li><strong>Initials in a large workspace</strong> cover open files only. If the server ever matches letters in order itself, as the protocol suggests for <code>workspace/symbol</code>, that limit goes away with no change here.</li>
+	<li><strong>Typing in a 50,000-line script</strong> still costs about 85 ms per key, most of it from the outline's many rows.</li>
+	<li><strong>Not tried on a Mac.</strong> Sublime Text's Mac keys are set, but no one has pressed them.</li>
+	<li><strong>The panels and the Settings dialog</strong> have not had a review of their own yet. They are on the roadmap.</li>
+</ul>
+
+</article>
+
+<footer class="ui">
+	<p>Written from the commit history of <code>editor-everyday-fixes</code> and the checks run in this session. The decision records are in <a href="https://github.com/mahoskye/ssl-studio/tree/main/docs/adr"><code>docs/adr/</code></a> of the repository.</p>
+	<p><a href="../">All writing</a> · <a href="https://github.com/mahoskye/ssl-studio">The repository</a> · <a href="https://github.com/mahoskye/ssl-studio/pull/5">Pull request 5</a> · <a href="https://github.com/mahoskye/starlims-lsp/issues/378">#378</a> · <a href="https://github.com/mahoskye/starlims-lsp/issues/379">#379</a> · <a href="https://github.com/mahoskye/starlims-lsp/issues/380">#380</a></p>
+</footer>
+</div>
+
+<script>
+(() => {
+	const root = document.documentElement;
+	const button = document.querySelector(".theme-toggle");
+	let saved = null;
+	try { saved = localStorage.getItem("blog-theme"); } catch {}
+	if (saved === "light" || saved === "dark") root.dataset.theme = saved;
+	const current = () => root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+	const label = () => { button.textContent = current() === "dark" ? "Light" : "Dark"; };
+	label();
+	button.addEventListener("click", () => {
+		const next = current() === "dark" ? "light" : "dark";
+		root.dataset.theme = next;
+		try { localStorage.setItem("blog-theme", next); } catch {}
+		label();
+	});
+	matchMedia("(prefers-color-scheme: dark)").addEventListener("change", label);
+})();
+</script>
+</body>
+</html>

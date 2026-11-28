@@ -38,6 +38,8 @@ import { docsGoverningFile, ticketForFile } from "../../shared/workContext";
 import { TableView } from "./TableView";
 import { FileView } from "./FileView";
 import { useGitMarks } from "./gitMarks";
+import { installCommentCommands } from "./sslComments";
+import { installFormatterIndent } from "./sslIndent";
 import { observeMarkerHoverSeverity } from "./hoverSeverity";
 import { Start } from "../Start";
 import { FileMark } from "../FileMark";
@@ -334,6 +336,8 @@ export function EditorGroup(props: { index: number }) {
 			renderWhitespace: "selection",
 			"semanticHighlighting.enabled": true,
 			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
+			// Ctrl+click adds a cursor, as in Sublime Text (ADR 0034); the editor's own default is Alt+click.
+			multiCursorModifier: state.settings.ctrlClickAddsCursor === false ? "alt" : "ctrlCmd",
 			fixedOverflowWidgets: true,
 			// The last lines can be brought up to the top of the view, to be read there and not at the window's foot.
 			scrollBeyondLastLine: true,
@@ -405,6 +409,10 @@ export function EditorGroup(props: { index: number }) {
 		// The code's own face, read before any custom font overrides.
 		codeFont = editor.getOption(monaco.editor.EditorOption.fontFamily);
 		const listKeys = continueLists(editor);
+		// "Toggle comment" as a script needs it, under the editor's own commands and keys.
+		const commentCommands = installCommentCommands(editor);
+		// A new line, and a statement as it is ended, indented as the formatter indents them.
+		const formatterIndent = installFormatterIndent(editor);
 		const stopHoverSeverity = observeMarkerHoverSeverity(editor);
 		setRoomy(editor.getLayoutInfo().width >= MINIMAP_FROM);
 		editor.onDidLayoutChange((layout) => setRoomy(layout.width >= MINIMAP_FROM));
@@ -473,6 +481,8 @@ export function EditorGroup(props: { index: number }) {
 			stop();
 			stopFocus();
 			listKeys.dispose();
+			commentCommands.dispose();
+			formatterIndent.dispose();
 			stopHoverSeverity();
 			disposeGitMarks?.();
 			setMountedEditor(undefined);
@@ -528,9 +538,10 @@ export function EditorGroup(props: { index: number }) {
 			minimapEnabled: minimap(),
 			wordWrap: state.settings.wordWrap,
 			inlayHints: state.settings.inlayHints,
+			ctrlClickAddsCursor: state.settings.ctrlClickAddsCursor,
 			rulerList: rulers(),
 		}),
-		({ ed, index, path, monacoShown, fontSize, codeFontSetting, minimapEnabled, wordWrap, inlayHints, rulerList }) => {
+		({ ed, index, path, monacoShown, fontSize, codeFontSetting, minimapEnabled, wordWrap, inlayHints, ctrlClickAddsCursor, rulerList }) => {
 			if (!ed) return;
 			const activeCodeFont = codeFontSetting?.trim() ? resolveFontStack(codeFontSetting, DEFAULT_CODE_FONT) : codeFont || undefined;
 			const options: monaco.editor.IEditorOptions & monaco.editor.IGlobalEditorOptions = {
@@ -539,6 +550,7 @@ export function EditorGroup(props: { index: number }) {
 				minimap: { enabled: minimapEnabled },
 				wordWrap: wordWrap ? "on" : "off",
 				inlayHints: { enabled: inlayHints === false ? "off" : "on" },
+				multiCursorModifier: ctrlClickAddsCursor === false ? "alt" : "ctrlCmd",
 				rulers: rulerList,
 				lineNumbers: "on",
 				lineDecorationsWidth: 10,

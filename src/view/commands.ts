@@ -6,6 +6,8 @@ import { ask, browseWorkspaceFile, choose, quickPick, type QuickPickOption } fro
 import { activeEditor, lastActiveMarkdownPath } from "./editor/EditorGroup";
 import { formatFenceInModel, formatNonSslModel, hadRecentFormatError, languageName } from "./editor/languages";
 import { pickLanguageMode } from "./editor/languagePicker";
+import { displayEditorKey, editorKeysOf, editorTakesKey, liveTakesKey, markdownKeysNow } from "./editor/editorKeys";
+import { editorCommandLabel, isEditorCommand, LIVE_EDITOR_COMMANDS, sentenceCase } from "../shared/editorKeymap";
 import { activeLiveEditor, isInMarkdownTextEditor, saveMarkdownSyncAnchor } from "./editor/liveBridge";
 import { linkWritten } from "../shared/docLinks";
 import { folderParts } from "../shared/docSections";
@@ -18,7 +20,7 @@ import { docsGoverningFile } from "../shared/workContext";
 import { runMonacoMarkdownAction } from "./editor/markdownKeys";
 import { backend, fileExists, inApp } from "./backend";
 import { monaco } from "./editor/monaco";
-import { session } from "./lsp/session";
+import { session, sslFormatFailure } from "./lsp/session";
 import { symbols } from "./panels/Objects";
 import { symbolPath } from "./editor/regions";
 import { openStyleProfile } from "./StyleProfile";
@@ -30,7 +32,7 @@ import { askAbout, attachFileToAgent } from "./agent/Agent";
 import { startTidy } from "./agent/tidy";
 import { baseName, dirName, isInside, joinPath, relativePath, relativeTo } from "../shared/paths";
 import { defaultLayout, type DocFile, type Settings } from "../shared/protocol";
-import { menuForLetter, replaceErDiagramBlock, shouldLetEditorHandleKey } from "../shared/menuBar";
+import { EDITOR_CHORD_WAIT, menuForLetter, replaceErDiagramBlock, shouldLetEditorHandleKey, startsEditorChord } from "../shared/menuBar";
 import { resolveMarkdownMode, resolvePlanMode, resolveTableTextMode } from "../shared/viewModes";
 import { installRecentTabs, stepRecent } from "./recentTabs";
 import { goAlong } from "./navigation";
@@ -71,7 +73,7 @@ import {
 	updateManifest,
 } from "./projectDocs";
 import { insertCalloutInteractive, insertImageInteractive, insertMarkdownTemplate, manageTemplates, newNoteFromTemplate } from "./templater";
-import { displayKey, effectiveKeys, isModifierKey, keyNamesForPlatform, keysOf, type KeyPress } from "./keys";
+import { displayKey, effectiveKeys, isModifierKey, keyNamesByLetter, keyNamesForPlatform, keysOf, type KeyPress } from "./keys";
 import { modalOpen, setFocusFallback } from "./modal";
 import { noteUsed } from "./quickRank";
 import { stepScale, UI_SCALE } from "./uiScale";
@@ -96,6 +98,7 @@ import {
 	notify,
 	openFile,
 	openFolder,
+	openLinePicker,
 	openToSide,
 	previousTab,
 	reopenClosedTab,
@@ -305,7 +308,8 @@ export const commands: Command[] = [
 	{ id: "quick-open", label: "Go to file…", run: () => setState((s) => { s.quickPick = "files"; }) },
 	{ id: "quick-outline", label: "Go to symbol in file…", detail: "Procedures, regions, headings, or sections in the active file", run: () => (activePathNow() ? setState((s) => { s.quickPick = "outline"; }) : notify("Open a file first.")) },
 	{ id: "symbols", label: "Go to symbol…", detail: "Anywhere in the workspace", run: () => setState((s) => { s.quickPick = "symbols"; }) },
-	{ id: "command-palette", label: "Show all commands", run: () => setState((s) => { s.quickPick = "commands"; }) },
+	{ id: "command-palette", label: "Show all commands", detail: "The app's, and the open text editor's", run: () => setState((s) => { s.quickPick = "commands"; }) },
+	{ id: "go-to-line", label: "Go to line…", detail: "In the open file", run: () => openLinePicker() },
 	{ id: "new-untitled", label: "New untitled file", detail: "A floating buffer that stays in memory until saved", run: () => void newUntitled() },
 	{ id: "new-file", label: "New file or folder…", detail: "In the Explorer's folder, or beside the open file", run: () => void explorerNewFile() },
 	{ id: "rename-file", label: "Rename…", detail: "The Explorer's file, or the open one", run: () => void explorerRename() },
@@ -339,13 +343,13 @@ export const commands: Command[] = [
 	{ id: "toggle-markdown-mode", label: "Toggle Markdown Live / Read view", detail: "Switch a Markdown note between Live Preview editing and Reading view", run: toggleMarkdownMode },
 	{ id: "split-markdown-read", label: "Markdown: Split Read preview to side", detail: "Keep editing in this group while previewing Read view side-by-side", run: () => void splitMarkdownRead() },
 	{ id: "md-insert-footnote", label: "Markdown: Insert footnote", detail: "Insert the next numbered [^N] footnote reference and definition", run: () => runMarkdownEdit("md-insert-footnote") },
-	{ id: "md-bold", label: "Markdown: Toggle bold", detail: "Wrap or unwrap selection with ** (Ctrl+B in Markdown)", run: () => runMarkdownEdit("md-bold") },
-	{ id: "md-italic", label: "Markdown: Toggle italic", detail: "Wrap or unwrap selection with * (Ctrl+I in Markdown)", run: () => runMarkdownEdit("md-italic") },
-	{ id: "md-strike", label: "Markdown: Toggle strikethrough", detail: "Wrap or unwrap selection with ~~ (Ctrl+Shift+X in Markdown)", run: () => runMarkdownEdit("md-strike") },
-	{ id: "md-code", label: "Markdown: Toggle inline code", detail: "Wrap or unwrap selection with ` (Ctrl+` in Markdown)", run: () => runMarkdownEdit("md-code") },
-	{ id: "md-highlight", label: "Markdown: Toggle highlight", detail: "Wrap or unwrap selection with == (Ctrl+Alt+H in Markdown)", run: () => runMarkdownEdit("md-highlight") },
-	{ id: "md-link", label: "Markdown: Insert link", detail: "Insert [label](url) at selection (Ctrl+K in Markdown)", run: () => runMarkdownEdit("md-link") },
-	{ id: "md-checkbox", label: "Markdown: Toggle checkbox", detail: "Cycle task checkbox on the current line(s) (Alt+C / Ctrl+Alt+Enter in Markdown)", run: () => runMarkdownEdit("md-checkbox") },
+	{ id: "md-bold", label: "Markdown: Toggle bold", detail: "Wrap or unwrap selection with **", run: () => runMarkdownEdit("md-bold") },
+	{ id: "md-italic", label: "Markdown: Toggle italic", detail: "Wrap or unwrap selection with *", run: () => runMarkdownEdit("md-italic") },
+	{ id: "md-strike", label: "Markdown: Toggle strikethrough", detail: "Wrap or unwrap selection with ~~", run: () => runMarkdownEdit("md-strike") },
+	{ id: "md-code", label: "Markdown: Toggle inline code", detail: "Wrap or unwrap selection with `", run: () => runMarkdownEdit("md-code") },
+	{ id: "md-highlight", label: "Markdown: Toggle highlight", detail: "Wrap or unwrap selection with ==", run: () => runMarkdownEdit("md-highlight") },
+	{ id: "md-link", label: "Markdown: Insert link", detail: "Insert [label](url) at selection", run: () => runMarkdownEdit("md-link") },
+	{ id: "md-checkbox", label: "Markdown: Toggle checkbox", detail: "Cycle task checkbox on the current line(s)", run: () => runMarkdownEdit("md-checkbox") },
 	{ id: "md-insert-template", label: "Markdown: Insert template…", detail: "Expand a workspace or built-in Templater template at the cursor", run: () => void insertMarkdownTemplate() },
 	{ id: "md-new-from-template", label: "Markdown: New note from template…", detail: "Create a new note from a customizable Templater template", run: () => void newNoteFromTemplate() },
 	{ id: "md-manage-templates", label: "Markdown: Customize or create template…", detail: "Copy a built-in template or create a custom one in docs/templates/", run: () => void manageTemplates() },
@@ -365,6 +369,9 @@ export const commands: Command[] = [
 	// The code
 	{ id: "blocks", label: "Toggle blocks view", detail: "A plan shows its chart; Markdown shows rendered", run: toggleVisual },
 	{ id: "change-language-mode", label: "Change Language Mode…", detail: "Select syntax highlighting and language mode for the active code editor", run: () => void pickLanguageMode() },
+	// The status bar has these too, but a narrow window leaves its items out. Loaded when asked for: the status bar loads this file.
+	{ id: "change-indentation", label: "Change Indentation…", detail: "Tabs or spaces, the tab size, converting the file's indentation, or detecting it from the content", run: () => void import("./StatusBar").then((m) => m.chooseIndentation()) },
+	{ id: "change-line-ends", label: "Change End of Line Sequence…", detail: "LF or CRLF for every line of the active file", run: () => void import("./StatusBar").then((m) => m.chooseLineEnds()) },
 	{ id: "format", label: "Format document", detail: "SSL via language server; SQL, JS/TS, XML/XFD, HTML, CSS, JSON, YAML & Markdown", run: () => void formatActiveDocument() },
 	{ id: "copy-designer", label: "Copy for Designer", detail: "Selection, procedure or file, formatted", run: () => void copyForDesigner() },
 	{ id: "copy-code-citation", label: "Copy Markdown code citation", detail: "Copy a [file#L10-L25](path#L10-L25) link for the active file and selection", run: () => void copyCodeCitation(false) },
@@ -373,7 +380,6 @@ export const commands: Command[] = [
 	{ id: "wrap-region", label: "Wrap in region…", detail: "The selected lines", run: () => void wrapInRegion() },
 	{ id: "insert-banner", label: "Insert file banner", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "banner")!) },
 	{ id: "insert-procedure", label: "Insert procedure", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "procedure")!) },
-	{ id: "editor-commands", label: "Show editor commands…", detail: "The text editor's own list", run: () => (activeLiveEditor() ? setState((s) => { s.quickPick = "commands"; }) : activeEditor()?.trigger("app", "editor.action.quickCommand", null)) },
 	// The project
 	{ id: "setup-project", label: "Set up project", detail: "Settings, README, AGENTS", run: () => void setUpProject() },
 	{ id: "undo-setup-project", label: "Undo set up project", detail: "Removes what it created and nobody has changed since", run: () => void undoSetUp() },
@@ -512,6 +518,62 @@ export const commands: Command[] = [
 ];
 
 /** The commands run from the command list this session, newest first (ten are kept). */
+/** What the palette calls one of the text editor's commands, so that it is not taken for one of the app's. */
+export const EDITOR_PREFIX = "editor:";
+
+/**
+ * The editor's commands that the app has a command of its own for, or that are this list: they would be in it twice.
+ * The editor's theme switch is not for an app with themes of its own.
+ */
+const NOT_LISTED_FROM_THE_EDITOR = new Set([
+	"editor.action.quickCommand",
+	"editor.action.gotoLine",
+	"editor.action.quickOutline",
+	"editor.action.formatDocument",
+	"editor.action.toggleHighContrast",
+	"editor.action.inspectTokens",
+]);
+
+/**
+ * The open text editor's commands, for the command list beside the app's own (ADR 0044): what VS Code lists in its
+ * one palette, and what F1 opened in a list of its own here, which Ctrl+Shift+P did not have. Named as Settings and
+ * the menus name them, with the keys they have now. Empty with no text editor open.
+ */
+export function editorCommands(): Command[] {
+	const live = activeLiveEditor();
+	const editor = live ? null : activeEditor();
+	const own = new Set(commands.map((c) => c.label.toLowerCase()));
+	const entry = (id: string, label: string, run: () => void): Command | null => {
+		if (NOT_LISTED_FROM_THE_EDITOR.has(id)) return null;
+		const name = isEditorCommand(id) ? editorCommandLabel(id) : sentenceCase(label);
+		if (!name || own.has(name.toLowerCase())) return null;
+		return { id: EDITOR_PREFIX + id, label: name, run };
+	};
+	if (live) return LIVE_EDITOR_COMMANDS.map((id) => entry(id, editorCommandLabel(id), () => (live.focus(), live.runAction(id)))).filter((c): c is Command => Boolean(c));
+	if (!editor) return [];
+	return editor
+		.getSupportedActions()
+		.filter((action) => action.label && action.isSupported())
+		.map((action) =>
+			entry(action.id, action.label, () => {
+				editor.focus();
+				void action.run();
+			}),
+		)
+		.filter((c): c is Command => Boolean(c));
+}
+
+/** One of the editor's commands' keys as the palette shows them: as Settings has them, or as the editor has them. */
+function editorKeysShown(id: string): string {
+	if (isEditorCommand(id)) return editorKeysOf(id, { map: keymap(), chosen: state.settings.keys ?? {} }).map(displayEditorKey).join(", ");
+	const service = (activeEditor() as unknown as { _standaloneKeybindingService?: { lookupKeybinding(id: string): { getLabel(): string | null } | undefined } } | null)?._standaloneKeybindingService;
+	try {
+		return service?.lookupKeybinding(id)?.getLabel() ?? "";
+	} catch {
+		return "";
+	}
+}
+
 let recent: string[] = [];
 export const recentCommands = () => recent;
 
@@ -542,7 +604,14 @@ async function formatActiveDocument() {
 		}
 		const editor = activeEditor();
 		if (!editor) return;
+		const before = doc.model.getAlternativeVersionId();
 		await editor.getAction("editor.action.formatDocument")?.run();
+		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== before) return;
+		// Nothing changed: said, as it is for the other languages, and with the reason where the server gave one.
+		const failed = sslFormatFailure(doc.model);
+		if (failed) return notify(`Could not format ${displayName(path)}: ${failed}`, "error");
+		const errors = monaco.editor.getModelMarkers({ resource: doc.model.uri }).some((marker) => marker.severity === monaco.MarkerSeverity.Error);
+		notify(errors ? `${displayName(path)} was not changed. It has errors, which can keep the language server from formatting it.` : `${displayName(path)} is already formatted.`);
 		return;
 	}
 	if (!canFormatNonSsl(languageId, path)) {
@@ -564,7 +633,7 @@ async function formatActiveDocument() {
 
 /** Runs a command by id. `remember` puts it among the recently used, for the command list. */
 export function runCommand(id: string, options: { remember?: boolean } = {}) {
-	const command = commands.find((c) => c.id === id);
+	const command = commands.find((c) => c.id === id) ?? (id.startsWith(EDITOR_PREFIX) ? editorCommands().find((c) => c.id === id) : undefined);
 	if (!command) return;
 	if (options.remember) recent = noteUsed(recent, id);
 	command.run();
@@ -1739,6 +1808,10 @@ const KEYS: Record<string, string> = {
 	"ctrl+p": "quick-open",
 	"ctrl+shift+o": "quick-outline",
 	"ctrl+t": "symbols",
+	// Sublime Text's keys for the same two (ADR 0034), beside VS Code's. Ctrl+T stays the workspace's symbols and
+	// is not "transpose": it is used from the editor far more often than two letters are swapped.
+	"ctrl+r": "quick-outline",
+	"ctrl+shift+r": "symbols",
 	"ctrl+shift+p": "command-palette",
 	"ctrl+n": "new-untitled",
 	"ctrl+s": "save",
@@ -1749,6 +1822,10 @@ const KEYS: Record<string, string> = {
 	"ctrl+shift+tab": "recent-tab-back",
 	"alt+arrowleft": "go-back",
 	"alt+arrowright": "go-forward",
+	// Sublime Text's "jump back" and "jump forward". With Shift the key is named by what it types on some layouts.
+	"alt+-": "go-back",
+	"alt+shift+-": "go-forward",
+	"alt+shift+_": "go-forward",
 	"alt+z": "word-wrap",
 	"alt+shift+c": "copy-path",
 	"ctrl+pagedown": "next-tab",
@@ -1788,12 +1865,16 @@ const KEYS: Record<string, string> = {
 	"ctrl+shift++": "zoom-in",
 	"ctrl+-": "zoom-out",
 	"ctrl+shift+0": "zoom-reset",
-	f1: "editor-commands",
+	f1: "command-palette",
+	"ctrl+g": "go-to-line",
 	f10: "menu-bar",
 };
 
-/** On a Mac, Alt with an arrow moves the cursor by a word, in the editor and in every box: those keys stay the text's. */
-const NOT_ON_A_MAC = new Set(["alt+arrowleft", "alt+arrowright"]);
+/**
+ * On a Mac, Alt with an arrow moves the cursor by a word, in the editor and in every box, and Alt with the hyphen
+ * types a dash: those keys stay the text's.
+ */
+const NOT_ON_A_MAC = new Set(["alt+arrowleft", "alt+arrowright", "alt+-", "alt+shift+-", "alt+shift+_"]);
 /** macOS VS Code defaults for Go Back / Go Forward while keeping Cmd+- reachable as Zoom Out (ADR 0032). */
 const MAC_DEFAULT_KEYS: Record<string, string> = {
 	"ctrl+-": "go-back",
@@ -1818,19 +1899,11 @@ export function keymap(): Record<string, string> {
 export const keysFor = (id: string) => keysOf(id, keymap()).map(displayKey).join(", ");
 
 /**
- * Text-editing shortcuts that take precedence over non-editing window shortcuts
- * (e.g. Ctrl+B = Bold instead of Toggle side bar) whenever focus is inside a
- * Markdown text editor (CodeMirror 6 Live Preview or Monaco Source mode).
+ * The keys to show beside a command in a list of commands to run: its shortcuts, and for one of Markdown's
+ * commands the keys it has while a document is edited (ADR 0041), which are the ones a writer presses.
  */
-export const MARKDOWN_TEXT_KEYS: Record<string, string> = {
-	"ctrl+b": "md-bold",
-	"ctrl+i": "md-italic",
-	"ctrl+shift+x": "md-strike",
-	"ctrl+`": "md-code",
-	"ctrl+alt+h": "md-highlight",
-	"ctrl+k": "md-link",
-	"ctrl+alt+enter": "md-checkbox",
-};
+export const keysShownFor = (id: string) =>
+	id.startsWith(EDITOR_PREFIX) ? editorKeysShown(id.slice(EDITOR_PREFIX.length)) : [...new Set([...keysOf(id, keymap()), ...keysOf(id, markdownKeysNow())])].map(displayKey).join(", ");
 
 /** Resolves a keydown press against `map`, preserving macOS Cmd+- as Zoom Out independently of Go Back overrides. */
 export function resolveCommandKey(
@@ -1850,8 +1923,18 @@ export function resolveCommandKey(
 	return { id, pressed };
 }
 
+/** A text area within the code editor that is not the one its text is typed into. */
+const NOT_THE_EDITORS_TEXT = "textarea:not(.inputarea):not(.ime-text-area)";
+
+/** When the code editor was given the first key of one of its two-key shortcuts, while it waits for the second. */
+let editorChordAt = 0;
+
 export function installKeys() {
 	setFocusFallback(focusEditor);
+	// The code editor's own command list and "go to line" are the app's boxes at the top of the window, on the
+	// editor's keys too, as in VS Code (ADR 0044). A command registered again under its id is the one the editor runs.
+	monaco.editor.addCommand({ id: "editor.action.quickCommand", run: () => runCommand("command-palette") });
+	monaco.editor.addCommand({ id: "editor.action.gotoLine", run: () => runCommand("go-to-line") });
 	installRecentTabs();
 	window.addEventListener(
 		"keydown",
@@ -1861,9 +1944,23 @@ export function installKeys() {
 			// Never intercept IME composition or AltGr character typing.
 			if (e.isComposing || e.keyCode === 229 || modalOpen() || isModifierKey(e.key) || e.getModifierState?.("AltGraph")) return;
 			const pressed = keyNamesForPlatform(e, onMac);
-			// Text-editing controls supersede conflicting chrome shortcuts inside Markdown editors.
-			if (isInMarkdownTextEditor(e.target, activeDoc()?.model.getLanguageId())) {
-				const mdCmd = pressed.map((name) => MARKDOWN_TEXT_KEYS[name]).find(Boolean);
+			const targetEl = e.target instanceof Element ? e.target : document.activeElement;
+			// The code editor's text, where its own keys work: not its find box or its rename box, which are within it.
+			// The text is typed into one of three elements of the editor's, by its version and by what is going on:
+			// while it waits for the second key of a two-key shortcut the keyboard is in its "ime-text-area".
+			const inCodeEditor = Boolean(targetEl?.closest(".monaco-editor") && !targetEl.closest(`.find-widget, .rename-box, .rename-input, input, ${NOT_THE_EDITORS_TEXT}`));
+			// The second key of one of the code editor's two-key shortcuts is the editor's. The shell reads one key at
+			// a time, and took the second for itself where it had a shortcut on it: Ctrl+K Ctrl+0 focused the side
+			// panel, and Ctrl+K Ctrl+1 the editor, where the editor folds and unfolds with them.
+			const secondOfChord = inCodeEditor && Date.now() - editorChordAt < EDITOR_CHORD_WAIT;
+			editorChordAt = 0;
+			if (secondOfChord) return;
+			// Markdown's own keys, as Settings has them, come before every other key while a document's text is
+			// edited, in either editor: Ctrl+B is bold there, and the side bar's key everywhere else (ADR 0041).
+			const inMarkdownText = isInMarkdownTextEditor(e.target, activeDoc()?.model.getLanguageId());
+			if (inMarkdownText) {
+				const markdown = markdownKeysNow();
+				const mdCmd = [...pressed, ...keyNamesByLetter(e, onMac)].map((name) => markdown[name]).find(Boolean);
 				if (mdCmd) {
 					e.preventDefault();
 					e.stopPropagation();
@@ -1874,10 +1971,22 @@ export function installKeys() {
 			const overrides = state.settings.keys ?? {};
 			const map = keymap();
 			const { id } = resolveCommandKey(e, map, onMac, overrides);
-			const targetEl = e.target instanceof Element ? e.target : document.activeElement;
+			// A key of the code editor's own, as it came or as it was changed in Settings (ADR 0039): the editor runs
+			// what is on it. Asked before the menus' Alt letters too, so Alt and a letter can be an editing key.
+			const editors = inCodeEditor ? editorTakesKey(pressed, { map, chosen: overrides }) : undefined;
+			if (editors) return;
+			// The same in the text of a Markdown document's Live editor, which has the code editor's keys for the
+			// commands it has too (ADR 0041). A key that is not its key is the shell's, as in the code editor.
+			const inLiveText = inMarkdownText && Boolean(targetEl?.closest(".cm-editor"));
+			if (inLiveText && liveTakesKey(pressed, { map, chosen: overrides })) return;
 			const inTable = Boolean(targetEl?.closest(".cm-md-table-wrap, .table-view"));
-			const inLiveMarkdown = Boolean(targetEl?.closest(".cm-editor") && !targetEl.closest(".cm-md-read"));
-			if (shouldLetEditorHandleKey({ id, pressed, inTable, inLiveMarkdown })) return;
+			// Within the Live editor but not in its text (a table's cell, a callout's box): the editing keys stand aside.
+			const inLiveMarkdown = Boolean(targetEl?.closest(".cm-editor") && !targetEl.closest(".cm-md-read")) && !inLiveText;
+			// Where the editor's keys could not be read, its editing keys are known by the list of them alone.
+			if (shouldLetEditorHandleKey({ id, pressed, inTable, inLiveMarkdown, inCodeEditor: inCodeEditor && editors === undefined, mac: onMac })) return;
+			// The first key of a two-key shortcut, where it is the editor's to take (no command of the shell's is on
+			// it, and it is not a document's "insert link", which was run above): the next key is the editor's too.
+			if (!id && inCodeEditor && startsEditorChord(pressed, onMac)) editorChordAt = Date.now();
 			if (id === "toggle-markdown-mode" && !isMarkdown(activePath())) return;
 			// Alt and a menu's first letter opens that menu, where no shortcut has the key. Not with Ctrl or Shift, and not
 			// where Alt and a letter types a character: the key is then that character, not the letter.

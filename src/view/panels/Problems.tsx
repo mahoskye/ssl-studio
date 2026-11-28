@@ -9,7 +9,7 @@ import { canonical, displayName, isUntitled, openFile, state } from "../state";
 import { docIssueCode } from "../../shared/contextMenu";
 import { relativeTo } from "../../shared/paths";
 import { Row, RowGroup, Rows } from "./Rows";
-import { serverDown } from "./server";
+import { serverDown, serverSilent } from "./server";
 import { FileMark } from "../FileMark";
 
 const MARK: (IconName | null)[] = [null, "error", "warning", "info", "circle-small-filled"];
@@ -186,6 +186,9 @@ export function Problems() {
 			</Show>
 			<Show when={serverDown()}>
 				<p class="hint warn">{serverDown()} Open files are not checked until it runs.</p>
+			</Show>
+			<Show when={serverSilent()}>
+				<p class="hint warn">{serverSilent()} Open files are not checked until it answers.</p>
 			</Show>
 			<Show
 				when={files().length}

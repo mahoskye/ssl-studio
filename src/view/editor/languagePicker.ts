@@ -1,9 +1,9 @@
 // VS Code-style searchable Language Mode QuickPick (ADR 0032): switches syntax
 // highlighting, comment/bracket rules, formatting, and LSP tracking for the
 // active code/text buffer.
-import { buildLanguagePickerEntries, languageFor, languageName } from "../../shared/languages";
+import { buildLanguagePickerEntries, languageName } from "../../shared/languages";
 import { quickPick } from "../dialogs";
-import { activeDoc, activePath, displayName, notify, setDocumentLanguage } from "../state";
+import { activeDoc, activePath, detectedLanguageOf, displayName, notify, setDocumentLanguage } from "../state";
 
 export async function pickLanguageMode(): Promise<void> {
 	const path = activePath();
@@ -13,7 +13,8 @@ export async function pickLanguageMode(): Promise<void> {
 		return;
 	}
 	const currentId = doc.model.getLanguageId();
-	const detectedId = languageFor(path);
+	// For a data source, what it was read as: SQL or SSL (ADR 0038). For any other file, what its name says.
+	const detectedId = detectedLanguageOf(path);
 	const entries = buildLanguagePickerEntries(currentId, detectedId);
 	const hasAuto = Boolean(entries[0]?.isAutoDetect);
 	const picked = await quickPick<string>({

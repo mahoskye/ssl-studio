@@ -5,7 +5,7 @@
 // comes from the language server and the formatter's grammar (ADR 0003).
 // Non-SSL formatting runs through the backend's Prettier + XML + sql-formatter
 // pipeline (ADR 0015, ADR 0029).
-import { canFormatNonSsl, DEFAULT_SQL_DIALECT, FORMATTABLE_NON_SSL_LANGUAGES, type SqlDialect, type SqlKeywordCase } from "../../shared/format";
+import { canFormatNonSsl, DEFAULT_SQL_DIALECT, FORMATTABLE_NON_SSL_LANGUAGES, linesInFile, type SqlDialect, type SqlKeywordCase } from "../../shared/format";
 import {
 	fenceAtLine,
 	fenceFormatTarget,
@@ -15,9 +15,14 @@ import {
 	virtualFencePath,
 	type MarkdownCodeFence,
 } from "../../shared/fencedFormat";
-import { formatJson } from "../../shared/jsonFormat";
+import { formatJson, jsonOpenedOut } from "../../shared/jsonFormat";
 import { LANGUAGES, languageFor, languageName, type LanguageDef } from "../../shared/languages";
+import { isDataSourceName } from "../../shared/lexicalTokens";
+import { splitAtLine } from "../../shared/sqlDataSource";
+import { baseName } from "../../shared/paths";
 import { backend } from "../backend";
+import { selectedLines } from "../lsp/edits";
+import { linesFromFormatted } from "../lsp/session";
 import { monaco } from "./monaco";
 import "monaco-editor/languages/definitions/markdown/register";
 import "monaco-editor/languages/definitions/sql/register";
@@ -268,6 +273,8 @@ type FormattingOptions = {
 
 type FormattingHost = {
 	options(): FormattingOptions;
+	/** The line (from 0) an open data source's SQL starts on, where it has been read as an SQL data source (ADR 0038). */
+	sqlBodyLine?(model: monaco.editor.ITextModel): Promise<number | undefined>;
 	formatSsl(code: string): Promise<{ ok: true; text: string } | { ok: false; error: string; lspOffline?: boolean }>;
 	onError(error: string, path: string): void;
 	onNotice?(message: string): void;
@@ -404,12 +411,20 @@ async function computeNonSslFormat(
 	const uri = model.uri.toString();
 	const path = model.uri.fsPath || model.uri.path;
 	if (!canFormatNonSsl(languageId, path)) return { ok: true, text: model.getValue(), changed: false };
-	const text = model.getValue();
+	const whole = model.getValue();
+	// Of an SQL data source the SQL is formatted and what stands above it is left as it is: the directives there
+	// (`:PARAMETERS …;`) are SSL, which no SQL formatter is to be given. One not read as SQL yet is left alone.
+	const bodyLine = isDataSourceName(path) ? await formattingHost.sqlBodyLine?.(model) : 0;
+	if (bodyLine === undefined) return { ok: true, text: whole, changed: false };
+	const { above, body: text } = splitAtLine(whole, bodyLine);
 	const extra = formattingHost.options();
+	// A JSON document on one line has no layout of its own to keep, and Prettier would leave it on its line where
+	// it fits: it is sent with each of its objects opened, and laid out from there (ADR 0040).
+	const sent = languageId === "json" ? (jsonOpenedOut(text) ?? text) : text;
 	try {
 		const result = await backend.formatDocument({
 			path,
-			text,
+			text: sent,
 			languageId,
 			tabSize: indent.tabSize,
 			insertSpaces: indent.insertSpaces,
@@ -419,22 +434,25 @@ async function computeNonSslFormat(
 		});
 		if (!result.ok) {
 			lastFormatError = { uri, at: Date.now() };
-			formattingHost.onError(result.error, path);
+			// The formatter was given the SQL below the directives: where it names a line, it is that line of the file.
+			formattingHost.onError(linesInFile(result.error, bodyLine), path);
 			return { ok: false };
 		}
-		let finalText = result.text;
+		let finalText = above + result.text;
 		if (languageId === "markdown") {
 			const embedded = await formatAllMarkdownFences(finalText, path);
 			finalText = embedded.text;
 			if (embedded.skippedErrors.length) {
-				formattingHost.onError(`Skipped unformattable code block: ${embedded.skippedErrors[0]}`, path);
+				// The document was formatted: only the code block was not, and "Could not format" said the opposite.
+				const blocks = embedded.skippedErrors.length === 1 ? "One code block" : `${embedded.skippedErrors.length} code blocks`;
+				formattingHost.onNotice?.(`${baseName(path)} was formatted. ${blocks} in it could not be: ${embedded.skippedErrors[0]}`);
 			} else if (embedded.skippedSslOffline > 0) {
 				formattingHost.onNotice?.(
 					`Skipped ${embedded.skippedSslOffline} SSL code ${embedded.skippedSslOffline === 1 ? "block" : "blocks"} because the language server is not running.`,
 				);
 			}
 		}
-		return { ok: true, text: finalText, changed: finalText !== text };
+		return { ok: true, text: finalText, changed: finalText !== whole };
 	} catch (err: any) {
 		// If the backend is unreachable for plain JSON, keep the local zero-dependency JSON formatter working.
 		if (languageId === "json" && !/\.jsonc$/i.test(path) && !/\.plan\.json$/i.test(path)) {
@@ -476,7 +494,24 @@ for (const languageId of FORMATTABLE_NON_SSL_LANGUAGES) {
 			return [{ range: model.getFullModelRange(), text: res.text }];
 		},
 	});
+	// Format Selection: the selected lines as "Format document" leaves them (ADR 0043). With no provider for a range,
+	// the editor's action did nothing and said nothing.
+	monaco.languages.registerDocumentRangeFormattingEditProvider(languageId, {
+		async provideDocumentRangeFormattingEdits(model, range, options) {
+			if (model.isDisposed()) return [];
+			const version = model.getVersionId();
+			const res = await computeNonSslFormat(model, options);
+			if (model.isDisposed() || model.getVersionId() !== version) return [];
+			if (!res.ok || !res.changed) return [];
+			return (linesFromFormatted(model, res.text, selectedLines(range)) ?? []).map((e) => ({ range: e.range, text: e.text ?? "" }));
+		},
+	});
 }
+
+// Quick fixes: none is offered by the language server (it answers "method not supported") or the app. With no
+// provider at all the editor's Ctrl+. did nothing and said nothing; with this one it says there is nothing to do here,
+// as VS Code does.
+monaco.languages.registerCodeActionProvider("*", { provideCodeActions: () => ({ actions: [], dispose() {} }) });
 
 // Secondary schema-table hover provider bridging SSL/SQL identifiers to `schema/` Markdown & DDL docs (ADR 0003).
 void import("./schemaHover").then((m) => m.registerSchemaHoverProviders());

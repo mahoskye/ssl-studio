@@ -4,7 +4,7 @@
 
 | | Needed for | Notes |
 | --- | --- | --- |
-| `starlims-lsp` 0.32.0 | everything SSL | Release builds carry it (`app/bin/starlims-lsp`). From source, put it on `PATH`, set `STARLIMS_LSP`, or set `lspPath` in Settings. Another version runs with a warning in the status bar. |
+| `starlims-lsp` 0.33.1 | everything SSL | Release builds carry it (`app/bin/starlims-lsp`). From source, put it on `PATH`, set `STARLIMS_LSP`, or set `lspPath` in Settings. Another version runs with a warning in the status bar. |
 | opencode 2.2.5 to 2.3.x | the Agent panel only | On `PATH`. The IDE starts its own private server; nothing is shared with opencode's background service. |
 | A local model | the Agent panel's default | Ollama through opencode's `ollama` provider, or any provider set in `agentServerConfig`. A paid provider is used only after you choose it. |
 | GTK 3, WebKitGTK 4.1, Ayatana AppIndicator, librsvg (Linux) | the window | Native Electrobun runtime libraries. Install the packages for your distribution below. |
@@ -34,7 +34,7 @@ bun scripts/bundle-lsp.ts --download     # once per OS: the pinned language serv
 hutch run build                          # artifacts/ gets the installer and the update bundle
 ```
 
-`bundle-lsp.ts` without `--download` copies a local starlims-lsp 0.32.0
+`bundle-lsp.ts` without `--download` copies a local starlims-lsp 0.33.1
 instead. The build also writes `THIRD-PARTY-NOTICES.md` (the bundled
 packages' licenses) into the app.
 
@@ -71,11 +71,21 @@ change the chart and rebuild, write the tests), on a copy of the workspace, with
 fake in place of a model. On that copy it also presses "Set up project" and reads the documents
 that makes, rendered and as text. It costs nothing.
 
-`hutch run selftest-close` checks that closing the window never loses work. It makes an edit on a
-copy of the workspace, leaves it unsaved, and presses the window's close button from outside. The
-window has to stay and ask; cancelled, the edit is still there; asked again and told to save, the
-app saves the file and closes. It runs on Linux with X11 and `xdotool`, and on Windows; it is not
-written for macOS.
+`hutch run selftest-close` checks that closing the window never loses work and never asks
+([ADR 0042](adr/0042-closing-keeps-unsaved-work-and-asks-nothing.md)). On a copy of the workspace it
+edits a file, writes in a document that has no file yet, leaves both unsaved, and presses the
+window's close button from outside. The app has to close by itself, with the file on disk as it
+was. Started again, it has to show both documents unsaved with every line they were left with;
+the file is then saved, and the window closed once more. It runs on Linux with X11 and `xdotool`,
+and on Windows; it is not written for macOS.
+
+On Linux the app's log holds `ERR` lines ending in `write@[native code]`. The code editor
+(Monaco) starts a clipboard write on each click and key press in a WebKit window, so that a later
+copy counts as one you asked for; WebKit refuses it for a click or key press the self-test sends by
+script, and the editor logs the refusal. They are not a failure. The self-test shows the first with
+a line marked `[expected]` that says so, counts the rest, and ends by saying how many there were and
+from which part of the self-test. An `ERR` it cannot explain that way is shown whole, marked
+`[not explained]`, and counted apart.
 
 ## A local model through Ollama
 

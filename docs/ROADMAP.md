@@ -173,14 +173,15 @@ from the keyboard, and says what it is).
   created, a method called and a class inherited. The graph draws each with
   its own line, names them in its key and its list, and counts them apart
   from calls. The IDE no longer works inheritance out by itself.
-- **Left for the language server** ([LSP-REQUESTS](LSP-REQUESTS.md)): two
-  of the three things running the demo showed the server accepts and
-  STARLIMS does not (L8, mahoskye/starlims-lsp#372). starlims-lsp 0.32.0
-  answered the rest: the required exception to "prefer unannotated
-  procedures" (L7), the first of L8's three, where comments, strings and
-  keywords are (L9), and a range format that keeps to its range (L10). The
-  tables a script uses (L6, #370) was withdrawn on 2026-11-25: that is the
-  IDE's own to find, not the server's.
+- **Answered by the language server** ([LSP-REQUESTS](LSP-REQUESTS.md)):
+  0.33.1 fixed the three defects the second review of the editor found (L11
+  to L13, mahoskye/starlims-lsp#378, #379 and #380). starlims-lsp 0.32.0 answered
+  the required exception to "prefer unannotated procedures" (L7), the
+  first of L8's three, where comments, strings and keywords are (L9), and a
+  range format that keeps to its range (L10). 0.33.0 answered the rest of
+  L8, by a rule for one and a decision for the other. The tables a script
+  uses (L6, #370) was withdrawn on 2026-11-25: that is the IDE's own to
+  find, not the server's.
 - **The demo project runs.** `bun scripts/demo-sandbox.ts` runs its tests in
   the SSL sandbox runner (a separate, private compatibility runtime). The
   first run found defects that validation had not.
@@ -882,7 +883,76 @@ walkthrough of the baseline UI ([UI-DESIGN.md](UI-DESIGN.md),
   sticky first column in Table View, and explicit `Side-by-Side | Inline`
   layout switching in Diff Review.
 
+## Closing keeps unsaved work (2026-11-26)
+
+Under [ADR 0042](adr/0042-closing-keeps-unsaved-work-and-asks-nothing.md),
+which supersedes one point of ADR 0009.
+
+- **Closing the window, and opening another folder, ask nothing.** The
+  unsaved text of every open document is kept in the app's state folder,
+  within a second of being typed and once more as the folder is left.
+- **The folder opens with what was left unsaved:** the same documents, still
+  unsaved, a document with no file among them. A file that changed on disk
+  meanwhile is marked and saving asks; one that is gone is put back by saving.
+- **Where the text cannot be kept, the old question is asked.** Closing a
+  single tab still asks, as before.
+
+## Filters, marks and the status bar (2026-11-27)
+
+- **A filter is out of sight until it is asked for**
+  ([ADR 0050](adr/0050-a-filter-is-out-of-sight-until-it-is-asked-for.md)).
+  The Explorer's Outline, the Document panel, Docs, Health, the table view
+  and the Markdown inspector's list of uses show their filter box only when
+  their menu (or Ctrl+F in the list) asks for it, or while it holds text.
+  Docs' and Health's state pills are checked items in a filter menu; one
+  that is on shows as a chip that turns it off. The plan's and the call
+  graph's finders are a search button until used.
+- **Docs marks each document by its kind**
+  ([ADR 0051](adr/0051-the-docs-panel-marks-a-document-by-its-kind.md)): a
+  catalog, a ticket, a spec, a decision, a question and the rest each have
+  their own mark, not one Markdown mark for all.
+- **The status bar starts with the services**
+  ([ADR 0049](adr/0049-the-status-bar-starts-with-the-services.md)): LSP,
+  Agent, the Git branch, then Problems.
+- **Docs' state dots line up.** In a narrow panel the dot for work under
+  way has a ring; the others now keep the same room, so all three sit in
+  one column.
+- **A table's row checkbox can be hit.** The selection column was drawn
+  32px wide, not the 56px meant, since the wider rule was in a stylesheet
+  that loads first and lost; the row number left each checkbox under 3px
+  wide. The column is now 60px, set in one place, and each checkbox has a
+  24px target.
+- **Ticking a row no longer moves the rows.** The bar of actions for the
+  ticked rows came in above the table and pushed every row down, so the
+  next click meant for a checkbox could land on the bar's Delete. It is
+  under the rows now.
+- **starlims-lsp 0.33.1** is the pinned version. Rename refuses `.T.`,
+  `.F.`, `.AND.`, `.OR.` and `.NOT.`; text such as `°` in a string no
+  longer moves signature help or a SQL placeholder's hover; `Me:` in a
+  class of the workspace lists its own members (L11 to L13).
+
 ## Planned
+
+- **Review each panel not yet reviewed (2026-11-27).** Each gets an
+  adversarial review of its own, as the editor had from 2026-11-25 to
+  2026-11-27: try to break it as a developer would by accident, fix what is
+  broken, add what is missing, and look at it at a narrow and a wide width
+  in both themes.
+  - **Explorer:** files, the scoped folder, the Outline section, moves and
+    drops.
+  - **Docs:** the groups, a ticket's bundle, bulk changes, catalogs.
+  - **Document panel:** Info and Outline for Markdown, a plan's Procedures.
+  - **Palette:** templates, callouts, plan shapes, the call graph's
+    controls.
+  - **Reference:** the list, an entry's detail, inserting a name.
+  - **Search:** find and replace across files, scopes, safe docs.
+  - **Source control:** changes, staging, the commit.
+  - **History:** local snapshots and Git commits, comparing and restoring.
+  - **Agent:** sessions, models, attaching files, what a failed turn says.
+  - **Health:** the project's checks, citations, the style profile.
+  - **Output:** the bottom panel's log.
+  - **The Settings dialog:** each section, its search, the keys page, and
+    what a change does at once.
 
 - **Document export to Confluence and PDF (2026-11-22).** Convert project
   documents across their formats (Markdown notes, tickets, specs, CSV

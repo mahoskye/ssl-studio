@@ -24,7 +24,8 @@ Under [ADR 0002](0002-text-is-the-source-of-truth.md) and
   UTF-16 either way round); failing a mark, as UTF-8 where it reads as
   UTF-8, and otherwise as Windows-1252.
 - **A file is written in what it is written in now,** its mark with it. A
-  new file is UTF-8 with no mark.
+  new file is UTF-8 with no mark. (Since [ADR 0046](0046-a-save-writes-the-encoding-the-text-was-read-in.md)
+  a save writes the encoding the text was read in.)
 - **A save that the encoding cannot hold is refused, and says which
   character.** The file is not turned into UTF-8 on the quiet: whatever
   reads it next would find every other accented letter changed.

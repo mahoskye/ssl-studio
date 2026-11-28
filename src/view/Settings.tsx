@@ -20,19 +20,25 @@ import {
 } from "../shared/oklchTheme";
 import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, Show, untrack } from "solid-js";
 import type { JSX } from "@solidjs/web";
+import { EDITOR_COMMANDS, editorCommandLabel, editorKeyCode, isEditorCommand, isMarkdownCommand, MARKDOWN_COMMANDS, MARKDOWN_KEYS, markdownCommandLabel, pressesOf } from "../shared/editorKeymap";
+import { startsEditorChord } from "../shared/menuBar";
 import { isInside, resolvePath } from "../shared/paths";
 import type { Settings, SettingsPatch } from "../shared/protocol";
 import { backend, inApp } from "./backend";
 import { commands, DEFAULT_KEYS, keymap, keysFor, onOpenSettings } from "./commands";
 import { choose } from "./dialogs";
-import { bindable, conflict, displayKey, isModifierKey, keyNamesForPlatform, rebind, unbind } from "./keys";
+import { baseEditorKeys, displayEditorKey, editorKeyChanges, editorKeysNow, editorKeysOf, editorTakesKey, markdownKeyChanges, markdownKeysNow } from "./editor/editorKeys";
+import { bindable, conflict, displayKey, isModifierKey, keyNamesForPlatform, keysOf, rebind, sharedKeyName, unbind } from "./keys";
 import { Modal } from "./modal";
 import { matchWords } from "./quickRank";
 import { loadSettings, notify, restartLsp, saveSetting, state, syncLivePreviewMode } from "./state";
 import { clampScale, stepScale, UI_SCALE } from "./uiScale";
 
 type Layers = { user: Partial<Settings>; workspace: Partial<Settings> };
-type Group = "Appearance" | "Editor" | "Language server" | "Keyboard";
+type Group = "Appearance" | "Editor" | "Language server" | "Keyboard" | "Editor keys" | "Markdown keys";
+
+/** What a row of Markdown's keys is recorded under: its commands are the shell's too, and have a row in that list. */
+const MARKDOWN_ROW = "markdown-key:";
 
 const FONT = { min: 8, max: 32, normal: 13 };
 const onMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform ?? "");
@@ -166,6 +172,11 @@ export function SettingsDialog() {
 	const [capturing, setCapturing] = createSignal<string | null>(null);
 	/** Why the last key pressed was not taken. */
 	const [refused, setRefused] = createSignal("");
+	/** The first press of a key of two presses, while the second is waited for, and the command it is recorded for. */
+	const [chord, setChord] = createSignal<{ id: string; first: string } | null>(null);
+	const chordFirst = () => (chord() && chord()!.id === capturing() ? chord()!.first : "");
+	/** Which list the key that was not taken was pressed for: the note stands with that list. */
+	const [refusedIn, setRefusedIn] = createSignal<Group>("Keyboard");
 	const titleId = createUniqueId();
 
 	const loadLayers = () =>
@@ -210,10 +221,86 @@ export function SettingsDialog() {
 	// --- keyboard --------------------------------------------------------------
 
 	const label = (id: string) => commands.find((c) => c.id === id)?.label ?? id;
+	/** The shell's keys, as the code editor's keys are weighed against them. */
+	const shellKeys = () => ({ map: keymap(), chosen: state.settings.keys ?? {} });
+	/** The code editor's command on a key, where the editor and not the shell has that key while code is edited. */
+	const editorsOn = (key: string) => (editorTakesKey([key], shellKeys()) ? editorKeysNow()?.[key] : undefined);
 	const bind = async (id: string, key: string) => {
 		const taken = conflict(key, id, keymap());
-		if (taken && (await choose(`${displayKey(key)} is the shortcut for “${label(taken)}”. Use it for “${label(id)}” instead?`, ["Replace"])) !== "Replace") return;
+		const editors = editorsOn(key);
+		// A key the user gave an editor command stays the editor's while code is edited, whatever the shell has on it.
+		const stays = Boolean(editors && editorKeyChanges()[key]);
+		const name = displayKey(key);
+		let question = "";
+		let yes = "Replace";
+		if (editors && stays) {
+			question = `${name} is the editor's key for “${editorCommandLabel(editors)}”, as you set it, and stays that while you edit text. ${taken ? `Everywhere else it is the shortcut for “${label(taken)}”. Use it for “${label(id)}” there instead?` : `Use it for “${label(id)}” everywhere else?`}`;
+			if (!taken) yes = "Use elsewhere";
+		} else if (editors) {
+			question = `${name} is ${taken ? `the shortcut for “${label(taken)}”, and ` : ""}the editor's key for “${editorCommandLabel(editors)}”. Use it for “${label(id)}” instead, in the editor too?`;
+		} else if (taken) {
+			question = `${name} is the shortcut for “${label(taken)}”. Use it for “${label(id)}” instead?`;
+		}
+		// Markdown's keys come first while a document is edited, whatever else has the key (ADR 0041).
+		const markdown = markdownKeysNow()[key];
+		if (markdown && question) question += ` ${inMarkdown(markdown)}`;
+		else if (markdown) {
+			question = `${name} is Markdown's key for “${markdownCommandLabel(markdown)}”, and stays that while you edit a Markdown document. Use it for “${label(id)}” everywhere else?`;
+			yes = "Use elsewhere";
+		}
+		if (question && (await choose(question, [yes])) !== yes) return;
 		await saveSetting({ keys: rebind(DEFAULT_KEYS, state.settings.keys ?? {}, id, key) });
+	};
+	/** What is said of a key that Markdown has too, when it is given to something else. */
+	const inMarkdown = (command: string) => `While you edit a Markdown document it stays “${markdownCommandLabel(command)}”.`;
+	/** Gives a key (of one press or two) to one of the code editor's commands. */
+	const bindEditor = async (id: string, key: string) => {
+		const base = baseEditorKeys();
+		if (!base) return;
+		const changes = editorKeyChanges();
+		const taken = conflict(key, id, editorKeysNow() ?? {});
+		// The shell's command on the key, where the shell and not the editor has the key while code is edited.
+		const shells = pressesOf(key).length === 1 && !editorTakesKey([key], shellKeys()) ? keymap()[key] : undefined;
+		const name = displayEditorKey(key);
+		const mine = editorCommandLabel(id);
+		let question = "";
+		let yes = "Replace";
+		if (taken && shells) {
+			question = `${name} is the editor's key for “${editorCommandLabel(taken)}”, and the shortcut for “${label(shells)}”. Use it for “${mine}” while you edit text? “${label(shells)}” keeps it everywhere else.`;
+		} else if (taken) {
+			question = `${name} is the editor's key for “${editorCommandLabel(taken)}”. Use it for “${mine}” instead?`;
+		} else if (shells) {
+			question = `${name} is the shortcut for “${label(shells)}”. Use it for “${mine}” while you edit text? “${label(shells)}” keeps it everywhere else.`;
+			yes = "Use in the editor";
+		}
+		const markdown = pressesOf(key).length === 1 ? markdownKeysNow()[key] : undefined;
+		if (markdown && question) question += ` ${inMarkdown(markdown)}`;
+		else if (markdown) {
+			question = `${name} is Markdown's key for “${markdownCommandLabel(markdown)}”, and stays that while you edit a Markdown document. Use it for “${mine}” in other files?`;
+			yes = "Use elsewhere";
+		}
+		if (question && (await choose(question, [yes])) !== yes) return;
+		await saveSetting({ editorKeys: rebind(base, changes, id, key) });
+	};
+	/** Gives a key to one of Markdown's commands: the key is that command's while a Markdown document is edited. */
+	const bindMarkdown = async (id: string, key: string) => {
+		const taken = conflict(key, id, markdownKeysNow());
+		const mine = markdownCommandLabel(id);
+		const name = displayKey(key);
+		// What the key is outside a Markdown document, and goes on being there.
+		const editors = editorsOn(key);
+		const shells = editors ? undefined : keymap()[key];
+		const elsewhere = editors ? `the editor's key for “${editorCommandLabel(editors)}”` : shells ? `the shortcut for “${label(shells)}”` : "";
+		let question = "";
+		let yes = "Replace";
+		if (taken) {
+			question = `${name} is Markdown's key for “${markdownCommandLabel(taken)}”. Use it for “${mine}” instead?`;
+		} else if (elsewhere) {
+			question = `${name} is ${elsewhere}. Use it for “${mine}” while you edit a Markdown document? It keeps what it does everywhere else.`;
+			yes = "Use in Markdown";
+		}
+		if (question && (await choose(question, [yes])) !== yes) return;
+		await saveSetting({ markdownKeys: rebind(MARKDOWN_KEYS, markdownKeyChanges(), id, key) });
 	};
 	// While a shortcut is being recorded every key is the modal's: it is the
 	// answer, not a command to run or a way out (Escape only stops recording).
@@ -221,6 +308,7 @@ export function SettingsDialog() {
 		const id = capturing();
 		if (!id) return false;
 		if (e.isComposing || e.keyCode === 229) return true;
+		setRefusedIn(isEditorCommand(id) ? "Editor keys" : id.startsWith(MARKDOWN_ROW) ? "Markdown keys" : "Keyboard");
 		e.preventDefault();
 		e.stopImmediatePropagation();
 		if (isModifierKey(e.key)) return true;
@@ -234,28 +322,80 @@ export function SettingsDialog() {
 			return true;
 		}
 		const key = names[0]!;
-		const check = bindable(key);
+		if (isEditorCommand(id)) {
+			// The code editor's keys of two presses start with Ctrl+K (Cmd+K on a Mac): pressed first, it is half a key.
+			const first = chordFirst();
+			if (!first && startsEditorChord(names, onMac)) {
+				setRefused("");
+				setChord({ id, first: key });
+				return true;
+			}
+			const check = first ? { ok: true as const } : bindable(key);
+			if (!check.ok) {
+				setRefused(check.why);
+				return true;
+			}
+			if (!editorKeyCode(key)) {
+				setRefused(`${displayKey(key)} cannot be one of the editor's keys: the editor has no name for that key.`);
+				return true;
+			}
+			setRefused("");
+			setCapturing(null);
+			void bindEditor(id, first ? `${first} ${key}` : key);
+			return true;
+		}
+		// One of Markdown's keys is written once for every system, as the keys it comes with are.
+		const forMarkdown = id.startsWith(MARKDOWN_ROW);
+		const chosen = forMarkdown ? (sharedKeyName(e, onMac) ?? key) : key;
+		const check = bindable(chosen);
 		if (!check.ok) {
 			setRefused(check.why);
 			return true;
 		}
 		setRefused("");
 		setCapturing(null);
-		void bind(id, key);
+		if (forMarkdown) void bindMarkdown(id.slice(MARKDOWN_ROW.length), chosen);
+		else void bind(id, chosen);
 		return true;
 	};
 	const record = (id: string) => {
 		setRefused("");
+		setChord(null);
 		setCapturing(id);
 	};
 	const resetKeys = async () => {
 		const answer = await choose("Reset every shortcut to its default? The ones you set are lost, and this cannot be undone.", ["Reset shortcuts"], { danger: "Reset shortcuts" });
 		if (answer) await saveSetting({ keys: {} });
 	};
+	// One of Markdown's commands has its keys in the list of Markdown's keys. It has a row here only where it was
+	// given a shortcut here too, which then works anywhere: with none, the row would say "none" of Ctrl+B.
 	const keyRows = () =>
 		[...commands]
+			.filter((c) => !isMarkdownCommand(c.id) || keysFor(c.id))
 			.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }))
 			.filter((c) => shown("Keyboard", "shortcut", c.label, c.detail, keysFor(c.id)));
+	/** The keys one of the code editor's commands has while code is edited, as they are shown. */
+	const editorKeysFor = (id: string) => editorKeysOf(id, shellKeys()).map(displayEditorKey).join(", ");
+	const resetEditorKeys = async () => {
+		const answer = await choose("Reset the editor's keys to the ones it came with? The ones you set are lost, and this cannot be undone.", ["Reset keys"], { danger: "Reset keys" });
+		if (answer) await saveSetting({ editorKeys: {} });
+	};
+	/** The code editor's commands, where its keys could be read: without them a row could not say what it has. */
+	const editorKeyRows = () =>
+		baseEditorKeys()
+			? [...EDITOR_COMMANDS]
+					.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }))
+					.filter((c) => shown("Editor keys", "shortcut", "keyboard", c.label, editorKeysFor(c.id)))
+			: [];
+
+	/** The keys one of Markdown's commands has while a document is edited, as they are shown. */
+	const markdownKeysFor = (id: string) => keysOf(id, markdownKeysNow()).map(displayKey).join(", ");
+	const resetMarkdownKeys = async () => {
+		const answer = await choose("Reset Markdown's keys to the ones they came with? The ones you set are lost, and this cannot be undone.", ["Reset keys"], { danger: "Reset keys" });
+		if (answer) await saveSetting({ markdownKeys: {} });
+	};
+	/** Markdown's commands, in the order a writer meets them. */
+	const markdownKeyRows = () => MARKDOWN_COMMANDS.filter((c) => shown("Markdown keys", "shortcut", "keyboard", c.label, markdownKeysFor(c.id)));
 
 	// --- the rest ----------------------------------------------------------------
 
@@ -336,6 +476,8 @@ export function SettingsDialog() {
 		livePreview: ["Markdown live preview", "A document drawn as it is written: headings larger, the markup hidden except on the line being written"],
 		markdownReadingHighlight: ["Markdown reading highlight", "Subtly dim lines below the active cursor (or mouse pointer when reading) in Markdown Live and Read views"],
 		inlayHints: ["Parameter name hints", "Names shown beside the arguments of a call"],
+		indentOnType: ["Indent as the formatter does", "A new line of a script, and a statement as its ; is typed, are indented as the language server's formatter indents them"],
+		ctrlClickAddsCursor: ["Ctrl+click adds a cursor", "As in Sublime Text, and Alt+click goes to a definition. Off: the other way round, as in VS Code"],
 		rulers: ["Ruler at the line length", "A line down the editor at the style profile's line length"],
 		rulerMargin: ["Rulers beside it", "Fainter rulers this many columns before and after; 0 for none"],
 		csvTable: ["CSV column badges", "Format configured CSV columns (such as status) as colored badges; customize rules from any CSV table's Format button"],
@@ -346,9 +488,11 @@ export function SettingsDialog() {
 	const anyShown = (group: Group, ...rows: (keyof typeof ROWS)[]) => rows.some((r) => shown(group, ...ROWS[r]));
 	const groups = {
 		appearance: () => anyShown("Appearance", "theme", "uiScale", "fontSize", "uiFont", "codeFont", "readFont", "menuBar"),
-		editor: () => anyShown("Editor", "formatOnSave", "sqlDialect", "minimap", "wordWrap", "livePreview", "markdownReadingHighlight", "inlayHints", "rulers", "rulerMargin", "csvTable", "attachmentsFolder", "templatesFolder"),
+		editor: () => anyShown("Editor", "formatOnSave", "sqlDialect", "minimap", "wordWrap", "livePreview", "markdownReadingHighlight", "inlayHints", "indentOnType", "ctrlClickAddsCursor", "rulers", "rulerMargin", "csvTable", "attachmentsFolder", "templatesFolder"),
 		server: () => anyShown("Language server", "lspPath"),
 		keyboard: () => keyRows().length > 0,
+		editorKeys: () => editorKeyRows().length > 0,
+		markdownKeys: () => markdownKeyRows().length > 0,
 	};
 
 	const parsedOklch = () => parseOklchThemeId(state.settings.theme);
@@ -429,6 +573,8 @@ export function SettingsDialog() {
 		["Editor", "editor"],
 		["Language server", "server"],
 		["Keyboard", "keyboard"],
+		["Editor keys", "editorKeys"],
+		["Markdown keys", "markdownKeys"],
 	];
 
 	return (
@@ -695,6 +841,34 @@ export function SettingsDialog() {
 								/>
 							)}
 						</Row>
+						<Row group="Editor" label={ROWS.indentOnType[0]} hint={ROWS.indentOnType[1]} setting="indentOnType">
+							{(ids) => (
+								<input
+									id={ids.control}
+									aria-describedby={ids.hint}
+									type="checkbox"
+									checked={state.settings.indentOnType !== false}
+									onChange={async (e) => {
+										const el = e.currentTarget;
+										if (!(await save("indentOnType", el.checked))) el.checked = untrack(() => state.settings.indentOnType !== false);
+									}}
+								/>
+							)}
+						</Row>
+						<Row group="Editor" label={ROWS.ctrlClickAddsCursor[0]} hint={ROWS.ctrlClickAddsCursor[1]} setting="ctrlClickAddsCursor">
+							{(ids) => (
+								<input
+									id={ids.control}
+									aria-describedby={ids.hint}
+									type="checkbox"
+									checked={state.settings.ctrlClickAddsCursor !== false}
+									onChange={async (e) => {
+										const el = e.currentTarget;
+										if (!(await save("ctrlClickAddsCursor", el.checked))) el.checked = untrack(() => state.settings.ctrlClickAddsCursor !== false);
+									}}
+								/>
+							)}
+						</Row>
 						<Row group="Editor" label={ROWS.rulers[0]} hint={ROWS.rulers[1]} setting="rulers">
 							{(ids) => (
 								<input
@@ -811,7 +985,7 @@ export function SettingsDialog() {
 						<p class="settings-hint">
 							A shortcut needs Ctrl or Alt, or a function key. <span class="settings-scope">Saved for you</span>
 						</p>
-						<Show when={refused()}>
+						<Show when={refused() && refusedIn() === "Keyboard"}>
 							<p class="settings-note" role="alert">
 								{refused()}
 							</p>
@@ -833,12 +1007,81 @@ export function SettingsDialog() {
 							</For>
 						</div>
 						<div class="settings-actions">
-							<button disabled={!Object.keys(state.settings.keys ?? {}).length} onClick={() => void resetKeys()}>
+							<button aria-label="Reset to defaults: the shortcuts" disabled={!Object.keys(state.settings.keys ?? {}).length} onClick={() => void resetKeys()}>
 								Reset to defaults
 							</button>
 						</div>
 					</Section>
-					<Show when={!groups.appearance() && !groups.editor() && !groups.server() && !groups.keyboard()}>
+					<Section title="Editor keys" when={groups.editorKeys()}>
+						<p class="settings-hint">
+							The editor's own keys, which work while you edit text: in code, and in a Markdown document's Live editor for the commands it has too. A key of two presses starts with {displayKey(onMac ? "cmd+k" : "ctrl+k")}, and is the code editor's alone. <span class="settings-scope">Saved for you</span>
+						</p>
+						<Show when={refused() && refusedIn() === "Editor keys"}>
+							<p class="settings-note" role="alert">
+								{refused()}
+							</p>
+						</Show>
+						<div class="shortcuts">
+							<For each={editorKeyRows()}>
+								{(c) => (
+									<div class="shortcut-row">
+										<span>{c.label}</span>
+										<span class="hint">{capturing() === c.id ? (chordFirst() ? `${displayKey(chordFirst())}, then the second key (Esc stops)` : "Press the keys (Esc stops)") : editorKeysFor(c.id) || "—"}</span>
+										<button aria-label={`Set the editor's key for ${c.label}`} onClick={() => record(c.id)}>
+											Set
+										</button>
+										<button
+											aria-label={`Clear the editor's key for ${c.label}`}
+											disabled={!editorKeysFor(c.id)}
+											onClick={() => {
+												const base = baseEditorKeys();
+												if (base) void saveSetting({ editorKeys: unbind(base, editorKeyChanges(), c.id) });
+											}}
+										>
+											Clear
+										</button>
+									</div>
+								)}
+							</For>
+						</div>
+						<div class="settings-actions">
+							<button aria-label="Reset to defaults: the editor's keys" disabled={!Object.keys(state.settings.editorKeys ?? {}).length} onClick={() => void resetEditorKeys()}>
+								Reset to defaults
+							</button>
+						</div>
+					</Section>
+					<Section title="Markdown keys" when={groups.markdownKeys()}>
+						<p class="settings-hint">
+							Keys for writing Markdown. They work while you edit a Markdown document, in Live and in Source, and come before any other key there. <span class="settings-scope">Saved for you</span>
+						</p>
+						<Show when={refused() && refusedIn() === "Markdown keys"}>
+							<p class="settings-note" role="alert">
+								{refused()}
+							</p>
+						</Show>
+						<div class="shortcuts">
+							<For each={markdownKeyRows()}>
+								{(c) => (
+									<div class="shortcut-row">
+										<span>{c.label}</span>
+										<span class="hint">{capturing() === MARKDOWN_ROW + c.id ? "Press the keys (Esc stops)" : markdownKeysFor(c.id) || "—"}</span>
+										<button aria-label={`Set Markdown's key for ${c.label}`} onClick={() => record(MARKDOWN_ROW + c.id)}>
+											Set
+										</button>
+										<button aria-label={`Clear Markdown's key for ${c.label}`} disabled={!markdownKeysFor(c.id)} onClick={() => void saveSetting({ markdownKeys: unbind(MARKDOWN_KEYS, markdownKeyChanges(), c.id) })}>
+											Clear
+										</button>
+									</div>
+								)}
+							</For>
+						</div>
+						<div class="settings-actions">
+							<button aria-label="Reset to defaults: Markdown's keys" disabled={!Object.keys(state.settings.markdownKeys ?? {}).length} onClick={() => void resetMarkdownKeys()}>
+								Reset to defaults
+							</button>
+						</div>
+					</Section>
+					<Show when={!groups.appearance() && !groups.editor() && !groups.server() && !groups.keyboard() && !groups.editorKeys() && !groups.markdownKeys()}>
 						<p class="settings-empty">No settings match.</p>
 					</Show>
 				</div>

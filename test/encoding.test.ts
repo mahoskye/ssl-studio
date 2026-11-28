@@ -106,6 +106,31 @@ describe("a file read for a listing is read as the editor reads it", () => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+	test("a save is written in the encoding the text was read in, though the file on disk has come to say nothing of it", async () => {
+		const root = mkdtempSync(join(tmpdir(), "ssl-studio-kept-encoding-"));
+		try {
+			const path = join(root, "temp.ssl");
+			// "/* 37°C ;" in Windows-1252: the degree sign is one byte, 0xB0.
+			writeFileSync(path, Buffer.from([...Buffer.from("/* 37"), 0xb0, ...Buffer.from("C ;\n")]));
+			const files = new WorkspaceFiles(root);
+			const read = await files.read(path);
+			expect(read.encoding).toBe("windows-1252");
+			// The degree sign taken out and saved: the file is plain ASCII, which reads as UTF-8 too.
+			await files.write(path, "/* 37 C ;\n", true, read.encoding);
+			expect(encodingOf(readFileSync(path))).toBe("utf-8");
+			// Saved again with a micro sign: one byte, as the editor said it would be, and not UTF-8's two.
+			await files.write(path, "/* 5 µL ;\n", true, read.encoding);
+			expect([...readFileSync(path)]).toEqual([...Buffer.from("/* 5 "), 0xb5, ...Buffer.from("L ;\n")]);
+			// With no encoding said, the file's is worked out from its bytes, as before: these are Windows-1252's.
+			await files.write(path, "/* 6 µL ;\n", true);
+			expect([...readFileSync(path)]).toEqual([...Buffer.from("/* 6 "), 0xb5, ...Buffer.from("L ;\n")]);
+			// A name that is no encoding is passed over.
+			await files.write(path, "/* 7 µL ;\n", true, "latin-9");
+			expect(readFileSync(path)[5]).toBe(0xb5);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 	test("the start of a file may end in the middle of a character", () => {
 		const whole = Buffer.from("# Café au lait");
 		expect(decodePart(whole.subarray(0, 6))).toBe("# Caf");
