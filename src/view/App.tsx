@@ -21,7 +21,8 @@ import { History } from "./panels/History";
 import { GitPanel } from "./panels/Git";
 import { changedCount, useGit } from "./git";
 import { Objects, useSymbols } from "./panels/Objects";
-import { Output, Problems, counts } from "./panels/Problems";
+import { Output, Problems, ProblemsHeaderActions, scopedCounts } from "./panels/Problems";
+import { formatScopedProblemsTooltip } from "./panels/problemsModel";
 import { Search } from "./panels/Search";
 import { Palette } from "./panels/Palette";
 import { Reference } from "./panels/Reference";
@@ -1151,9 +1152,21 @@ export function App() {
 								role="tab"
 								aria-selected={state.bottomView === "problems" ? "true" : "false"}
 								class={{ active: state.bottomView === "problems" }}
+								title={formatScopedProblemsTooltip(scopedCounts().activeLabel, scopedCounts().active, scopedCounts().project)}
 								onClick={() => setState((s) => { s.bottomView = "problems"; })}
 							>
-								Problems <span class="count">{counts().errors + counts().warnings + counts().other}</span>
+								Problems{" "}
+								<Show
+									when={scopedCounts().active.total > 0}
+									fallback={<span class="count">{scopedCounts().total.total}</span>}
+								>
+									<span class={`count active-file${scopedCounts().active.errors > 0 ? " error" : scopedCounts().active.warnings > 0 ? " warn" : ""}`}>
+										{scopedCounts().active.total}
+									</span>
+									<Show when={scopedCounts().project.total > 0}>
+										<span class="count project-extra">+{scopedCounts().project.total}</span>
+									</Show>
+								</Show>
 							</button>
 							<button
 								role="tab"
@@ -1164,18 +1177,23 @@ export function App() {
 								Output
 							</button>
 							<span class="spacer" />
-							<button
-								class="bottom-action"
-								title={`${isBottomMaximized() ? "Restore panel size" : "Maximize panel size"}${shortcut("toggle-panel-maximize")}`}
-								aria-label={isBottomMaximized() ? "Restore panel size" : "Maximize panel size"}
-								aria-pressed={isBottomMaximized() ? "true" : "false"}
-								onClick={() => setState((s) => { s.bottomMaximized = !s.bottomMaximized; })}
-							>
-								<Icon name={isBottomMaximized() ? "chevron-down" : "chevron-up"} />
-							</button>
-							<button class="bottom-action" title={`Close panel${shortcut("toggle-panel")}`} aria-label="Close the bottom panel" onClick={() => setState((s) => { s.settings.layout.bottom = false; })}>
-								<Icon name="close" />
-							</button>
+							<div class="bottom-tab-acts">
+								<Show when={state.bottomView === "problems"}>
+									<ProblemsHeaderActions />
+								</Show>
+								<button
+									class="bottom-action"
+									title={`${isBottomMaximized() ? "Restore panel size" : "Maximize panel size"}${shortcut("toggle-panel-maximize")}`}
+									aria-label={isBottomMaximized() ? "Restore panel size" : "Maximize panel size"}
+									aria-pressed={isBottomMaximized() ? "true" : "false"}
+									onClick={() => setState((s) => { s.bottomMaximized = !s.bottomMaximized; })}
+								>
+									<Icon name={isBottomMaximized() ? "chevron-down" : "chevron-up"} />
+								</button>
+								<button class="bottom-action" title={`Close panel${shortcut("toggle-panel")}`} aria-label="Close the bottom panel" onClick={() => setState((s) => { s.settings.layout.bottom = false; })}>
+									<Icon name="close" />
+								</button>
+							</div>
 						</div>
 						<Show when={state.bottomView} keyed>
 							{(_view) => (

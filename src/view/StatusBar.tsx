@@ -26,7 +26,8 @@ import { review } from "./editor/Review";
 import { measureKept } from "./editor/textmate";
 import { branchText, changedCount, gitStatus } from "./git";
 import { lspAnswering } from "./lsp/session";
-import { counts } from "./panels/Problems";
+import { counts, scopedCounts } from "./panels/Problems";
+import { formatScopedProblemsTooltip } from "./panels/problemsModel";
 import { requestHealthScope } from "./panels/healthModel";
 import { showPanel } from "./panels/registry";
 import { chooseFromMenu } from "./panels/RowMenu";
@@ -365,7 +366,11 @@ export function StatusBar() {
 			<button
 				class="item"
 				disabled={!state.workspace}
-				title={state.workspace ? `Show Problems${problemsKeys() ? ` (${problemsKeys()})` : ""}` : "Problems: open a folder first"}
+				title={
+					state.workspace
+						? `${formatScopedProblemsTooltip(scopedCounts().activeLabel, scopedCounts().active, scopedCounts().project)} · Show Problems${problemsKeys() ? ` (${problemsKeys()})` : ""}`
+						: "Problems: open a folder first"
+				}
 				aria-label={state.workspace ? `${problemCount(counts().errors, "error")}, ${problemCount(counts().warnings, "warning")}. Show Problems.` : "Problems: open a folder first."}
 				onClick={() => {
 					if (!state.workspace) return;
