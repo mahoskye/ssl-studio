@@ -173,9 +173,9 @@ from the keyboard, and says what it is).
   created, a method called and a class inherited. The graph draws each with
   its own line, names them in its key and its list, and counts them apart
   from calls. The IDE no longer works inheritance out by itself.
-- **Left for the language server** ([LSP-REQUESTS](LSP-REQUESTS.md)): three
-  defects the second review of the editor found (L11 to L13,
-  mahoskye/starlims-lsp#378, #379 and #380). starlims-lsp 0.32.0 answered
+- **Answered by the language server** ([LSP-REQUESTS](LSP-REQUESTS.md)):
+  0.33.1 fixed the three defects the second review of the editor found (L11
+  to L13, mahoskye/starlims-lsp#378, #379 and #380). starlims-lsp 0.32.0 answered
   the required exception to "prefer unannotated procedures" (L7), the
   first of L8's three, where comments, strings and keywords are (L9), and a
   range format that keeps to its range (L10). 0.33.0 answered the rest of
@@ -926,6 +926,10 @@ which supersedes one point of ADR 0009.
   ticked rows came in above the table and pushed every row down, so the
   next click meant for a checkbox could land on the bar's Delete. It is
   under the rows now.
+- **starlims-lsp 0.33.1** is the pinned version. Rename refuses `.T.`,
+  `.F.`, `.AND.`, `.OR.` and `.NOT.`; text such as `°` in a string no
+  longer moves signature help or a SQL placeholder's hover; `Me:` in a
+  class of the workspace lists its own members (L11 to L13).
 
 ## Planned
 

@@ -194,10 +194,10 @@ footer p { margin: 0 0 .6em; }
 	</div>
 
 	<div class="stats ui" role="list">
-		<div class="stat" role="listitem"><b>28</b><span>commits on the branch, pull request 5</span></div>
+		<div class="stat" role="listitem"><b>29</b><span>commits on the branch, pull request 5</span></div>
 		<div class="stat" role="listitem"><b>18</b><span>decision records, ADR 0034 to 0051</span></div>
-		<div class="stat" role="listitem"><b>4,147</b><span>unit tests passing, up from 3,896</span></div>
-		<div class="stat" role="listitem"><b>3</b><span>language server defects reported upstream</span></div>
+		<div class="stat" role="listitem"><b>4,153</b><span>unit tests passing, up from 3,896</span></div>
+		<div class="stat" role="listitem"><b>3</b><span>language server defects reported upstream, all fixed</span></div>
 	</div>
 </header>
 
@@ -217,6 +217,7 @@ footer p { margin: 0 0 .6em; }
 		<li><a href="#last-round">The last round</a></li>
 		<li><a href="#lsp033">A new language server, 0.33.0</a></li>
 		<li><a href="#filters">Filters out of sight, marks that say what a document is</a></li>
+		<li><a href="#lsp0331">The three defects, fixed upstream</a></li>
 		<li><a href="#checks">How it was checked</a></li>
 		<li><a href="#open">What is still open</a></li>
 	</ol>
@@ -389,7 +390,7 @@ footer p { margin: 0 0 .6em; }
 	<li>The status bar's Problems item was read out as "0 errors, 1 warnings". It now says "1 warning".</li>
 	<li>In a narrow Problems list, the 21-character code took the whole row and the message had no width at all. Below 420 pixels the code and position now go on a line under the message.</li>
 </ul>
-<p>The three defects reported from the second review (<a href="https://github.com/mahoskye/starlims-lsp/issues/378">#378</a>, <a href="https://github.com/mahoskye/starlims-lsp/issues/379">#379</a>, <a href="https://github.com/mahoskye/starlims-lsp/issues/380">#380</a>) are not in this release and are still open.</p>
+<p>The three defects reported from the second review (<a href="https://github.com/mahoskye/starlims-lsp/issues/378">#378</a>, <a href="https://github.com/mahoskye/starlims-lsp/issues/379">#379</a>, <a href="https://github.com/mahoskye/starlims-lsp/issues/380">#380</a>) are not in this release. They came in 0.33.1 later the same day (section 14).</p>
 
 <h2 id="filters"><span class="num ui">13</span>Filters out of sight, marks that say what a document is <span class="adr ui">ADR 0049 · 0050 · 0051</span></h2>
 <p>With the new server in, the user looked over the rest of the app and asked for six things before any of this was written up for the public. Three were about how the side panels read, one was a defect that made a table hard to use, and two were for the roadmap.</p>
@@ -414,17 +415,25 @@ footer p { margin: 0 0 .6em; }
 	<li><strong>On the roadmap:</strong> an adversarial review of its own for each panel the editor work did not cover (Explorer, Docs, the Document panel, Palette, Reference, Search, Source control, History, Agent, Health, Output) and for the Settings dialog.</li>
 </ul>
 
-<h2 id="checks"><span class="num ui">14</span>How it was checked</h2>
+<h2 id="lsp0331"><span class="num ui">14</span>The three defects, fixed upstream</h2>
+<p>Later the same day, <code>starlims-lsp</code> 0.33.1 closed all three issues from the second review. Nothing in the IDE had to change, since it applies what the server answers. What changed is how the editor behaves:</p>
 <ul>
-	<li><strong>Unit tests</strong> grew from 3,896 at the start to 4,147 on Linux, with 2 skipped and none failing, and the type check clean throughout. In the Windows 11 VM the suite had 4,101 passing, 35 skipped and none failing with 0.33.0 built for Windows; the last round, of filters and marks, was not run there.</li>
+	<li><strong>Rename on <code>.T.</code></strong> now says "Nothing to rename here." Renaming a variable called <code>t</code> edits the variable and leaves every <code>.T.</code> alone.</li>
+	<li><strong>After <code>Left("25 °C",</code></strong> signature help moves to <code>nLength</code> at the comma itself. A SQL placeholder after <code>'°C → µg/L'</code> hovers from its first letter. One on the second line of a multi-line string hovers too, which it never had.</li>
+	<li><strong><code>Me:</code> in a class of the workspace</strong> lists the class's fields and methods. Accepting a method writes its call with the parameters as placeholders: <code>Me:Bump(nBy)</code>, with <code>nBy</code> selected.</li>
+</ul>
+<p>Six new tests ask the pinned server each case. Run against 0.33.0, every one of them fails, so they will notice if a defect comes back.</p>
+
+<h2 id="checks"><span class="num ui">15</span>How it was checked</h2>
+<ul>
+	<li><strong>Unit tests</strong> grew from 3,896 at the start to 4,153 on Linux, with 2 skipped and none failing, and the type check clean throughout. In the Windows 11 VM the suite had 4,101 passing, 35 skipped and none failing with 0.33.0 built for Windows; the last two rounds, of filters and marks and of 0.33.1, were not run there.</li>
 	<li><strong>Desktop self-tests</strong> (plain, close-and-restore, long cycle) pass on Linux and in the Windows VM, with 0.33.0 on both.</li>
 	<li><strong>One Windows-only failure</strong> turned up on the way: a closing test that opens a folder, and so starts the language server, took 5.3 seconds under the whole suite against a 5-second limit. It passed three times out of three on its own, and its limit is now 30 seconds.</li>
 	<li><strong>In the running app</strong>, each visible change was looked at 720 and 1400 wide, light and dark, by real clicks and keys where the browser tool can send them, and by dispatched key events where it cannot.</li>
 </ul>
 
-<h2 id="open"><span class="num ui">15</span>What is still open</h2>
+<h2 id="open"><span class="num ui">16</span>What is still open</h2>
 <ul>
-	<li><strong>Three server issues</strong> wait on <code>starlims-lsp</code>, still open at 0.33.0. Until they are fixed, renaming <code>.T.</code> is still accepted, and <code>Me:</code> in a class written in the workspace still lists nothing.</li>
 	<li><strong>Initials in a large workspace</strong> cover open files only. If the server ever matches letters in order itself, as the protocol suggests for <code>workspace/symbol</code>, that limit goes away with no change here.</li>
 	<li><strong>Typing in a 50,000-line script</strong> still costs about 85 ms per key, most of it from the outline's many rows.</li>
 	<li><strong>Not tried on a Mac.</strong> Sublime Text's Mac keys are set, but no one has pressed them.</li>

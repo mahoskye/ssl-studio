@@ -84,6 +84,15 @@ export function formatter(path: string) {
 			send({ method: "textDocument/didClose", params: { textDocument: { uri } } });
 			return answer;
 		},
+		/** What the server answers to a request at a place in a text (hover, signature help, completion, prepare-rename), as it came. */
+		async at(method: string, text: string, position: { line: number; character: number }, params: object = {}): Promise<any> {
+			await started;
+			const uri = `file:///ws/.ssl-studio/at-${++count}.ssl`;
+			send({ method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "ssl", version: 1, text } } });
+			const answer = await request(method, { textDocument: { uri }, position, ...params });
+			send({ method: "textDocument/didClose", params: { textDocument: { uri } } });
+			return answer;
+		},
 		stop: () => void child.kill(),
 	};
 }

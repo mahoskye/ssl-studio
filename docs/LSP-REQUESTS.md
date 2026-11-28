@@ -345,7 +345,10 @@ as for STARLIMS. That answer is not applied
 Found by the second review of the editor, and checked against the server's
 own specification at 0.32.0 before they were reported: each answer breaks
 a rule the server's catalog states. Three defects, no feature of the IDE.
-**All three are still open at 0.33.0.**
+**All three are answered in starlims-lsp 0.33.1 (2026-11-27)**, SSL
+Studio's pinned version; #378, #379 and #380 are closed. The IDE needed no
+change, since it applies what the server answers. `test/lspDefectsAnswered.test.ts`
+asks the pinned server each case; every one of its tests fails on 0.33.0.
 
 Other findings of that review were left with the server as they are,
 because its specification calls them intended: a range format keeps its
@@ -368,6 +371,12 @@ every `.T.` in the file into `.Z.` (or whatever was typed). The catalog
 says prepare-rename must refuse literals and operators. The IDE applies
 what the server answers, so it has nothing to guard here.
 
+**What came (0.33.1):** prepare-rename and rename on the letters of any of
+the five answer nothing, so the editor says the name cannot be renamed.
+Renaming a variable spelled `t` (or `f`, `and`, `or`, `not`) edits the
+variable alone, and find references on it no longer lists the dotted
+tokens.
+
 ### L12: one unit for columns and token lengths
 
 With non-ASCII text in a string (`°`, `µ`, `é`), signature help counts
@@ -375,8 +384,20 @@ the wrong argument for a few characters after the next comma, and a
 SQL placeholder's hover can come back empty. The server compares character
 columns with `len` of a token's text, which counts bytes.
 
+**What came (0.33.1):** a token's extent is counted in characters. Signature
+help moves to the next parameter at the comma, a placeholder hovers from
+its first letter, and member completion and the placeholder findings'
+ranges are right after such text too. The same release fixed a
+placeholder's hover on the later lines of a multi-line string, which had
+never answered.
+
 ### L13: `Me:` lists the class's own members
 
 In a class written in the workspace, `Me:` offers nothing; the catalog's
 A4 says the enclosing class's members are listed. The server looks only
 among the built-in classes.
+
+**What came (0.33.1):** `Me:` lists the class's fields and methods, the
+procedures of the scripts it `:INCLUDE`s and what it inherits; `Base:`
+lists what it inherits. A method is offered as a snippet with its
+parameters as placeholders, which the editor already inserts as one.
