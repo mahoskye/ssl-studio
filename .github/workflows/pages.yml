@@ -18,16 +18,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The site is uploaded in a job of its own and deployed by the next, as deploy-pages documents it: in one
+  # job, deploy-pages@v4 listed no artifact a moment after upload-pages-artifact@v3 had uploaded it.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
   deploy:
+    needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
