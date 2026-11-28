@@ -549,6 +549,9 @@ export const commands: Command[] = [
 	{ id: "zoom-out", label: "Zoom out", detail: "A smaller interface", run: () => zoom(-1) },
 	{ id: "zoom-reset", label: "Reset zoom", run: () => zoom(0) },
 	{ id: "settings", label: "Open settings…", run: () => openSettings() },
+	{ id: "settings-json", label: "Preferences: Open Settings (JSON)", detail: "Edit raw User or Workspace settings.json", run: () => openSettings("__json__") },
+	{ id: "agent-customizations", label: "Agent: Configure Customizations", detail: "Manage Instructions, Skills, Custom Agents, Prompts, and MCP Servers", run: () => openCustomizations() },
+	{ id: "agent-mcp", label: "Agent: Manage MCP Servers", detail: "Configure and trust local stdio or remote MCP servers", run: () => openCustomizations("mcp") },
 	{ id: "keyboard-shortcuts", label: "Show keyboard shortcuts…", detail: "Every command's keys, to look up and to change", run: () => openSettings("keyboard") },
 	{ id: "about", label: "About SSL Studio", detail: "Its version, and the language server's and the agent's", run: about },
 ];
@@ -679,6 +682,12 @@ let settingsOpener: (query?: string) => void = () => {};
 export const onOpenSettings = (open: (query?: string) => void) => (settingsOpener = open);
 /** Opens Settings; with `query`, showing only what matches it ("keyboard" for the shortcuts). */
 export const openSettings = (query?: string) => settingsOpener(query);
+
+export type CustomizationsTab = "instructions" | "skills" | "agents" | "prompts" | "mcp";
+let customizationsOpener: (tab?: CustomizationsTab) => void = () => {};
+export const onOpenCustomizations = (open: (tab?: CustomizationsTab) => void) => (customizationsOpener = open);
+/** Opens the Agent Customizations hub (Instructions, Skills, Custom Agents, Prompts, MCP Servers). */
+export const openCustomizations = (tab?: CustomizationsTab) => customizationsOpener(tab);
 
 const MENU_HIDDEN = "The menu bar is hidden. “Toggle menu bar” in the command list brings it back.";
 let menuOpener: ((index?: number) => void) | null = null;

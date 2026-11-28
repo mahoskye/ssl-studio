@@ -12,6 +12,7 @@ import { copyNotKept, History, historyNotKept } from "./history";
 import { LspProcess } from "./lsp";
 import { catalogFilesOf, docAudit, docsTruncated, EXPORT_TYPES, fileManifest, linksTo, listDocs, namesIn, readExport, readProject, setupProject, tomlProblem, undoSetup } from "./project";
 import { recent, SettingsStore } from "./settings";
+import { CustomizationsStore } from "./customizations";
 import { findLsp, findOpencode } from "./tools";
 import { Unsaved, unsavedNotKept } from "./unsaved";
 import { fileKey, WorkspaceFiles } from "./workspace";
@@ -107,6 +108,7 @@ export function createBackend(host: Host, initial?: string) {
 		host.emit("lspState", state);
 	};
 	const settings = new SettingsStore(() => files?.root ?? null);
+	const customizations = new CustomizationsStore(() => files?.root ?? null);
 	// SSL_STUDIO_OPENCODE replaces the opencode command (tests use test/fake-opencode.ts).
 	const command = parseOpencodeCommandEnv(process.env.SSL_STUDIO_OPENCODE);
 	const agent = new Agent((type, data) => host.emit("agent", { type, data }), () => files?.root ?? null, command);
@@ -785,6 +787,16 @@ export function createBackend(host: Host, initial?: string) {
 		namesIn: async () => namesIn(need()),
 		settings: () => settings.load(),
 		saveSettings: (scope, patch) => settings.save(scope, patch),
+		settingsFile: (scope) => settings.readFile(scope),
+		saveSettingsFile: (scope, text) => settings.writeFile(scope, text),
+		customizations: async () => customizations.list(),
+		customizationRead: async (path) => customizations.read(path),
+		customizationSave: (path, text) => customizations.save(path, text),
+		customizationCreate: (request) => customizations.create(request),
+		customizationDelete: (path) => customizations.remove(path),
+		mcpSave: (scope, server) => customizations.saveMcpServer(scope, server),
+		mcpDelete: (scope, id) => customizations.deleteMcpServer(scope, id),
+		mcpSetTrust: (id, fingerprint, trusted) => customizations.setMcpTrust(id, fingerprint, trusted),
 		themes: () => settings.themes(),
 		importTheme: async () => {
 			const path = await host.pick("file");
@@ -848,12 +860,14 @@ export function createBackend(host: Host, initial?: string) {
 		agent: async (method, args) => {
 			const { effective, user } = await settings.load();
 			const confirmedModels = typeof user.agentModel === "string" && user.agentModel.trim() ? [user.agentModel.trim()] : [];
+			const mcpServers = customizations.list().mcpServers;
 			agent.configure({
 				serverConfig: effective.agentServerConfig,
 				serverUrl: effective.agentServerUrl,
 				model: effective.agentModel,
 				ownModels: effective.agentOwnModels,
 				confirmedModels,
+				mcpServers,
 			});
 			return agent.call(method, args);
 		},

@@ -10,6 +10,8 @@ import { activeLiveEditor, liveSelectionVersion } from "../editor/liveBridge";
 import type { monaco } from "../editor/monaco";
 import { searchableText, searchableTextNow } from "../lsp/facts";
 import { review, openReview, type Check } from "../editor/Review";
+import { customizationsVersion, openCustomizationsHub as openCustomizations } from "../settings/CustomizationsView";
+import { parseCustomAgentDocument, parsePromptFileDocument, parseSkillDocument, type AgentCustomizationsSnapshot } from "../../shared/agentCustomizations";
 import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, save, scriptsCameTo, setState, state } from "../state";
 import { agent, ask, chatSessionEpoch, chooseModel, clearEntries, clearSavedThreads, currentModel, interrupt, isSessionBreak, resume, safely, setAgent, start, startNewThread, stop, switchThread, syncWorkspaceThreads, type Entry } from "./store";
 import {
@@ -88,6 +90,8 @@ type AgentContextState = {
 	withGitDiff: boolean;
 	withGoverningDocs: boolean;
 	attachedFiles: { path: string; rel: string }[];
+	attachedSkills: { id: string; name: string; path: string }[];
+	activeCustomAgent: { id: string; name: string; path: string } | null;
 };
 const [agentCtx, setAgentCtx] = createStore<AgentContextState>({
 	root: null,
@@ -99,6 +103,8 @@ const [agentCtx, setAgentCtx] = createStore<AgentContextState>({
 	withGitDiff: false,
 	withGoverningDocs: false,
 	attachedFiles: [],
+	attachedSkills: [],
+	activeCustomAgent: null,
 });
 const [sentTick, setSentTick] = createSignal(0);
 /** Synchronous preparing lock held across async context assembly before `ask()` sets `agent.busy`. */
@@ -131,6 +137,8 @@ function ensureAgentWorkspace(): boolean {
 		s.withGitDiff = false;
 		s.withGoverningDocs = false;
 		s.attachedFiles = [];
+		s.attachedSkills = [];
+		s.activeCustomAgent = null;
 	});
 	sentContext = { session: null, root: curRoot, hashes: new Map() };
 	syncWorkspaceThreads(curRoot);
@@ -517,6 +525,39 @@ async function prepareContextDelta(
 				baseName(tf.rel),
 				`ATTACHED FILE ${tf.rel}:\n${cut(content.replace(/\r\n/g, "\n"), 3500)}`,
 			);
+		}
+	}
+
+	// 6. Selected Custom Agent persona & explicitly attached Skills (ADR 0053, deterministic prompt injection per ADR 0004).
+	const ctxNow = snapshot(agentCtx);
+	if (ctxNow.activeCustomAgent) {
+		try {
+			const res = await backend.customizationRead(ctxNow.activeCustomAgent.path);
+			const parsed = parseCustomAgentDocument(res.text, ctxNow.activeCustomAgent.name);
+			if (parsed.body) {
+				addSlice(
+					`agent:${ctxNow.activeCustomAgent.id}`,
+					`agent:${parsed.name}`,
+					`CUSTOM AGENT PERSONA (${parsed.name}):\n${cut(parsed.body, 3200)}`,
+				);
+			}
+		} catch {
+			// Skip if persona file was removed.
+		}
+	}
+	for (const sk of ctxNow.attachedSkills) {
+		try {
+			const res = await backend.customizationRead(sk.path);
+			const parsed = parseSkillDocument(res.text, sk.name);
+			if (parsed.body) {
+				addSlice(
+					`skill:${sk.id}`,
+					`skill:${parsed.name}`,
+					`AGENT SKILL (${parsed.name}):\n${cut(parsed.body, 3500)}`,
+				);
+			}
+		} catch {
+			// Skip if skill file was removed.
 		}
 	}
 
@@ -1767,11 +1808,109 @@ export function AgentPanel() {
 		);
 		box?.focus();
 	};
+	const [customSnap, setCustomSnap] = createSignal<AgentCustomizationsSnapshot | null>(null);
+	createEffect(
+		() => [state.workspace?.root ?? "", customizationsVersion()] as const,
+		() => {
+			void backend.customizations().then(
+				(snap) => setCustomSnap(snap),
+				() => setCustomSnap(null),
+			);
+		},
+	);
+
+	const pickSkill = async () => {
+		const skills = customSnap()?.skills ?? [];
+		if (!skills.length) {
+			const picked = await choose("No Agent Skills (SKILL.md) found yet. Open Agent Customizations to create one?", ["Open Customizations"]);
+			if (picked === "Open Customizations") openCustomizations("skills");
+			return;
+		}
+		const already = new Set(snapshot(agentCtx).attachedSkills.map((s) => s.id));
+		const picked = await quickPick<string>({
+			title: "Attach Agent Skill to next turn",
+			placeholder: "Search discovered Workspace and User skills…",
+			items: [
+				...skills.map((sk) => ({
+					label: sk.name,
+					value: sk.id,
+					checked: already.has(sk.id),
+					badge: { text: sk.scope === "workspace" ? "Workspace" : "User", tone: sk.scope === "workspace" ? "active" : "muted" },
+					detail: sk.description,
+					icon: "extensions" as const,
+				})),
+				{ label: "Configure Agent Customizations…", value: "__open__", icon: "gear", divide: true },
+			],
+		});
+		if (!picked) return;
+		if (picked === "__open__") return openCustomizations("skills");
+		const found = skills.find((s) => s.id === picked);
+		if (!found) return;
+		setAgentCtx((s) => {
+			const exists = s.attachedSkills.some((x) => x.id === found.id);
+			if (exists) s.attachedSkills = s.attachedSkills.filter((x) => x.id !== found.id);
+			else s.attachedSkills.push({ id: found.id, name: found.name, path: found.path });
+		});
+	};
+
+	const pickCustomAgent = async () => {
+		const list = customSnap()?.agents ?? [];
+		if (!list.length) {
+			openCustomizations("agents");
+			return;
+		}
+		const curId = snapshot(agentCtx).activeCustomAgent?.id ?? "";
+		const picked = await quickPick<string>({
+			title: "Select Custom Agent Persona",
+			placeholder: "Choose a custom *.agent.md persona…",
+			items: [
+				{ label: "Default SSL Studio Assistant", value: "__default__", checked: !curId, icon: "sparkle" },
+				...list.map((a) => ({
+					label: a.name,
+					value: a.id,
+					checked: curId === a.id,
+					badge: { text: a.scope === "workspace" ? "Workspace" : "User", tone: a.scope === "workspace" ? "active" : "muted" },
+					detail: a.description,
+					icon: "hubot" as const,
+				})),
+				{ label: "Configure Custom Agents…", value: "__open__", icon: "gear", divide: true },
+			],
+		});
+		if (!picked) return;
+		if (picked === "__open__") return openCustomizations("agents");
+		if (picked === "__default__") {
+			setAgentCtx((s) => { s.activeCustomAgent = null; });
+			return;
+		}
+		const found = list.find((a) => a.id === picked);
+		if (found) setAgentCtx((s) => { s.activeCustomAgent = { id: found.id, name: found.name, path: found.path }; });
+	};
+
 	const promptMenuItems = (): MenuItem[] => {
 		const items: MenuItem[] = [];
 		const kept = keptPrompts();
 		if (kept.length) {
 			for (const file of kept) items.push({ label: file.title || file.name, run: () => loadKeptPrompt(file) });
+			items.push("separator");
+		}
+		const extraPrompts = (customSnap()?.prompts ?? []).filter((p) => p.source !== "knowledge");
+		if (extraPrompts.length) {
+			for (const pf of extraPrompts) {
+				items.push({
+					label: `${pf.command} — ${pf.title}`,
+					run: () => {
+						void backend.customizationRead(pf.path).then(
+							(res) => {
+								const parsed = parsePromptFileDocument(res.text, pf.name);
+								setDraft(parsed.body || res.text);
+								setNotSent("");
+								box?.focus();
+							},
+							(e) => notify(`Could not load prompt ${pf.command}: ${String(e?.message ?? e)}`, "error"),
+						);
+					},
+				});
+			}
 			items.push("separator");
 		}
 		const contextual: MenuItem[] = [];
@@ -1905,6 +2044,15 @@ export function AgentPanel() {
 							Stop opencode
 						</button>
 					</Show>
+					<button
+						type="button"
+						class="agent-hdr-btn"
+						title="Configure Agent Customizations (Instructions, Skills, Custom Agents, Prompts, MCP)"
+						aria-label="Configure Agent Customizations"
+						onClick={() => openCustomizations("skills")}
+					>
+						<Icon name="gear" />
+					</button>
 				</div>
 			</div>
 			<div class="agent-status">
@@ -2208,6 +2356,39 @@ export function AgentPanel() {
 						>
 							+ File…
 						</button>
+						<button
+							type="button"
+							class="agent-ctx-chip"
+							title={`Attach a discovered SKILL.md bundle (${customSnap()?.skills.length ?? 0} available)`}
+							onClick={() => void pickSkill()}
+						>
+							+ Skill…
+						</button>
+						<Show when={(customSnap()?.agents.length ?? 0) > 0 || agentCtx.activeCustomAgent}>
+							<button
+								type="button"
+								class={["agent-ctx-chip", { active: Boolean(agentCtx.activeCustomAgent) }]}
+								title="Select a custom *.agent.md persona for this turn"
+								onClick={() => void pickCustomAgent()}
+							>
+								<Icon name="hubot" />
+								<span>{agentCtx.activeCustomAgent ? agentCtx.activeCustomAgent.name : "Persona…"}</span>
+							</button>
+						</Show>
+						<For each={agentCtx.attachedSkills}>
+							{(sk) => (
+								<button
+									type="button"
+									class="agent-ctx-chip active"
+									title={`Remove skill "${sk.name}" from prompt context`}
+									onClick={() => setAgentCtx((s) => { s.attachedSkills = s.attachedSkills.filter((x) => x.id !== sk.id); })}
+								>
+									<Icon name="extensions" />
+									<span>{sk.name}</span>
+									<Icon name="close" />
+								</button>
+							)}
+						</For>
 						<For each={agentCtx.attachedFiles}>
 							{(tf) => (
 								<button

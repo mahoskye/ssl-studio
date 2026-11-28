@@ -1,6 +1,9 @@
-// Settings: appearance, the editor, the language server and the keyboard,
-// each saying where it is saved.
+// Settings Editor (ADR 0053): VS Code-style searchable settings workspace with
+// explicit User | Workspace scope tabs, left category TOC, `@modified` filtering,
+// per-setting modified gutter + Reset, Open Settings (JSON) toggle, unified
+// Keyboard Shortcuts table, and seamless center-tab + Welcome-modal hosting.
 import { Icon } from "./Icon";
+import { Menu, type MenuItem } from "./Menu";
 import { cloneCsvTableConfig, DEFAULT_CSV_TABLE_CONFIG, effectiveCsvTableConfig } from "../shared/csvFormat";
 import { DEFAULT_SQL_DIALECT, SQL_DIALECTS, type SqlDialect } from "../shared/format";
 import { CODE_FONT_PRESETS, READ_FONT_PRESETS, UI_FONT_PRESETS, type FontPreset } from "../shared/fonts";
@@ -18,30 +21,85 @@ import {
 	type ThemeMaterial,
 	type ThemeTone,
 } from "../shared/oklchTheme";
+import {
+	countModifiedSettings,
+	isSettingDefinedInScope,
+	parseSettingsQuery,
+	SETTINGS_CATEGORIES,
+	SETTINGS_SCHEMA,
+	SETTINGS_SCHEMA_MAP,
+	settingMatchesQuery,
+	settingScopeNote,
+	USER_ONLY_SETTING_KEYS,
+	type SettingsCategoryId,
+	type SettingsLayers,
+} from "../shared/settingsSchema";
 import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, Show, untrack } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import { EDITOR_COMMANDS, editorCommandLabel, editorKeyCode, isEditorCommand, isMarkdownCommand, MARKDOWN_COMMANDS, MARKDOWN_KEYS, markdownCommandLabel, pressesOf } from "../shared/editorKeymap";
+import {
+	EDITOR_COMMANDS,
+	editorCommandLabel,
+	editorKeyCode,
+	isEditorCommand,
+	MARKDOWN_COMMANDS,
+	MARKDOWN_KEYS,
+	markdownCommandLabel,
+	pressesOf,
+} from "../shared/editorKeymap";
 import { startsEditorChord } from "../shared/menuBar";
 import { isInside, resolvePath } from "../shared/paths";
-import type { Settings, SettingsPatch } from "../shared/protocol";
+import type { Settings, SettingsPatch, SettingsScope } from "../shared/protocol";
 import { backend, inApp } from "./backend";
-import { commands, DEFAULT_KEYS, keymap, keysFor, onOpenSettings } from "./commands";
+import { commands, DEFAULT_KEYS, keymap, keysFor, onOpenSettings, openCustomizations } from "./commands";
 import { choose } from "./dialogs";
-import { baseEditorKeys, displayEditorKey, editorKeyChanges, editorKeysNow, editorKeysOf, editorTakesKey, markdownKeyChanges, markdownKeysNow } from "./editor/editorKeys";
+import { closeComparison } from "./editor/Review";
+import {
+	baseEditorKeys,
+	displayEditorKey,
+	editorKeyChanges,
+	editorKeysNow,
+	editorKeysOf,
+	editorTakesKey,
+	markdownKeyChanges,
+	markdownKeysNow,
+} from "./editor/editorKeys";
 import { bindable, conflict, displayKey, isModifierKey, keyNamesForPlatform, keysOf, rebind, sharedKeyName, unbind } from "./keys";
 import { Modal } from "./modal";
 import { matchWords } from "./quickRank";
-import { loadSettings, notify, restartLsp, saveSetting, state, syncLivePreviewMode } from "./state";
+import { AgentSettingsSection } from "./settings/AgentSettingsSection";
+import { SettingsJsonEditor } from "./settings/SettingsJsonEditor";
+import { StorageLimitsSection } from "./settings/StorageLimitsSection";
+import { loadSettings, notify, restartLsp, saveSetting, setState, state, syncLivePreviewMode } from "./state";
+import { openStyleProfile } from "./StyleProfile";
 import { clampScale, stepScale, UI_SCALE } from "./uiScale";
 
-type Layers = { user: Partial<Settings>; workspace: Partial<Settings> };
-type Group = "Appearance" | "Editor" | "Language server" | "Keyboard" | "Editor keys" | "Markdown keys";
+type NavCategory = "all" | SettingsCategoryId;
+type ShortcutContextFilter = "all" | "global" | "editor" | "markdown" | "modified";
 
 /** What a row of Markdown's keys is recorded under: its commands are the shell's too, and have a row in that list. */
 const MARKDOWN_ROW = "markdown-key:";
 
 const FONT = { min: 8, max: 32, normal: 13 };
 const onMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform ?? "");
+
+// Shared view state so SettingsDialog (modal fallback when no workspace is open) and SettingsView (center tab) stay in sync.
+const [modalOpen, setModalOpen] = createSignal(false);
+const [settingsQuery, setSettingsQuery] = createSignal("");
+const [activeScope, setActiveScope] = createSignal<SettingsScope>("user");
+const [activeCategory, setActiveCategory] = createSignal<NavCategory>("all");
+const [jsonMode, setJsonMode] = createSignal(false);
+const [layers, setLayers] = createSignal<SettingsLayers>({ user: {}, workspace: {} });
+const [layersNonce, setLayersNonce] = createSignal(0);
+
+function refreshLayers() {
+	return backend.settings().then(
+		(s) => {
+			setLayers({ user: s.user, workspace: s.workspace });
+			setLayersNonce((n) => n + 1);
+		},
+		() => {},
+	);
+}
 
 /** Clamps a numeric setting cleanly; empty or non-finite input falls back to `fallback`, while finite `0` clamps to `min`. */
 export function clampNumericSetting(raw: string, min: number, max: number, fallback: number): number {
@@ -164,46 +222,60 @@ function DraftInput(props: {
 	);
 }
 
-export function SettingsDialog() {
-	const [open, setOpen] = createSignal(false);
-	const [query, setQuery] = createSignal("");
-	const [layers, setLayers] = createSignal<Layers>({ user: {}, workspace: {} });
-	/** The command whose shortcut is being recorded. */
-	const [capturing, setCapturing] = createSignal<string | null>(null);
-	/** Why the last key pressed was not taken. */
-	const [refused, setRefused] = createSignal("");
-	/** The first press of a key of two presses, while the second is waited for, and the command it is recorded for. */
-	const [chord, setChord] = createSignal<{ id: string; first: string } | null>(null);
-	const chordFirst = () => (chord() && chord()!.id === capturing() ? chord()!.first : "");
-	/** Which list the key that was not taken was pressed for: the note stands with that list. */
-	const [refusedIn, setRefusedIn] = createSignal<Group>("Keyboard");
-	const titleId = createUniqueId();
+type ShortcutRow = {
+	rowId: string;
+	commandId: string;
+	label: string;
+	context: "Global" | "Code Editor" | "Markdown";
+	contextKey: "global" | "editor" | "markdown";
+	keysText: string;
+	modified: boolean;
+};
 
-	const loadLayers = () =>
-		backend.settings().then(
-			(s) => setLayers({ user: s.user, workspace: s.workspace }),
-			() => {},
-		);
-	onOpenSettings((query = "") => {
-		setQuery(query);
-		setRefused("");
-		setOpen(true);
-		void loadLayers();
-	});
-	const close = () => {
-		setCapturing(null);
-		setOpen(false);
+/** Full VS Code-style Settings Editor body (hosted inside CenterTabStrip when a workspace is open, or inside Modal on Welcome). */
+function SettingsWorkspace(props: { embedded: boolean; onClose?: () => void }) {
+	const [capturing, setCapturing] = createSignal<string | null>(null);
+	const [refused, setRefused] = createSignal("");
+	const [chord, setChord] = createSignal<{ id: string; first: string } | null>(null);
+	const [keyContextFilter, setKeyContextFilter] = createSignal<ShortcutContextFilter>("all");
+	const chordFirst = () => (chord() && chord()!.id === capturing() ? chord()!.first : "");
+
+	// Reset workspace scope back to User when no workspace is open.
+	createEffect(
+		() => !state.workspace && activeScope() === "workspace",
+		(reset) => {
+			if (reset) setActiveScope("user");
+		},
+	);
+
+	// Reload layers whenever workspace changes or the Settings tab opens.
+	createEffect(
+		() => [state.workspace?.root ?? "", state.centerView === "settings" || modalOpen()] as const,
+		([, visible]) => {
+			if (visible) void refreshLayers();
+		},
+	);
+
+	const scopeOf = (key: keyof Settings): SettingsScope => {
+		if (USER_ONLY_SETTING_KEYS.has(key)) return "user";
+		if (!state.workspace) return "user";
+		return activeScope();
 	};
 
-	// A value this project's own settings file holds is changed there: yours
-	// would not be seen while the project's is in the way.
-	const scopeOf = (key: keyof Settings) => (state.workspace && key in layers().workspace ? "workspace" : "user");
 	const save = async <K extends keyof Settings>(key: K, value: Settings[K] | null): Promise<boolean> => {
 		const saved = Boolean(await saveSetting({ [key]: value } as SettingsPatch, scopeOf(key)));
-		await loadLayers();
+		await refreshLayers();
 		if (key === "lspPath" && saved) await restartLsp();
 		return saved;
 	};
+
+	const saveUserOnly = async <K extends keyof Settings>(key: K, value: Settings[K] | null): Promise<boolean> => {
+		const saved = Boolean(await saveSetting({ [key]: value } as SettingsPatch, "user"));
+		await refreshLayers();
+		if (key === "lspPath" && saved) await restartLsp();
+		return saved;
+	};
+
 	const saveRelFolder = (key: "attachmentsFolder" | "templatesFolder", input: HTMLInputElement): string | Promise<string | false> => {
 		const check = validateWorkspaceFolderSetting(input.value);
 		if (!check.ok) {
@@ -216,61 +288,89 @@ export function SettingsDialog() {
 		input.value = next;
 		return save(key, check.value).then((saved) => (saved ? next : false));
 	};
-	const shown = (group: Group, ...text: (string | undefined)[]) => matchWords(query(), [group, ...text].filter(Boolean).join(" ")) > 0;
 
-	// --- keyboard --------------------------------------------------------------
+	const parsedQuery = createMemo(() => parseSettingsQuery(settingsQuery()));
 
-	const label = (id: string) => commands.find((c) => c.id === id)?.label ?? id;
-	/** The shell's keys, as the code editor's keys are weighed against them. */
+	const toggleQueryToken = (token: string) => {
+		const current = settingsQuery().trim();
+		const re = new RegExp(`(?:^|\\s)${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=\\s|$)`, "i");
+		if (re.test(current)) {
+			setSettingsQuery(current.replace(re, " ").replace(/\s+/g, " ").trim());
+		} else {
+			setSettingsQuery(current ? `${token} ${current}` : token);
+		}
+	};
+
+	const activeFilterChips = createMemo(() => {
+		const pq = parsedQuery();
+		const chips: { token: string; label: string }[] = [];
+		if (pq.modifiedOnly) chips.push({ token: "@modified", label: "Modified" });
+		if (pq.scopeFilter === "user") chips.push({ token: "@user", label: "User overrides" });
+		if (pq.scopeFilter === "workspace") chips.push({ token: "@workspace", label: "Workspace overrides" });
+		if (pq.userOnly) chips.push({ token: "@security", label: "User-only security" });
+		return chips;
+	});
+
+	const visibleSchemaKeys = createMemo(() => {
+		const pq = parsedQuery();
+		const l = layers();
+		const sc = activeScope();
+		const set = new Set<keyof Settings>();
+		for (const meta of SETTINGS_SCHEMA) {
+			if (settingMatchesQuery(meta, pq, l, sc, matchWords)) set.add(meta.key);
+		}
+		return set;
+	});
+
+	// --- keyboard shortcuts ----------------------------------------------------
+
+	const labelOf = (id: string) => commands.find((c) => c.id === id)?.label ?? id;
 	const shellKeys = () => ({ map: keymap(), chosen: state.settings.keys ?? {} });
-	/** The code editor's command on a key, where the editor and not the shell has that key while code is edited. */
 	const editorsOn = (key: string) => (editorTakesKey([key], shellKeys()) ? editorKeysNow()?.[key] : undefined);
+	const inMarkdown = (command: string) => `While you edit a Markdown document it stays “${markdownCommandLabel(command)}”.`;
+
 	const bind = async (id: string, key: string) => {
 		const taken = conflict(key, id, keymap());
 		const editors = editorsOn(key);
-		// A key the user gave an editor command stays the editor's while code is edited, whatever the shell has on it.
 		const stays = Boolean(editors && editorKeyChanges()[key]);
 		const name = displayKey(key);
 		let question = "";
 		let yes = "Replace";
 		if (editors && stays) {
-			question = `${name} is the editor's key for “${editorCommandLabel(editors)}”, as you set it, and stays that while you edit text. ${taken ? `Everywhere else it is the shortcut for “${label(taken)}”. Use it for “${label(id)}” there instead?` : `Use it for “${label(id)}” everywhere else?`}`;
+			question = `${name} is the editor's key for “${editorCommandLabel(editors)}”, as you set it, and stays that while you edit text. ${taken ? `Everywhere else it is the shortcut for “${labelOf(taken)}”. Use it for “${labelOf(id)}” there instead?` : `Use it for “${labelOf(id)}” everywhere else?`}`;
 			if (!taken) yes = "Use elsewhere";
 		} else if (editors) {
-			question = `${name} is ${taken ? `the shortcut for “${label(taken)}”, and ` : ""}the editor's key for “${editorCommandLabel(editors)}”. Use it for “${label(id)}” instead, in the editor too?`;
+			question = `${name} is ${taken ? `the shortcut for “${labelOf(taken)}”, and ` : ""}the editor's key for “${editorCommandLabel(editors)}”. Use it for “${labelOf(id)}” instead, in the editor too?`;
 		} else if (taken) {
-			question = `${name} is the shortcut for “${label(taken)}”. Use it for “${label(id)}” instead?`;
+			question = `${name} is the shortcut for “${labelOf(taken)}”. Use it for “${labelOf(id)}” instead?`;
 		}
-		// Markdown's keys come first while a document is edited, whatever else has the key (ADR 0041).
 		const markdown = markdownKeysNow()[key];
 		if (markdown && question) question += ` ${inMarkdown(markdown)}`;
 		else if (markdown) {
-			question = `${name} is Markdown's key for “${markdownCommandLabel(markdown)}”, and stays that while you edit a Markdown document. Use it for “${label(id)}” everywhere else?`;
+			question = `${name} is Markdown's key for “${markdownCommandLabel(markdown)}”, and stays that while you edit a Markdown document. Use it for “${labelOf(id)}” everywhere else?`;
 			yes = "Use elsewhere";
 		}
 		if (question && (await choose(question, [yes])) !== yes) return;
 		await saveSetting({ keys: rebind(DEFAULT_KEYS, state.settings.keys ?? {}, id, key) });
+		await refreshLayers();
 	};
-	/** What is said of a key that Markdown has too, when it is given to something else. */
-	const inMarkdown = (command: string) => `While you edit a Markdown document it stays “${markdownCommandLabel(command)}”.`;
-	/** Gives a key (of one press or two) to one of the code editor's commands. */
+
 	const bindEditor = async (id: string, key: string) => {
 		const base = baseEditorKeys();
 		if (!base) return;
 		const changes = editorKeyChanges();
 		const taken = conflict(key, id, editorKeysNow() ?? {});
-		// The shell's command on the key, where the shell and not the editor has the key while code is edited.
 		const shells = pressesOf(key).length === 1 && !editorTakesKey([key], shellKeys()) ? keymap()[key] : undefined;
 		const name = displayEditorKey(key);
 		const mine = editorCommandLabel(id);
 		let question = "";
 		let yes = "Replace";
 		if (taken && shells) {
-			question = `${name} is the editor's key for “${editorCommandLabel(taken)}”, and the shortcut for “${label(shells)}”. Use it for “${mine}” while you edit text? “${label(shells)}” keeps it everywhere else.`;
+			question = `${name} is the editor's key for “${editorCommandLabel(taken)}”, and the shortcut for “${labelOf(shells)}”. Use it for “${mine}” while you edit text? “${labelOf(shells)}” keeps it everywhere else.`;
 		} else if (taken) {
 			question = `${name} is the editor's key for “${editorCommandLabel(taken)}”. Use it for “${mine}” instead?`;
 		} else if (shells) {
-			question = `${name} is the shortcut for “${label(shells)}”. Use it for “${mine}” while you edit text? “${label(shells)}” keeps it everywhere else.`;
+			question = `${name} is the shortcut for “${labelOf(shells)}”. Use it for “${mine}” while you edit text? “${labelOf(shells)}” keeps it everywhere else.`;
 			yes = "Use in the editor";
 		}
 		const markdown = pressesOf(key).length === 1 ? markdownKeysNow()[key] : undefined;
@@ -281,16 +381,16 @@ export function SettingsDialog() {
 		}
 		if (question && (await choose(question, [yes])) !== yes) return;
 		await saveSetting({ editorKeys: rebind(base, changes, id, key) });
+		await refreshLayers();
 	};
-	/** Gives a key to one of Markdown's commands: the key is that command's while a Markdown document is edited. */
+
 	const bindMarkdown = async (id: string, key: string) => {
 		const taken = conflict(key, id, markdownKeysNow());
 		const mine = markdownCommandLabel(id);
 		const name = displayKey(key);
-		// What the key is outside a Markdown document, and goes on being there.
 		const editors = editorsOn(key);
 		const shells = editors ? undefined : keymap()[key];
-		const elsewhere = editors ? `the editor's key for “${editorCommandLabel(editors)}”` : shells ? `the shortcut for “${label(shells)}”` : "";
+		const elsewhere = editors ? `the editor's key for “${editorCommandLabel(editors)}”` : shells ? `the shortcut for “${labelOf(shells)}”` : "";
 		let question = "";
 		let yes = "Replace";
 		if (taken) {
@@ -301,19 +401,19 @@ export function SettingsDialog() {
 		}
 		if (question && (await choose(question, [yes])) !== yes) return;
 		await saveSetting({ markdownKeys: rebind(MARKDOWN_KEYS, markdownKeyChanges(), id, key) });
+		await refreshLayers();
 	};
-	// While a shortcut is being recorded every key is the modal's: it is the
-	// answer, not a command to run or a way out (Escape only stops recording).
-	const onKey = (e: KeyboardEvent) => {
+
+	const handleCaptureKey = (e: KeyboardEvent): boolean => {
 		const id = capturing();
 		if (!id) return false;
 		if (e.isComposing || e.keyCode === 229) return true;
-		setRefusedIn(isEditorCommand(id) ? "Editor keys" : id.startsWith(MARKDOWN_ROW) ? "Markdown keys" : "Keyboard");
 		e.preventDefault();
 		e.stopImmediatePropagation();
 		if (isModifierKey(e.key)) return true;
 		if (e.key === "Escape") {
 			setCapturing(null);
+			setChord(null);
 			return true;
 		}
 		const names = keyNamesForPlatform(e, onMac);
@@ -323,7 +423,6 @@ export function SettingsDialog() {
 		}
 		const key = names[0]!;
 		if (isEditorCommand(id)) {
-			// The code editor's keys of two presses start with Ctrl+K (Cmd+K on a Mac): pressed first, it is half a key.
 			const first = chordFirst();
 			if (!first && startsEditorChord(names, onMac)) {
 				setRefused("");
@@ -341,10 +440,10 @@ export function SettingsDialog() {
 			}
 			setRefused("");
 			setCapturing(null);
+			setChord(null);
 			void bindEditor(id, first ? `${first} ${key}` : key);
 			return true;
 		}
-		// One of Markdown's keys is written once for every system, as the keys it comes with are.
 		const forMarkdown = id.startsWith(MARKDOWN_ROW);
 		const chosen = forMarkdown ? (sharedKeyName(e, onMac) ?? key) : key;
 		const check = bindable(chosen);
@@ -354,145 +453,141 @@ export function SettingsDialog() {
 		}
 		setRefused("");
 		setCapturing(null);
+		setChord(null);
 		if (forMarkdown) void bindMarkdown(id.slice(MARKDOWN_ROW.length), chosen);
 		else void bind(id, chosen);
 		return true;
 	};
+
+	// Capture keyboard shortcuts cleanly in both CenterTabStrip mode and Welcome Modal mode.
+	createEffect(
+		() => capturing(),
+		(active) => {
+			if (!active) return;
+			const listener = (e: KeyboardEvent) => {
+				handleCaptureKey(e);
+			};
+			window.addEventListener("keydown", listener, true);
+			onCleanup(() => window.removeEventListener("keydown", listener, true));
+		},
+	);
+
 	const record = (id: string) => {
 		setRefused("");
 		setChord(null);
 		setCapturing(id);
 	};
-	const resetKeys = async () => {
-		const answer = await choose("Reset every shortcut to its default? The ones you set are lost, and this cannot be undone.", ["Reset shortcuts"], { danger: "Reset shortcuts" });
-		if (answer) await saveSetting({ keys: {} });
-	};
-	// One of Markdown's commands has its keys in the list of Markdown's keys. It has a row here only where it was
-	// given a shortcut here too, which then works anywhere: with none, the row would say "none" of Ctrl+B.
-	const keyRows = () =>
-		[...commands]
-			.filter((c) => !isMarkdownCommand(c.id) || keysFor(c.id))
-			.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }))
-			.filter((c) => shown("Keyboard", "shortcut", c.label, c.detail, keysFor(c.id)));
-	/** The keys one of the code editor's commands has while code is edited, as they are shown. */
+
 	const editorKeysFor = (id: string) => editorKeysOf(id, shellKeys()).map(displayEditorKey).join(", ");
-	const resetEditorKeys = async () => {
-		const answer = await choose("Reset the editor's keys to the ones it came with? The ones you set are lost, and this cannot be undone.", ["Reset keys"], { danger: "Reset keys" });
-		if (answer) await saveSetting({ editorKeys: {} });
-	};
-	/** The code editor's commands, where its keys could be read: without them a row could not say what it has. */
-	const editorKeyRows = () =>
-		baseEditorKeys()
-			? [...EDITOR_COMMANDS]
-					.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }))
-					.filter((c) => shown("Editor keys", "shortcut", "keyboard", c.label, editorKeysFor(c.id)))
-			: [];
-
-	/** The keys one of Markdown's commands has while a document is edited, as they are shown. */
 	const markdownKeysFor = (id: string) => keysOf(id, markdownKeysNow()).map(displayKey).join(", ");
-	const resetMarkdownKeys = async () => {
-		const answer = await choose("Reset Markdown's keys to the ones they came with? The ones you set are lost, and this cannot be undone.", ["Reset keys"], { danger: "Reset keys" });
-		if (answer) await saveSetting({ markdownKeys: {} });
-	};
-	/** Markdown's commands, in the order a writer meets them. */
-	const markdownKeyRows = () => MARKDOWN_COMMANDS.filter((c) => shown("Markdown keys", "shortcut", "keyboard", c.label, markdownKeysFor(c.id)));
 
-	// --- the rest ----------------------------------------------------------------
+	const allShortcutRows = createMemo<ShortcutRow[]>(() => {
+		const shellChanges = state.settings.keys ?? {};
+		const edChanges = editorKeyChanges();
+		const mdChanges = markdownKeyChanges();
+		const isCmdModified = (id: string, changes: Record<string, string>, base: Record<string, string>) => {
+			if (Object.values(changes).includes(id)) return true;
+			for (const [k, v] of Object.entries(base)) {
+				if (v === id && k in changes && changes[k] !== id) return true;
+			}
+			return false;
+		};
+		const baseEd = baseEditorKeys() ?? {};
+		const rows: ShortcutRow[] = [];
+		for (const c of commands) {
+			rows.push({
+				rowId: c.id,
+				commandId: c.id,
+				label: c.label,
+				context: "Global",
+				contextKey: "global",
+				keysText: keysFor(c.id),
+				modified: isCmdModified(c.id, shellChanges, DEFAULT_KEYS),
+			});
+		}
+		for (const cmd of EDITOR_COMMANDS) {
+			rows.push({
+				rowId: cmd.id,
+				commandId: cmd.id,
+				label: editorCommandLabel(cmd.id),
+				context: "Code Editor",
+				contextKey: "editor",
+				keysText: editorKeysFor(cmd.id),
+				modified: isCmdModified(cmd.id, edChanges, baseEd),
+			});
+		}
+		for (const cmd of MARKDOWN_COMMANDS) {
+			rows.push({
+				rowId: MARKDOWN_ROW + cmd.id,
+				commandId: cmd.id,
+				label: markdownCommandLabel(cmd.id),
+				context: "Markdown",
+				contextKey: "markdown",
+				keysText: markdownKeysFor(cmd.id),
+				modified: isCmdModified(cmd.id, mdChanges, MARKDOWN_KEYS),
+			});
+		}
+		return rows;
+	});
+
+	const filteredShortcuts = createMemo(() => {
+		const pq = parsedQuery();
+		const ctx = keyContextFilter();
+		return allShortcutRows().filter((row) => {
+			if (pq.scopeFilter === "workspace") return false;
+			if ((pq.modifiedOnly || ctx === "modified") && !row.modified) return false;
+			if (ctx !== "all" && ctx !== "modified" && row.contextKey !== ctx) return false;
+			if (!pq.text) return true;
+			const hay = `keyboard shortcuts ${row.context} ${row.label} ${row.keysText}`;
+			return matchWords(pq.text, hay) > 0;
+		});
+	});
+
+	const clearShortcut = async (row: ShortcutRow) => {
+		if (row.contextKey === "global") {
+			await saveSetting({ keys: unbind(DEFAULT_KEYS, state.settings.keys ?? {}, row.commandId) });
+		} else if (row.contextKey === "editor") {
+			const base = baseEditorKeys();
+			if (base) await saveSetting({ editorKeys: unbind(base, editorKeyChanges(), row.commandId) });
+		} else {
+			await saveSetting({ markdownKeys: unbind(MARKDOWN_KEYS, markdownKeyChanges(), row.commandId) });
+		}
+		await refreshLayers();
+	};
+
+	const anyCustomShortcuts = createMemo(
+		() =>
+			Object.keys(state.settings.keys ?? {}).length > 0 ||
+			Object.keys(state.settings.editorKeys ?? {}).length > 0 ||
+			Object.keys(state.settings.markdownKeys ?? {}).length > 0,
+	);
+
+	const resetAllShortcuts = async () => {
+		const picked = await choose("Reset all customized Global, Code Editor, and Markdown shortcuts back to defaults?", ["Reset shortcuts"]);
+		if (picked !== "Reset shortcuts") return;
+		await saveSetting({ keys: null, editorKeys: null, markdownKeys: null });
+		await refreshLayers();
+		notify("Keyboard shortcuts restored to defaults.");
+	};
 
 	const importTheme = async () => {
+		if (!inApp) notify("Importing a theme uses the system file dialog and is only available in the desktop app.");
 		try {
-			const theme = await backend.importTheme();
-			if (!theme) {
-				if (!inApp) notify("Theme import needs the app's file dialog; copy the theme into ~/.config/ssl-studio/themes/ instead.");
-				return;
-			}
+			const added = await backend.importTheme();
+			if (!added) return;
 			await loadSettings();
-			await save("theme", theme.id);
+			await save("theme", added.id);
+			notify(`Imported theme “${added.name}”.`);
 		} catch (e: any) {
-			notify(String(e?.message ?? e), "error");
+			notify(`Could not import theme: ${String(e?.message ?? e)}`, "error");
 		}
 	};
-	// The language server's path is cleared by saving it empty, not absent: an
-	// absent value does not survive the trip to the backend, and empty means "find it".
+
 	const scale = () => clampScale(state.settings.uiScale);
-	const server = () => {
+	const serverStatusText = () => {
 		const lsp = state.info?.lsp;
 		if (!lsp?.path) return lsp?.message ?? "Not found.";
 		return `${state.lsp.state === "running" ? "Running" : `Not running (${state.lsp.state})`}: ${lsp.path}${lsp.version ? `, version ${lsp.version}` : ""}${lsp.message ? `. ${lsp.message}` : ""}`;
-	};
-
-	/** One setting: its name, what it does and where it is saved on the left, its control on the right. */
-	const Row = (p: { group: Group; label: string; hint?: string; setting: keyof Settings; wide?: boolean; children: (ids: { control: string; label: string; hint: string }) => JSX.Element }) => {
-		const ids = { control: createUniqueId(), label: createUniqueId(), hint: createUniqueId() };
-		return (
-			<Show when={shown(p.group, p.label, p.hint)}>
-				<div class="settings-row">
-					<div class="settings-text">
-						<label id={ids.label} for={ids.control}>
-							{p.label}
-						</label>
-						<span class="settings-hint" id={ids.hint}>
-							{p.hint ? `${p.hint}. ` : ""}
-							<span class={["settings-scope", { project: scopeOf(p.setting) === "workspace" }]}>
-								{scopeOf(p.setting) === "workspace" ? "Saved for this project" : "Saved for you"}
-							</span>
-						</span>
-					</div>
-					<div class={["settings-control", { wide: p.wide }]}>
-						{p.children(ids)}
-					</div>
-				</div>
-			</Show>
-		);
-	};
-	/** Each section on screen, for the row of names above that jumps to it. */
-	const sections = new Map<Group, HTMLElement>();
-	const Section = (p: { title: Group; when: boolean; children: JSX.Element }) => (
-		<Show when={p.when}>
-			<section
-				class="settings-group"
-				aria-label={p.title}
-				ref={(el) => {
-					sections.set(p.title, el);
-				}}
-			>
-				<h3>{p.title}</h3>
-				{p.children}
-			</section>
-		</Show>
-	);
-	const ROWS = {
-		theme: ["Theme", "Warm Material OKLCH tones, Classic presets, or an imported VS Code theme"],
-		uiScale: ["Interface size", "The whole window, from 80% to 160%"],
-		menuBar: ["Menu bar", "File, Edit, Selection, View, Go and Help across the top of the window"],
-		fontSize: ["Font size", "The editor, Blocks, diffs and rendered documents"],
-		uiFont: ["Interface font", "Chrome, tabs and panels; empty uses the system sans-serif"],
-		codeFont: ["Code font", "Editor, Blocks, Tables and Output; empty uses the system monospace"],
-		readFont: ["Reading font", "Optional face for rendered Markdown Read view; empty matches the interface font"],
-		formatOnSave: ["Format changed lines on save", "Only the lines changed since the last save"],
-		sqlDialect: ["SQL dialect", "Database dialect used when formatting standalone .sql files (T-SQL for SQL Server, PL/SQL for Oracle)"],
-		minimap: ["Minimap", "The outline of the file at the editor's edge; a narrow editor goes without"],
-		wordWrap: ["Word wrap", "Long lines wrapped at the editor's edge, not scrolled to; Alt+Z switches it"],
-		livePreview: ["Markdown live preview", "A document drawn as it is written: headings larger, the markup hidden except on the line being written"],
-		markdownReadingHighlight: ["Markdown reading highlight", "Subtly dim lines below the active cursor (or mouse pointer when reading) in Markdown Live and Read views"],
-		inlayHints: ["Parameter name hints", "Names shown beside the arguments of a call"],
-		indentOnType: ["Indent as the formatter does", "A new line of a script, and a statement as its ; is typed, are indented as the language server's formatter indents them"],
-		ctrlClickAddsCursor: ["Ctrl+click adds a cursor", "As in Sublime Text, and Alt+click goes to a definition. Off: the other way round, as in VS Code"],
-		rulers: ["Ruler at the line length", "A line down the editor at the style profile's line length"],
-		rulerMargin: ["Rulers beside it", "Fainter rulers this many columns before and after; 0 for none"],
-		csvTable: ["CSV column badges", "Format configured CSV columns (such as status) as colored badges; customize rules from any CSV table's Format button"],
-		attachmentsFolder: ["Attachments folder", "Workspace folder where pasted or dropped Markdown images are saved; empty uses ticket folder or docs/attachments"],
-		templatesFolder: ["Templates folder", "Workspace folder for custom Markdown templates; empty uses docs/templates"],
-		lspPath: ["Language server program", "Leave empty to have it found"],
-	} as const;
-	const anyShown = (group: Group, ...rows: (keyof typeof ROWS)[]) => rows.some((r) => shown(group, ...ROWS[r]));
-	const groups = {
-		appearance: () => anyShown("Appearance", "theme", "uiScale", "fontSize", "uiFont", "codeFont", "readFont", "menuBar"),
-		editor: () => anyShown("Editor", "formatOnSave", "sqlDialect", "minimap", "wordWrap", "livePreview", "markdownReadingHighlight", "inlayHints", "indentOnType", "ctrlClickAddsCursor", "rulers", "rulerMargin", "csvTable", "attachmentsFolder", "templatesFolder"),
-		server: () => anyShown("Language server", "lspPath"),
-		keyboard: () => keyRows().length > 0,
-		editorKeys: () => editorKeyRows().length > 0,
-		markdownKeys: () => markdownKeyRows().length > 0,
 	};
 
 	const parsedOklch = () => parseOklchThemeId(state.settings.theme);
@@ -508,26 +603,136 @@ export function SettingsDialog() {
 		const patch: SettingsPatch =
 			tone === "system" ? { theme: "system", themeMaterial: mat } : { theme: oklchThemeId(tone, mat), themeMaterial: mat };
 		const saved = Boolean(await saveSetting(patch, scopeOf("theme")));
-		await loadLayers();
+		await refreshLayers();
 		return saved;
 	};
 	const pickMaterial = (mat: ThemeMaterial) => {
 		const p = parsedOklch();
 		const nextTheme = state.settings.theme === "system" ? "system" : oklchThemeId(p?.tone ?? DEFAULT_DARK_TONE, mat);
-		void saveSetting({ theme: nextTheme, themeMaterial: mat }, scopeOf("theme")).then(loadLayers);
+		void saveSetting({ theme: nextTheme, themeMaterial: mat }, scopeOf("theme")).then(refreshLayers);
 	};
 
-	const FontControl = (p: { id: string; hintId: string; setting: "uiFont" | "codeFont" | "readFont"; presets: readonly FontPreset[]; placeholder: string }) => {
+	const categoryCount = (catId: SettingsCategoryId): number => {
+		if (catId === "keyboard") return filteredShortcuts().length;
+		const vis = visibleSchemaKeys();
+		let n = 0;
+		for (const meta of SETTINGS_SCHEMA) {
+			if (meta.category === catId && vis.has(meta.key)) n++;
+		}
+		return n;
+	};
+
+	const showCat = (catId: SettingsCategoryId): boolean => {
+		const selected = activeCategory();
+		if (selected !== "all" && selected !== catId) return false;
+		if (catId === "keyboard") return selected === "keyboard" || (Boolean(settingsQuery().trim()) && filteredShortcuts().length > 0);
+		return categoryCount(catId) > 0;
+	};
+
+	const userModCount = createMemo(() => {
+		void layersNonce();
+		return countModifiedSettings(layers(), "user");
+	});
+	const wsModCount = createMemo(() => {
+		void layersNonce();
+		return state.workspace ? countModifiedSettings(layers(), "workspace") : 0;
+	});
+
+	const filterMenuItems = (): MenuItem[] => {
+		const pq = parsedQuery();
+		const items: MenuItem[] = [
+			{ label: "Modified (@modified)", checked: pq.modifiedOnly, run: () => toggleQueryToken("@modified") },
+			{ label: "User overrides (@user)", checked: pq.scopeFilter === "user", run: () => toggleQueryToken("@user") },
+			...(state.workspace
+				? [{ label: "Workspace overrides (@workspace)", checked: pq.scopeFilter === "workspace", run: () => toggleQueryToken("@workspace") }]
+				: []),
+			{ label: "User-only security settings (@security)", checked: pq.userOnly, run: () => toggleQueryToken("@security") },
+		];
+		if (activeFilterChips().length > 0) {
+			items.push("separator", { label: "Clear Filters", run: () => setSettingsQuery(pq.text) });
+		}
+		return items;
+	};
+
+	/** One VS Code-style setting row with category prefix, modified gutter bar, scope badge, and per-setting Reset. */
+	const SettingRow = (p: {
+		setting: keyof Settings;
+		wide?: boolean;
+		children: (ids: { control: string; label: string; hint: string; disabled: boolean }) => JSX.Element;
+	}) => {
+		const meta = () => SETTINGS_SCHEMA_MAP.get(p.setting)!;
+		const catLabel = () => SETTINGS_CATEGORIES.find((c) => c.id === meta().category)?.label ?? "";
+		const ids = { control: createUniqueId(), label: createUniqueId(), hint: createUniqueId() };
+		const locked = () => activeScope() === "workspace" && USER_ONLY_SETTING_KEYS.has(p.setting);
+		const modified = () => !locked() && isSettingDefinedInScope(p.setting, layers(), activeScope());
+		const note = () => settingScopeNote(p.setting, layers(), activeScope(), Boolean(state.workspace));
+		const resetSetting = async () => {
+			if (p.setting === "theme") {
+				await saveSetting({ theme: null, themeMaterial: null }, scopeOf("theme"));
+				await refreshLayers();
+				return;
+			}
+			await save(p.setting, null);
+		};
+		return (
+			<Show when={visibleSchemaKeys().has(p.setting)}>
+				<div class={["settings-item", "settings-row", { modified: modified(), locked: locked() }]}>
+					<div class="settings-item-head">
+						<span class="settings-item-cat">{catLabel()}</span>
+						<label class="settings-item-title" id={ids.label} for={ids.control}>
+							{meta().label}
+						</label>
+						<Show when={note()}>
+							{(n) => (
+								<span class={`settings-pill ${n().tone}`}>
+									<Show when={n().tone === "lock"}>
+										<Icon name="lock" />
+									</Show>
+									<span>{n().text}</span>
+								</span>
+							)}
+						</Show>
+						<Show when={locked()}>
+							<button type="button" class="link settings-unlock-link" onClick={() => setActiveScope("user")}>
+								Edit in User
+							</button>
+						</Show>
+						<Show when={modified()}>
+							<button
+								type="button"
+								class="settings-reset-btn"
+								title={activeScope() === "workspace" ? `Clear workspace override for ${meta().label}` : `Reset ${meta().label} to default`}
+								aria-label={`Reset ${meta().label}`}
+								onClick={() => void resetSetting()}
+							>
+								<Icon name="discard" />
+							</button>
+						</Show>
+					</div>
+					<p class="settings-item-desc" id={ids.hint}>
+						{meta().description}
+					</p>
+					<div class={["settings-item-control", { wide: p.wide }]}>
+						{p.children({ ...ids, disabled: locked() })}
+					</div>
+				</div>
+			</Show>
+		);
+	};
+
+	const FontControl = (p: { id: string; hintId: string; setting: "uiFont" | "codeFont" | "readFont"; presets: readonly FontPreset[]; placeholder: string; disabled?: boolean }) => {
 		const current = () => (state.settings[p.setting] ?? "").trim();
 		const isPreset = () => p.presets.some((item) => item.id === current());
 		const [customizing, setCustomizing] = createSignal(false);
 		const showInput = () => customizing() || !isPreset();
 		const selectValue = () => (showInput() ? "__custom__" : current());
+		const metaLabel = () => SETTINGS_SCHEMA_MAP.get(p.setting)?.label ?? p.setting;
 		return (
 			<div class="settings-font-control">
 				<select
 					id={p.id}
 					aria-describedby={p.hintId}
+					disabled={p.disabled}
 					value={selectValue()}
 					onChange={async (e) => {
 						const el = e.currentTarget;
@@ -550,7 +755,8 @@ export function SettingsDialog() {
 				<Show when={showInput()}>
 					<DraftInput
 						type="text"
-						aria-label={`${ROWS[p.setting][0]} family name`}
+						disabled={p.disabled}
+						aria-label={`${metaLabel()} family name`}
 						placeholder={p.placeholder}
 						value={current()}
 						onKeyDown={commitOnEnter}
@@ -568,528 +774,813 @@ export function SettingsDialog() {
 		);
 	};
 
-	const SECTIONS: [title: Group, key: keyof typeof groups][] = [
-		["Appearance", "appearance"],
-		["Editor", "editor"],
-		["Language server", "server"],
-		["Keyboard", "keyboard"],
-		["Editor keys", "editorKeys"],
-		["Markdown keys", "markdownKeys"],
-	];
+	const anySettingVisible = createMemo(() => SETTINGS_CATEGORIES.some((cat) => showCat(cat.id)));
 
 	return (
-		<Show when={open()}>
-			<Modal class="dialog settings" labelledBy={titleId} onClose={close} onKey={onKey}>
-				<h2 id={titleId}>Settings</h2>
-				<input class="settings-search" data-autofocus aria-label="Search settings" placeholder="Search settings" autocomplete="off" spellcheck="false" value={query()} onInput={(e) => setQuery(e.currentTarget.value)} onMouseDown={() => setCapturing(null)} />
-				{/* The sections by name: the list is long, and a name goes straight to its part of it. */}
-				<nav class="settings-nav" aria-label="Sections">
-					<For each={SECTIONS.filter(([, key]) => groups[key]())}>
-						{([title]) => (
-							<button title={`Go to ${title}`} onClick={() => sections.get(title)?.scrollIntoView({ block: "start" })}>
-								{title}
+		<div class={["settings-workspace", { embedded: props.embedded }]} data-view="settings" onMouseDown={() => setCapturing(null)}>
+			{/* Sticky VS Code-style Settings header: Search + Filter funnel + User/Workspace tabs + JSON toggle */}
+			<div class="settings-topbar">
+				<div class="settings-search-row">
+					<div class="settings-search-wrap">
+						<Icon name="search" class="settings-search-icon" />
+						<input
+							class="settings-search"
+							data-autofocus
+							aria-label="Search settings"
+							placeholder="Search settings"
+							autocomplete="off"
+							spellcheck="false"
+							value={settingsQuery()}
+							onInput={(e) => {
+								setSettingsQuery(e.currentTarget.value);
+								if (jsonMode()) setJsonMode(false);
+							}}
+						/>
+						<Show when={settingsQuery()}>
+							<button
+								type="button"
+								class="settings-search-clear"
+								title="Clear search"
+								aria-label="Clear search"
+								onClick={() => setSettingsQuery("")}
+							>
+								<Icon name="close" />
 							</button>
-						)}
-					</For>
-				</nav>
-				{/* A click anywhere stops a recording; the click on "Set" then starts its own. */}
-				<div class="settings-body" onMouseDown={() => setCapturing(null)}>
-					<Section title="Appearance" when={groups.appearance()}>
-						<Row group="Appearance" label={ROWS.theme[0]} hint={ROWS.theme[1]} setting="theme" wide>
-							{(ids) => {
-								let themeSelectEl: HTMLSelectElement | undefined;
-								createEffect(
-									() => [state.themes, themeSelectValue()] as const,
-									([, val]) => {
-										if (themeSelectEl && themeSelectEl.value !== val) themeSelectEl.value = val;
-									},
-								);
+						</Show>
+						<Menu
+							floating
+							class={activeFilterChips().length > 0 ? "docs-filter-menu on" : "docs-filter-menu"}
+							label={activeFilterChips().length > 0 ? "Filter settings: active" : "Filter settings"}
+							title="Filter Settings (@modified, @user, @workspace)"
+							items={filterMenuItems}
+						>
+							<Icon name={activeFilterChips().length > 0 ? "filter-filled" : "filter"} />
+						</Menu>
+					</div>
+					<div class="settings-top-actions">
+						<button
+							type="button"
+							class={["settings-icon-action", { active: jsonMode() }]}
+							title={jsonMode() ? "Open Settings (UI)" : "Open Settings (JSON)"}
+							aria-pressed={jsonMode() ? "true" : "false"}
+							onClick={() => setJsonMode((v) => !v)}
+						>
+							<Icon name={jsonMode() ? "gear" : "json"} />
+							<span>{jsonMode() ? "UI" : "JSON"}</span>
+						</button>
+						<button
+							type="button"
+							class="settings-icon-action"
+							title="Configure Agent Customizations (Skills, Instructions, Agents, Prompts, MCP)"
+							onClick={() => openCustomizations("skills")}
+						>
+							<Icon name="sparkle" />
+							<span>Customizations</span>
+						</button>
+						<button
+							type="button"
+							class="settings-icon-action"
+							title="Edit SSL Language Server Style Profile"
+							onClick={() => openStyleProfile()}
+						>
+							<Icon name="tools" />
+							<span>Style Profile</span>
+						</button>
+					</div>
+				</div>
+
+				<Show when={activeFilterChips().length > 0}>
+					<div class="settings-filter-chips">
+						<For each={activeFilterChips()}>
+							{(chip) => (
+								<button
+									type="button"
+									class="docs-tag-active"
+									title={`Remove ${chip.token} filter`}
+									onClick={() => toggleQueryToken(chip.token)}
+								>
+									<span>{chip.label}</span>
+									<Icon name="close" />
+								</button>
+							)}
+						</For>
+					</div>
+				</Show>
+
+				<div class="settings-scope-tabs" role="tablist" aria-label="Settings scope">
+					<button
+						type="button"
+						role="tab"
+						aria-selected={activeScope() === "user" ? "true" : "false"}
+						class={["settings-scope-tab", { active: activeScope() === "user" }]}
+						onClick={() => setActiveScope("user")}
+					>
+						<span>User</span>
+						<Show when={userModCount() > 0}>
+							<span class="settings-tab-count">{userModCount()}</span>
+						</Show>
+					</button>
+					<button
+						type="button"
+						role="tab"
+						aria-selected={activeScope() === "workspace" ? "true" : "false"}
+						disabled={!state.workspace}
+						title={state.workspace ? `Workspace settings for ${state.workspace.name}` : "Open a workspace folder to edit workspace settings"}
+						class={["settings-scope-tab", { active: activeScope() === "workspace" }]}
+						onClick={() => state.workspace && setActiveScope("workspace")}
+					>
+						<span>Workspace{state.workspace ? ` (${state.workspace.name})` : ""}</span>
+						<Show when={wsModCount() > 0}>
+							<span class="settings-tab-count">{wsModCount()}</span>
+						</Show>
+					</button>
+				</div>
+			</div>
+
+			<Show
+				when={!jsonMode()}
+				fallback={
+					<SettingsJsonEditor
+						scope={activeScope()}
+						onSaved={refreshLayers}
+						onSwitchToUi={() => setJsonMode(false)}
+					/>
+				}
+			>
+				<div class="settings-split">
+					{/* Left Category TOC */}
+					<nav class="settings-toc" aria-label="Settings categories">
+						<button
+							type="button"
+							class={["settings-toc-item", { active: activeCategory() === "all" }]}
+							onClick={() => setActiveCategory("all")}
+						>
+							<span class="settings-toc-label">All Settings</span>
+						</button>
+						<For each={SETTINGS_CATEGORIES}>
+							{(cat) => {
+								const count = () => categoryCount(cat.id);
 								return (
-									<div class="settings-theme">
-										<div class="settings-theme-bar" role="group" aria-label="Surface tone" aria-describedby={ids.hint}>
-											<button
-												type="button"
-												aria-pressed={state.settings.theme === "system" ? "true" : "false"}
-												class={{ active: state.settings.theme === "system" }}
-												onClick={() => void pickTone("system")}
-											>
-												System
-											</button>
-											<For each={TONES}>
-												{(tone) => (
+									<button
+										type="button"
+										class={["settings-toc-item", { active: activeCategory() === cat.id, empty: Boolean(settingsQuery().trim()) && count() === 0 }]}
+										onClick={() => setActiveCategory(cat.id)}
+									>
+										<span class="settings-toc-label">{cat.label}</span>
+										<Show when={Boolean(settingsQuery().trim()) || cat.id === "keyboard"}>
+											<span class="settings-toc-count">{count()}</span>
+										</Show>
+									</button>
+								);
+							}}
+						</For>
+					</nav>
+
+					{/* Right Settings Content */}
+					<div class="settings-content">
+						<Show when={showCat("appearance")}>
+							<section class="settings-group" aria-label="Appearance">
+								<h3>Appearance</h3>
+								<SettingRow setting="theme" wide>
+									{(ids) => {
+										let themeSelectEl: HTMLSelectElement | undefined;
+										createEffect(
+											() => [state.themes, themeSelectValue()] as const,
+											([, val]) => {
+												if (themeSelectEl && themeSelectEl.value !== val) themeSelectEl.value = val;
+											},
+										);
+										return (
+											<div class="settings-theme">
+												<div class="settings-theme-bar" role="group" aria-label="Surface tone" aria-describedby={ids.hint}>
 													<button
 														type="button"
-														aria-pressed={parsedOklch()?.tone === tone ? "true" : "false"}
-														class={{ active: parsedOklch()?.tone === tone }}
-														onClick={() => void pickTone(tone)}
+														aria-pressed={state.settings.theme === "system" ? "true" : "false"}
+														class={{ active: state.settings.theme === "system" }}
+														onClick={() => void pickTone("system")}
 													>
-														{TONE_INFO[tone].label}
+														System
 													</button>
-												)}
-											</For>
-										</div>
-										<div class="settings-theme-materials" role="group" aria-label="Material finish">
-											<For each={MATERIALS}>
-												{(mat) => {
-													const info = MATERIAL_INFO[mat];
-													const active = () => isWarmMode() && activeMaterial() === mat;
-													return (
-														<button
-															type="button"
-															class={["settings-swatch", { active: active() }]}
-															aria-pressed={active() ? "true" : "false"}
-															onClick={() => pickMaterial(mat)}
-														>
-															<span class="settings-swatch-dot" style={{ background: info.swatch }} aria-hidden="true" />
-															<span>{info.label}</span>
-														</button>
-													);
-												}}
-											</For>
-										</div>
-										<div class="settings-theme-extra">
-											<select
-												ref={themeSelectEl}
-												id={ids.control}
-												aria-label="Classic or imported theme"
-												aria-describedby={ids.hint}
-												value={themeSelectValue()}
-												onChange={async (e) => {
-													const el = e.currentTarget;
-													const val = el.value;
-													const saved = val === "__warm__" ? await pickTone("system") : await save("theme", val);
-													if (!saved) el.value = untrack(themeSelectValue);
-												}}
-											>
-												<option value="__warm__">Warm Material (chosen above)</option>
-												<option value="dark">Studio Dark (Classic)</option>
-												<option value="light">Studio Light (Classic)</option>
-												<For each={state.themes} keyed={(t) => t.id}>
-													{(t) => <option value={t().id}>{t().name}</option>}
-												</For>
-											</select>
-											<button type="button" onClick={() => void importTheme()}>
-												Import…
+													<For each={TONES}>
+														{(tone) => (
+															<button
+																type="button"
+																aria-pressed={parsedOklch()?.tone === tone ? "true" : "false"}
+																class={{ active: parsedOklch()?.tone === tone }}
+																onClick={() => void pickTone(tone)}
+															>
+																{TONE_INFO[tone].label}
+															</button>
+														)}
+													</For>
+												</div>
+												<div class="settings-theme-materials" role="group" aria-label="Material finish">
+													<For each={MATERIALS}>
+														{(mat) => {
+															const info = MATERIAL_INFO[mat];
+															const active = () => isWarmMode() && activeMaterial() === mat;
+															return (
+																<button
+																	type="button"
+																	class={["settings-swatch", { active: active() }]}
+																	aria-pressed={active() ? "true" : "false"}
+																	onClick={() => pickMaterial(mat)}
+																>
+																	<span class="settings-swatch-dot" style={{ background: info.swatch }} aria-hidden="true" />
+																	<span>{info.label}</span>
+																</button>
+															);
+														}}
+													</For>
+												</div>
+												<div class="settings-theme-extra">
+													<select
+														ref={themeSelectEl}
+														id={ids.control}
+														aria-label="Classic or imported theme"
+														aria-describedby={ids.hint}
+														value={themeSelectValue()}
+														onChange={async (e) => {
+															const el = e.currentTarget;
+															const val = el.value;
+															const saved = val === "__warm__" ? await pickTone("system") : await save("theme", val);
+															if (!saved) el.value = untrack(themeSelectValue);
+														}}
+													>
+														<option value="__warm__">Warm Material (chosen above)</option>
+														<option value="dark">Studio Dark (Classic)</option>
+														<option value="light">Studio Light (Classic)</option>
+														<For each={state.themes} keyed={(t) => t.id}>
+															{(t) => <option value={t().id}>{t().name}</option>}
+														</For>
+													</select>
+													<button type="button" onClick={() => void importTheme()}>
+														Import…
+													</button>
+												</div>
+											</div>
+										);
+									}}
+								</SettingRow>
+								<SettingRow setting="uiScale">
+									{(ids) => (
+										<div class="settings-stepper" role="group" aria-labelledby={ids.label} aria-describedby={ids.hint}>
+											<button type="button" aria-label="Smaller" disabled={scale() <= UI_SCALE.min} onClick={() => void save("uiScale", stepScale(scale(), -1))}>
+												<Icon name="remove" />
 											</button>
-										</div>
-									</div>
-								);
-							}}
-						</Row>
-						<Row group="Appearance" label={ROWS.uiScale[0]} hint={ROWS.uiScale[1]} setting="uiScale">
-							{(ids) => (
-								<div class="settings-stepper" role="group" aria-labelledby={ids.label} aria-describedby={ids.hint}>
-									<button aria-label="Smaller" disabled={scale() <= UI_SCALE.min} onClick={() => void save("uiScale", stepScale(scale(), -1))}>
-										<Icon name="remove" />
-									</button>
-									<output id={ids.control} aria-live="polite">
-										{Math.round(scale() * 100)}%
-									</output>
-									<button aria-label="Larger" disabled={scale() >= UI_SCALE.max} onClick={() => void save("uiScale", stepScale(scale(), 1))}>
-										<Icon name="add" />
-									</button>
-									<button disabled={scale() === UI_SCALE.normal} onClick={() => void save("uiScale", UI_SCALE.normal)}>
-										Reset
-									</button>
-								</div>
-							)}
-						</Row>
-						<Row group="Appearance" label={ROWS.fontSize[0]} hint={ROWS.fontSize[1]} setting="fontSize">
-							{(ids) => (
-								<DraftInput
-									id={ids.control}
-									aria-describedby={ids.hint}
-									type="number"
-									min={FONT.min}
-									max={FONT.max}
-									value={String(state.settings.fontSize)}
-									onKeyDown={commitOnEnter}
-									onCommit={async (raw, el) => {
-										const next = clampNumericSetting(raw, FONT.min, FONT.max, FONT.normal);
-										const text = String(next);
-										el.value = text;
-										return (await save("fontSize", next)) ? text : false;
-									}}
-								/>
-							)}
-						</Row>
-						<Row group="Appearance" label={ROWS.uiFont[0]} hint={ROWS.uiFont[1]} setting="uiFont">
-							{(ids) => <FontControl id={ids.control} hintId={ids.hint} setting="uiFont" presets={UI_FONT_PRESETS} placeholder="e.g. IBM Plex Sans" />}
-						</Row>
-						<Row group="Appearance" label={ROWS.codeFont[0]} hint={ROWS.codeFont[1]} setting="codeFont">
-							{(ids) => <FontControl id={ids.control} hintId={ids.hint} setting="codeFont" presets={CODE_FONT_PRESETS} placeholder="e.g. JetBrains Mono" />}
-						</Row>
-						<Row group="Appearance" label={ROWS.readFont[0]} hint={ROWS.readFont[1]} setting="readFont">
-							{(ids) => <FontControl id={ids.control} hintId={ids.hint} setting="readFont" presets={READ_FONT_PRESETS} placeholder="e.g. Source Serif 4" />}
-						</Row>
-						<Row group="Appearance" label={ROWS.menuBar[0]} hint={ROWS.menuBar[1]} setting="menuBar">
-							{(ids) => (
-								<input
-									id={ids.control}
-									aria-describedby={ids.hint}
-									type="checkbox"
-									checked={state.settings.menuBar !== false}
-									onChange={async (e) => {
-										const el = e.currentTarget;
-										if (!(await save("menuBar", el.checked))) el.checked = untrack(() => state.settings.menuBar !== false);
-									}}
-								/>
-							)}
-						</Row>
-					</Section>
-					<Section title="Editor" when={groups.editor()}>
-						<Row group="Editor" label={ROWS.formatOnSave[0]} hint={ROWS.formatOnSave[1]} setting="formatOnSave">
-							{(ids) => (
-								<input
-									id={ids.control}
-									aria-describedby={ids.hint}
-									type="checkbox"
-									checked={state.settings.formatOnSave}
-									onChange={async (e) => {
-										const el = e.currentTarget;
-										if (!(await save("formatOnSave", el.checked))) el.checked = untrack(() => state.settings.formatOnSave);
-									}}
-								/>
-							)}
-						</Row>
-						<Row group="Editor" label={ROWS.sqlDialect[0]} hint={ROWS.sqlDialect[1]} setting="sqlDialect">
-							{(ids) => (
-								<select
-									id={ids.control}
-									aria-describedby={ids.hint}
-									value={state.settings.sqlDialect ?? DEFAULT_SQL_DIALECT}
-									onChange={async (e) => {
-										const el = e.currentTarget;
-										if (!(await save("sqlDialect", el.value as SqlDialect))) el.value = untrack(() => state.settings.sqlDialect ?? DEFAULT_SQL_DIALECT);
-									}}
-								>
-									<For each={SQL_DIALECTS}>{(d) => <option value={d.id}>{d.label}</option>}</For>
-								</select>
-							)}
-						</Row>
-						<Row group="Editor" label={ROWS.minimap[0]} hint={ROWS.minimap[1]} setting="minimap">
-							{(ids) => (
-								<input
-									id={ids.control}
-									aria-describedby={ids.hint}
-									type="checkbox"
-									checked={state.settings.minimap}
-									onChange={async (e) => {
-										const el = e.currentTarget;
-										if (!(await save("minimap", el.checked))) el.checked = untrack(() => state.settings.minimap);
-									}}
-								/>
-							)}
-						</Row>
-						<Row group="Editor" label={ROWS.wordWrap[0]} hint={ROWS.wordWrap[1]} setting="wordWrap">
-							{(ids) => (
-								<input
-									id={ids.control}
-									aria-describedby={ids.hint}
-									type="checkbox"
-									checked={Boolean(state.settings.wordWrap)}
-									onChange={async (e) => {
-										const el = e.currentTarget;
-										if (!(await save("wordWrap", el.checked))) el.checked = untrack(() => Boolean(state.settings.wordWrap));
-									}}
-								/>
-							)}
-						</Row>
-						<Row group="Editor" label={ROWS.livePreview[0]} hint={ROWS.livePreview[1]} setting="livePreview">
-							{(ids) => (
-								<input
-									id={ids.control}
-									aria-describedby={ids.hint}
-									type="checkbox"
-									checked={state.settings.livePreview !== false}
-									onChange={async (e) => {
-										const el = e.currentTarget;
-										const checked = el.checked;
-										if (await save("livePreview", checked)) syncLivePreviewMode(checked);
-										else el.checked = untrack(() => state.settings.livePreview !== false);
-									}}
-								/>
-							)}
-						</Row>
-						<Row group="Editor" label={ROWS.markdownReadingHighlight[0]} hint={ROWS.markdownReadingHighlight[1]} setting="markdownReadingHighlight">
-							{(ids) => (
-								<input
-									id={ids.control}
-									aria-describedby={ids.hint}
-									type="checkbox"
-									checked={state.settings.markdownReadingHighlight !== false}
-									onChange={async (e) => {
-										const el = e.currentTarget;
-										if (!(await save("markdownReadingHighlight", el.checked))) {
-											el.checked = untrack(() => state.settings.markdownReadingHighlight !== false);
-										}
-									}}
-								/>
-							)}
-						</Row>
-						<Row group="Editor" label={ROWS.inlayHints[0]} hint={ROWS.inlayHints[1]} setting="inlayHints">
-							{(ids) => (
-								<input
-									id={ids.control}
-									aria-describedby={ids.hint}
-									type="checkbox"
-									checked={state.settings.inlayHints !== false}
-									onChange={async (e) => {
-										const el = e.currentTarget;
-										if (!(await save("inlayHints", el.checked))) el.checked = untrack(() => state.settings.inlayHints !== false);
-									}}
-								/>
-							)}
-						</Row>
-						<Row group="Editor" label={ROWS.indentOnType[0]} hint={ROWS.indentOnType[1]} setting="indentOnType">
-							{(ids) => (
-								<input
-									id={ids.control}
-									aria-describedby={ids.hint}
-									type="checkbox"
-									checked={state.settings.indentOnType !== false}
-									onChange={async (e) => {
-										const el = e.currentTarget;
-										if (!(await save("indentOnType", el.checked))) el.checked = untrack(() => state.settings.indentOnType !== false);
-									}}
-								/>
-							)}
-						</Row>
-						<Row group="Editor" label={ROWS.ctrlClickAddsCursor[0]} hint={ROWS.ctrlClickAddsCursor[1]} setting="ctrlClickAddsCursor">
-							{(ids) => (
-								<input
-									id={ids.control}
-									aria-describedby={ids.hint}
-									type="checkbox"
-									checked={state.settings.ctrlClickAddsCursor !== false}
-									onChange={async (e) => {
-										const el = e.currentTarget;
-										if (!(await save("ctrlClickAddsCursor", el.checked))) el.checked = untrack(() => state.settings.ctrlClickAddsCursor !== false);
-									}}
-								/>
-							)}
-						</Row>
-						<Row group="Editor" label={ROWS.rulers[0]} hint={ROWS.rulers[1]} setting="rulers">
-							{(ids) => (
-								<input
-									id={ids.control}
-									aria-describedby={ids.hint}
-									type="checkbox"
-									checked={state.settings.rulers !== false}
-									onChange={async (e) => {
-										const el = e.currentTarget;
-										if (!(await save("rulers", el.checked))) el.checked = untrack(() => state.settings.rulers !== false);
-									}}
-								/>
-							)}
-						</Row>
-						<Row group="Editor" label={ROWS.rulerMargin[0]} hint={ROWS.rulerMargin[1]} setting="rulerMargin">
-							{(ids) => (
-								<DraftInput
-									id={ids.control}
-									aria-describedby={ids.hint}
-									type="number"
-									min="0"
-									max="60"
-									disabled={state.settings.rulers === false}
-									value={String(state.settings.rulerMargin ?? RULER_MARGIN)}
-									onKeyDown={commitOnEnter}
-									onCommit={async (raw, el) => {
-										const next = clampNumericSetting(raw, 0, 60, RULER_MARGIN);
-										const text = String(next);
-										el.value = text;
-										return (await save("rulerMargin", next)) ? text : false;
-									}}
-								/>
-							)}
-						</Row>
-						<Row group="Editor" label={ROWS.csvTable[0]} hint={ROWS.csvTable[1]} setting="csvTable">
-							{(ids) => {
-								const cfg = () => effectiveCsvTableConfig(state.settings.csvTable);
-								return (
-									<div class="settings-csv-control">
-										<input
-											id={ids.control}
-											aria-describedby={ids.hint}
-											type="checkbox"
-											checked={cfg().badgeFormatting}
-											onChange={async (e) => {
-												const el = e.currentTarget;
-												if (!(await save("csvTable", { ...cfg(), badgeFormatting: el.checked }))) {
-													el.checked = untrack(() => cfg().badgeFormatting);
-												}
-											}}
-										/>
-										<Show when={Boolean(state.settings.csvTable)}>
-											<button
-												type="button"
-												title="Restore default STARLIMS + Registry CSV column badge rules"
-												onClick={() => void save("csvTable", cloneCsvTableConfig(DEFAULT_CSV_TABLE_CONFIG))}
-											>
+											<output id={ids.control} aria-live="polite">
+												{Math.round(scale() * 100)}%
+											</output>
+											<button type="button" aria-label="Larger" disabled={scale() >= UI_SCALE.max} onClick={() => void save("uiScale", stepScale(scale(), 1))}>
+												<Icon name="add" />
+											</button>
+											<button type="button" disabled={scale() === UI_SCALE.normal} onClick={() => void save("uiScale", UI_SCALE.normal)}>
 												Reset
 											</button>
-										</Show>
-									</div>
-								);
-							}}
-						</Row>
-						<Row group="Editor" label={ROWS.attachmentsFolder[0]} hint={ROWS.attachmentsFolder[1]} setting="attachmentsFolder" wide>
-							{(ids) => (
-								<DraftInput
-									id={ids.control}
-									aria-describedby={ids.hint}
-									type="text"
-									placeholder="docs/attachments"
-									value={state.settings.attachmentsFolder ?? ""}
-									onKeyDown={commitOnEnter}
-									onCommit={(_raw, el) => saveRelFolder("attachmentsFolder", el)}
-								/>
-							)}
-						</Row>
-						<Row group="Editor" label={ROWS.templatesFolder[0]} hint={ROWS.templatesFolder[1]} setting="templatesFolder" wide>
-							{(ids) => (
-								<DraftInput
-									id={ids.control}
-									aria-describedby={ids.hint}
-									type="text"
-									placeholder="docs/templates"
-									value={state.settings.templatesFolder ?? ""}
-									onKeyDown={commitOnEnter}
-									onCommit={(_raw, el) => saveRelFolder("templatesFolder", el)}
-								/>
-							)}
-						</Row>
-					</Section>
-					<Section title="Language server" when={groups.server()}>
-						<Row group="Language server" label={ROWS.lspPath[0]} hint={ROWS.lspPath[1]} setting="lspPath" wide>
-							{(ids) => (
-								<DraftInput
-									id={ids.control}
-									aria-describedby={ids.hint}
-									autocomplete="off"
-									spellcheck="false"
-									placeholder={state.info?.lsp.path ?? "Found automatically"}
-									value={state.settings.lspPath ?? ""}
-									onKeyDown={commitOnEnter}
-									onCommit={async (raw, el) => {
-										const trimmed = raw.trim();
-										el.value = trimmed;
-										return (await save("lspPath", trimmed)) ? trimmed : false;
-									}}
-								/>
-							)}
-						</Row>
-						<p class="settings-hint">{server()}</p>
-					</Section>
-					<Section title="Keyboard" when={groups.keyboard()}>
-						<p class="settings-hint">
-							A shortcut needs Ctrl or Alt, or a function key. <span class="settings-scope">Saved for you</span>
-						</p>
-						<Show when={refused() && refusedIn() === "Keyboard"}>
-							<p class="settings-note" role="alert">
-								{refused()}
-							</p>
+										</div>
+									)}
+								</SettingRow>
+								<SettingRow setting="fontSize">
+									{(ids) => (
+										<DraftInput
+											id={ids.control}
+											aria-describedby={ids.hint}
+											type="number"
+											min={FONT.min}
+											max={FONT.max}
+											value={String(state.settings.fontSize)}
+											onKeyDown={commitOnEnter}
+											onCommit={async (raw, el) => {
+												const next = clampNumericSetting(raw, FONT.min, FONT.max, FONT.normal);
+												const text = String(next);
+												el.value = text;
+												return (await save("fontSize", next)) ? text : false;
+											}}
+										/>
+									)}
+								</SettingRow>
+								<SettingRow setting="uiFont">
+									{(ids) => <FontControl id={ids.control} hintId={ids.hint} setting="uiFont" presets={UI_FONT_PRESETS} placeholder="e.g. IBM Plex Sans" />}
+								</SettingRow>
+								<SettingRow setting="codeFont">
+									{(ids) => <FontControl id={ids.control} hintId={ids.hint} setting="codeFont" presets={CODE_FONT_PRESETS} placeholder="e.g. JetBrains Mono" />}
+								</SettingRow>
+								<SettingRow setting="readFont">
+									{(ids) => <FontControl id={ids.control} hintId={ids.hint} setting="readFont" presets={READ_FONT_PRESETS} placeholder="e.g. Source Serif 4" />}
+								</SettingRow>
+								<SettingRow setting="menuBar">
+									{(ids) => (
+										<label class="settings-check">
+											<input
+												id={ids.control}
+												aria-describedby={ids.hint}
+												type="checkbox"
+												checked={state.settings.menuBar !== false}
+												onChange={async (e) => {
+													const el = e.currentTarget;
+													if (!(await save("menuBar", el.checked))) el.checked = untrack(() => state.settings.menuBar !== false);
+												}}
+											/>
+											<span>Show top menu bar</span>
+										</label>
+									)}
+								</SettingRow>
+							</section>
 						</Show>
-						<div class="shortcuts">
-							<For each={keyRows()}>
-								{(c) => (
-									<div class="shortcut-row">
-										<span>{c.label}</span>
-										<span class="hint">{capturing() === c.id ? "Press the keys (Esc stops)" : keysFor(c.id) || "—"}</span>
-										<button aria-label={`Set the shortcut for ${c.label}`} onClick={() => record(c.id)}>
-											Set
-										</button>
-										<button aria-label={`Clear the shortcut for ${c.label}`} disabled={!keysFor(c.id)} onClick={() => void saveSetting({ keys: unbind(DEFAULT_KEYS, state.settings.keys ?? {}, c.id) })}>
-											Clear
-										</button>
-									</div>
-								)}
-							</For>
-						</div>
-						<div class="settings-actions">
-							<button aria-label="Reset to defaults: the shortcuts" disabled={!Object.keys(state.settings.keys ?? {}).length} onClick={() => void resetKeys()}>
-								Reset to defaults
-							</button>
-						</div>
-					</Section>
-					<Section title="Editor keys" when={groups.editorKeys()}>
-						<p class="settings-hint">
-							The editor's own keys, which work while you edit text: in code, and in a Markdown document's Live editor for the commands it has too. A key of two presses starts with {displayKey(onMac ? "cmd+k" : "ctrl+k")}, and is the code editor's alone. <span class="settings-scope">Saved for you</span>
-						</p>
-						<Show when={refused() && refusedIn() === "Editor keys"}>
-							<p class="settings-note" role="alert">
-								{refused()}
-							</p>
-						</Show>
-						<div class="shortcuts">
-							<For each={editorKeyRows()}>
-								{(c) => (
-									<div class="shortcut-row">
-										<span>{c.label}</span>
-										<span class="hint">{capturing() === c.id ? (chordFirst() ? `${displayKey(chordFirst())}, then the second key (Esc stops)` : "Press the keys (Esc stops)") : editorKeysFor(c.id) || "—"}</span>
-										<button aria-label={`Set the editor's key for ${c.label}`} onClick={() => record(c.id)}>
-											Set
-										</button>
-										<button
-											aria-label={`Clear the editor's key for ${c.label}`}
-											disabled={!editorKeysFor(c.id)}
-											onClick={() => {
-												const base = baseEditorKeys();
-												if (base) void saveSetting({ editorKeys: unbind(base, editorKeyChanges(), c.id) });
+
+						<Show when={showCat("editor")}>
+							<section class="settings-group" aria-label="Editor">
+								<h3>Editor</h3>
+								<SettingRow setting="formatOnSave">
+									{(ids) => (
+										<label class="settings-check">
+											<input
+												id={ids.control}
+												aria-describedby={ids.hint}
+												type="checkbox"
+												checked={state.settings.formatOnSave}
+												onChange={async (e) => {
+													const el = e.currentTarget;
+													if (!(await save("formatOnSave", el.checked))) el.checked = untrack(() => state.settings.formatOnSave);
+												}}
+											/>
+											<span>Format modified lines on save</span>
+										</label>
+									)}
+								</SettingRow>
+								<SettingRow setting="sqlDialect">
+									{(ids) => (
+										<select
+											id={ids.control}
+											aria-describedby={ids.hint}
+											value={state.settings.sqlDialect ?? DEFAULT_SQL_DIALECT}
+											onChange={async (e) => {
+												const el = e.currentTarget;
+												if (!(await save("sqlDialect", el.value as SqlDialect))) el.value = untrack(() => state.settings.sqlDialect ?? DEFAULT_SQL_DIALECT);
 											}}
 										>
-											Clear
-										</button>
+											<For each={SQL_DIALECTS}>{(d) => <option value={d.id}>{d.label}</option>}</For>
+										</select>
+									)}
+								</SettingRow>
+								<SettingRow setting="minimap">
+									{(ids) => (
+										<label class="settings-check">
+											<input
+												id={ids.control}
+												aria-describedby={ids.hint}
+												type="checkbox"
+												checked={state.settings.minimap}
+												onChange={async (e) => {
+													const el = e.currentTarget;
+													if (!(await save("minimap", el.checked))) el.checked = untrack(() => state.settings.minimap);
+												}}
+											/>
+											<span>Show code minimap</span>
+										</label>
+									)}
+								</SettingRow>
+								<SettingRow setting="wordWrap">
+									{(ids) => (
+										<label class="settings-check">
+											<input
+												id={ids.control}
+												aria-describedby={ids.hint}
+												type="checkbox"
+												checked={Boolean(state.settings.wordWrap)}
+												onChange={async (e) => {
+													const el = e.currentTarget;
+													if (!(await save("wordWrap", el.checked))) el.checked = untrack(() => Boolean(state.settings.wordWrap));
+												}}
+											/>
+											<span>Wrap long lines</span>
+										</label>
+									)}
+								</SettingRow>
+								<SettingRow setting="inlayHints">
+									{(ids) => (
+										<label class="settings-check">
+											<input
+												id={ids.control}
+												aria-describedby={ids.hint}
+												type="checkbox"
+												checked={state.settings.inlayHints !== false}
+												onChange={async (e) => {
+													const el = e.currentTarget;
+													if (!(await save("inlayHints", el.checked))) el.checked = untrack(() => state.settings.inlayHints !== false);
+												}}
+											/>
+											<span>Show parameter inlay hints</span>
+										</label>
+									)}
+								</SettingRow>
+								<SettingRow setting="indentOnType">
+									{(ids) => (
+										<label class="settings-check">
+											<input
+												id={ids.control}
+												aria-describedby={ids.hint}
+												type="checkbox"
+												checked={state.settings.indentOnType !== false}
+												onChange={async (e) => {
+													const el = e.currentTarget;
+													if (!(await save("indentOnType", el.checked))) el.checked = untrack(() => state.settings.indentOnType !== false);
+												}}
+											/>
+											<span>Indent SSL lines as formatter does</span>
+										</label>
+									)}
+								</SettingRow>
+								<SettingRow setting="ctrlClickAddsCursor">
+									{(ids) => (
+										<label class="settings-check">
+											<input
+												id={ids.control}
+												aria-describedby={ids.hint}
+												type="checkbox"
+												checked={state.settings.ctrlClickAddsCursor !== false}
+												onChange={async (e) => {
+													const el = e.currentTarget;
+													if (!(await save("ctrlClickAddsCursor", el.checked))) el.checked = untrack(() => state.settings.ctrlClickAddsCursor !== false);
+												}}
+											/>
+											<span>Ctrl+click adds cursor (Sublime style)</span>
+										</label>
+									)}
+								</SettingRow>
+								<SettingRow setting="rulers">
+									{(ids) => (
+										<label class="settings-check">
+											<input
+												id={ids.control}
+												aria-describedby={ids.hint}
+												type="checkbox"
+												checked={state.settings.rulers !== false}
+												onChange={async (e) => {
+													const el = e.currentTarget;
+													if (!(await save("rulers", el.checked))) el.checked = untrack(() => state.settings.rulers !== false);
+												}}
+											/>
+											<span>Show column ruler</span>
+										</label>
+									)}
+								</SettingRow>
+								<SettingRow setting="rulerMargin">
+									{(ids) => (
+										<DraftInput
+											id={ids.control}
+											aria-describedby={ids.hint}
+											type="number"
+											min="0"
+											max="60"
+											disabled={state.settings.rulers === false}
+											value={String(state.settings.rulerMargin ?? RULER_MARGIN)}
+											onKeyDown={commitOnEnter}
+											onCommit={async (raw, el) => {
+												const next = clampNumericSetting(raw, 0, 60, RULER_MARGIN);
+												const text = String(next);
+												el.value = text;
+												return (await save("rulerMargin", next)) ? text : false;
+											}}
+										/>
+									)}
+								</SettingRow>
+								<SettingRow setting="csvTable">
+									{(ids) => {
+										const cfg = () => effectiveCsvTableConfig(state.settings.csvTable);
+										return (
+											<div class="settings-csv-control">
+												<label class="settings-check">
+													<input
+														id={ids.control}
+														aria-describedby={ids.hint}
+														type="checkbox"
+														checked={cfg().badgeFormatting}
+														onChange={async (e) => {
+															const el = e.currentTarget;
+															if (!(await save("csvTable", { ...cfg(), badgeFormatting: el.checked }))) {
+																el.checked = untrack(() => cfg().badgeFormatting);
+															}
+														}}
+													/>
+													<span>Format CSV status columns as colored badges</span>
+												</label>
+												<Show when={Boolean(state.settings.csvTable)}>
+													<button
+														type="button"
+														title="Restore default STARLIMS + Registry CSV column badge rules"
+														onClick={() => void save("csvTable", cloneCsvTableConfig(DEFAULT_CSV_TABLE_CONFIG))}
+													>
+														Reset rules
+													</button>
+												</Show>
+											</div>
+										);
+									}}
+								</SettingRow>
+							</section>
+						</Show>
+
+						<Show when={showCat("markdown")}>
+							<section class="settings-group" aria-label="Markdown & Docs">
+								<h3>Markdown &amp; Docs</h3>
+								<SettingRow setting="livePreview">
+									{(ids) => (
+										<label class="settings-check">
+											<input
+												id={ids.control}
+												aria-describedby={ids.hint}
+												type="checkbox"
+												checked={state.settings.livePreview !== false}
+												onChange={async (e) => {
+													const el = e.currentTarget;
+													const checked = el.checked;
+													if (await save("livePreview", checked)) syncLivePreviewMode(checked);
+													else el.checked = untrack(() => state.settings.livePreview !== false);
+												}}
+											/>
+											<span>Enable Obsidian-style Live Preview</span>
+										</label>
+									)}
+								</SettingRow>
+								<SettingRow setting="markdownReadingHighlight">
+									{(ids) => (
+										<label class="settings-check">
+											<input
+												id={ids.control}
+												aria-describedby={ids.hint}
+												type="checkbox"
+												checked={state.settings.markdownReadingHighlight !== false}
+												onChange={async (e) => {
+													const el = e.currentTarget;
+													if (!(await save("markdownReadingHighlight", el.checked))) {
+														el.checked = untrack(() => state.settings.markdownReadingHighlight !== false);
+													}
+												}}
+											/>
+											<span>Dim trailing lines while reading or editing</span>
+										</label>
+									)}
+								</SettingRow>
+								<SettingRow setting="attachmentsFolder" wide>
+									{(ids) => (
+										<DraftInput
+											id={ids.control}
+											aria-describedby={ids.hint}
+											type="text"
+											placeholder="docs/attachments"
+											value={state.settings.attachmentsFolder ?? ""}
+											onKeyDown={commitOnEnter}
+											onCommit={(_raw, el) => saveRelFolder("attachmentsFolder", el)}
+										/>
+									)}
+								</SettingRow>
+								<SettingRow setting="templatesFolder" wide>
+									{(ids) => (
+										<DraftInput
+											id={ids.control}
+											aria-describedby={ids.hint}
+											type="text"
+											placeholder="docs/templates"
+											value={state.settings.templatesFolder ?? ""}
+											onKeyDown={commitOnEnter}
+											onCommit={(_raw, el) => saveRelFolder("templatesFolder", el)}
+										/>
+									)}
+								</SettingRow>
+							</section>
+						</Show>
+
+						<Show when={showCat("ssl")}>
+							<section class="settings-group" aria-label="SSL & Language Server">
+								<h3>SSL &amp; Language Server</h3>
+								<SettingRow setting="stylePreset">
+									{(ids) => (
+										<div class="settings-inline-row">
+											<select
+												id={ids.control}
+												aria-describedby={ids.hint}
+												value={state.settings.stylePreset}
+												onChange={async (e) => {
+													const el = e.currentTarget;
+													if (!(await save("stylePreset", el.value as "house" | "server"))) {
+														el.value = untrack(() => state.settings.stylePreset);
+													}
+												}}
+											>
+												<option value="house">House style (recommended)</option>
+												<option value="server">starlims-lsp defaults</option>
+											</select>
+											<button type="button" onClick={() => openStyleProfile()}>
+												Edit Style Profile…
+											</button>
+										</div>
+									)}
+								</SettingRow>
+								<SettingRow setting="lspPath" wide>
+									{(ids) => (
+										<DraftInput
+											id={ids.control}
+											aria-describedby={ids.hint}
+											disabled={ids.disabled}
+											autocomplete="off"
+											spellcheck="false"
+											placeholder={state.info?.lsp.path ?? "Found automatically"}
+											value={state.settings.lspPath ?? ""}
+											onKeyDown={commitOnEnter}
+											onCommit={async (raw, el) => {
+												const trimmed = raw.trim();
+												el.value = trimmed;
+												return (await save("lspPath", trimmed)) ? trimmed : false;
+											}}
+										/>
+									)}
+								</SettingRow>
+								<p class="settings-status-line">{serverStatusText()}</p>
+							</section>
+						</Show>
+
+						<Show when={showCat("agent")}>
+							<section class="settings-group" aria-label="Agent & AI">
+								<h3>Agent &amp; AI</h3>
+								<AgentSettingsSection
+									scope={activeScope()}
+									layers={layers()}
+									visibleKeys={visibleSchemaKeys()}
+									onSaveUser={saveUserOnly}
+									onSwitchToUser={() => setActiveScope("user")}
+								/>
+							</section>
+						</Show>
+
+						<Show when={showCat("storage")}>
+							<section class="settings-group" aria-label="History & Limits">
+								<h3>History &amp; Limits</h3>
+								<StorageLimitsSection
+									scope={activeScope()}
+									layers={layers()}
+									showLimits={visibleSchemaKeys().has("limits")}
+									onSave={save}
+								/>
+							</section>
+						</Show>
+
+						<Show when={showCat("keyboard")}>
+							<section class="settings-group" aria-label="Keyboard Shortcuts">
+								<div class="settings-kb-header">
+									<div>
+										<h3>Keyboard Shortcuts</h3>
+										<p class="settings-item-desc">
+											Saved in User settings. Editor chords start with {displayKey(onMac ? "cmd+k" : "ctrl+k")}; Markdown keys take priority inside Markdown editors.
+										</p>
 									</div>
-								)}
-							</For>
-						</div>
-						<div class="settings-actions">
-							<button aria-label="Reset to defaults: the editor's keys" disabled={!Object.keys(state.settings.editorKeys ?? {}).length} onClick={() => void resetEditorKeys()}>
-								Reset to defaults
-							</button>
-						</div>
-					</Section>
-					<Section title="Markdown keys" when={groups.markdownKeys()}>
-						<p class="settings-hint">
-							Keys for writing Markdown. They work while you edit a Markdown document, in Live and in Source, and come before any other key there. <span class="settings-scope">Saved for you</span>
-						</p>
-						<Show when={refused() && refusedIn() === "Markdown keys"}>
-							<p class="settings-note" role="alert">
-								{refused()}
+									<button type="button" disabled={!anyCustomShortcuts()} onClick={() => void resetAllShortcuts()}>
+										Reset All Defaults
+									</button>
+								</div>
+
+								<Show when={activeScope() === "workspace"}>
+									<div class="settings-lock-banner" role="note">
+										<Icon name="lock" />
+										<span>Keyboard shortcuts are personal and always saved in <strong>User</strong> settings.</span>
+									</div>
+								</Show>
+
+								<div class="settings-kb-filters" role="group" aria-label="Filter shortcut context">
+									{(
+										[
+											["all", "All"],
+											["global", "Global"],
+											["editor", "Code Editor"],
+											["markdown", "Markdown"],
+											["modified", "Modified"],
+										] as const
+									).map(([id, text]) => (
+										<button
+											type="button"
+											class={["settings-kb-pill", { active: keyContextFilter() === id }]}
+											aria-pressed={keyContextFilter() === id ? "true" : "false"}
+											onClick={() => setKeyContextFilter(id)}
+										>
+											{text}
+										</button>
+									))}
+								</div>
+
+								<Show when={refused()}>
+									<p class="settings-note" role="alert">
+										{refused()}
+									</p>
+								</Show>
+
+								<div class="settings-kb-table" role="table" aria-label="Keyboard shortcuts">
+									<div class="settings-kb-head" role="row">
+										<span role="columnheader">Command</span>
+										<span role="columnheader">Keybinding</span>
+										<span role="columnheader">Context</span>
+										<span role="columnheader">Source</span>
+										<span role="columnheader">Actions</span>
+									</div>
+									<For each={filteredShortcuts()} fallback={<p class="settings-empty">No shortcuts match.</p>}>
+										{(row) => (
+											<div class={["settings-kb-row", { modified: row.modified, capturing: capturing() === row.rowId }]} role="row">
+												<span class="kb-cmd" role="cell" title={row.label}>{row.label}</span>
+												<span class="kb-key" role="cell">
+													{capturing() === row.rowId ? (
+														<span class="kb-capturing">
+															{chordFirst() ? `${displayKey(chordFirst())}, press 2nd key (Esc stops)` : "Press keys (Esc stops)"}
+														</span>
+													) : row.keysText ? (
+														<kbd>{row.keysText}</kbd>
+													) : (
+														<span class="kb-none">—</span>
+													)}
+												</span>
+												<span class="kb-ctx" role="cell">{row.context}</span>
+												<span class="kb-src" role="cell">{row.modified ? "User" : "Default"}</span>
+												<span class="kb-acts" role="cell">
+													<button type="button" aria-label={`Set shortcut for ${row.label}`} onClick={() => record(row.rowId)}>
+														Set
+													</button>
+													<button type="button" aria-label={`Clear shortcut for ${row.label}`} disabled={!row.keysText} onClick={() => void clearShortcut(row)}>
+														Clear
+													</button>
+												</span>
+											</div>
+										)}
+									</For>
+								</div>
+							</section>
+						</Show>
+
+						<Show when={!anySettingVisible()}>
+							<p class="settings-empty">
+								No settings match{settingsQuery().trim() ? ` “${settingsQuery().trim()}”` : ""}.
+								<Show when={activeFilterChips().length > 0}>
+									{" "}
+									<button type="button" class="link" onClick={() => setSettingsQuery("")}>
+										Clear filters
+									</button>
+								</Show>
 							</p>
 						</Show>
-						<div class="shortcuts">
-							<For each={markdownKeyRows()}>
-								{(c) => (
-									<div class="shortcut-row">
-										<span>{c.label}</span>
-										<span class="hint">{capturing() === MARKDOWN_ROW + c.id ? "Press the keys (Esc stops)" : markdownKeysFor(c.id) || "—"}</span>
-										<button aria-label={`Set Markdown's key for ${c.label}`} onClick={() => record(MARKDOWN_ROW + c.id)}>
-											Set
-										</button>
-										<button aria-label={`Clear Markdown's key for ${c.label}`} disabled={!markdownKeysFor(c.id)} onClick={() => void saveSetting({ markdownKeys: unbind(MARKDOWN_KEYS, markdownKeyChanges(), c.id) })}>
-											Clear
-										</button>
-									</div>
-								)}
-							</For>
-						</div>
-						<div class="settings-actions">
-							<button aria-label="Reset to defaults: Markdown's keys" disabled={!Object.keys(state.settings.markdownKeys ?? {}).length} onClick={() => void resetMarkdownKeys()}>
-								Reset to defaults
-							</button>
-						</div>
-					</Section>
-					<Show when={!groups.appearance() && !groups.editor() && !groups.server() && !groups.keyboard() && !groups.editorKeys() && !groups.markdownKeys()}>
-						<p class="settings-empty">No settings match.</p>
-					</Show>
+					</div>
 				</div>
-				<div class="buttons">
-					<button class="primary" onClick={close}>
+			</Show>
+		</div>
+	);
+}
+
+/** Full-pane Settings Editor tab mounted in `App.tsx` inside `<CenterTabStrip>` when `state.centerView === "settings"`. */
+export function SettingsView() {
+	return <SettingsWorkspace embedded={true} />;
+}
+
+/**
+ * Registers the `openSettings()` command hook and hosts a fallback `<Modal>` sheet
+ * when Settings is opened from the Welcome screen (before any workspace is open).
+ */
+export function SettingsDialog() {
+	const titleId = createUniqueId();
+	onOpenSettings((raw = "") => {
+		const trimmed = raw.trim();
+		if (trimmed === "__json__") {
+			setSettingsQuery("");
+			setJsonMode(true);
+		} else if (trimmed.toLowerCase() === "keyboard") {
+			setSettingsQuery("");
+			setJsonMode(false);
+			setActiveCategory("keyboard");
+		} else {
+			setSettingsQuery(raw);
+			setJsonMode(false);
+			setActiveCategory("all");
+		}
+		void refreshLayers();
+		if (state.workspace) {
+			closeComparison();
+			setModalOpen(false);
+			setState((s) => {
+				s.centerView = "settings";
+			});
+		} else {
+			setActiveScope("user");
+			setModalOpen(true);
+		}
+	});
+
+	const close = () => setModalOpen(false);
+
+	return (
+		<Show when={modalOpen() && !state.workspace}>
+			<Modal class="dialog settings settings-modal" labelledBy={titleId} onClose={close}>
+				<div class="settings-modal-head">
+					<h2 id={titleId}>Settings</h2>
+					<button type="button" class="primary" onClick={close}>
 						Done
 					</button>
 				</div>
+				<SettingsWorkspace embedded={false} onClose={close} />
 			</Modal>
 		</Show>
 	);

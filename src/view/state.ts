@@ -106,7 +106,7 @@ const [state, setStore] = createStore({
 	bottomView: "problems" as BottomView,
 	bottomMaximized: false,
 	rightView: "health" as RightView,
-	centerView: "editors" as "editors" | "graph" | "welcome",
+	centerView: "editors" as "editors" | "graph" | "welcome" | "settings" | "customizations",
 	/** Persisted default Plan view mode (Source | Text | Chart), shared across all Plan documents. */
 	planViewMode: parsePlanViewMode(recall(PLAN_MODE_KEY)) as PlanViewMode | null,
 	/** Persisted default CSV/TSV view mode (`true` = Text, `false` = Table), shared across all tabular files. */

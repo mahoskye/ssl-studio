@@ -2,6 +2,12 @@
 // The same API travels over Electrobun's RPC in the app and over a WebSocket
 // in the browser host (src/bun/web.ts); src/bun/backend.ts implements it.
 
+import type {
+	AgentCustomizationsSnapshot,
+	CreateCustomizationRequest,
+	CustomizationScope,
+	McpServerConfig,
+} from "./agentCustomizations";
 import type { CsvTableConfig } from "./csvFormat";
 import type { FormatDocumentRequest, FormatDocumentResult, SqlDialect } from "./format";
 import type { Groups, OpenText, SearchOptions } from "./searchPattern";
@@ -621,6 +627,26 @@ export interface BackendApi {
 	/** `problems`: a settings file that is there and does not read as settings, by its path and the place that is wrong; none of it is used. */
 	settings(): Promise<{ effective: Settings; user: Partial<Settings>; workspace: Partial<Settings>; problems?: string[] }>;
 	saveSettings(scope: SettingsScope, patch: SettingsPatch): Promise<Settings>;
+	/** Reads the raw JSON text of User or Workspace `settings.json` for the Settings (JSON) view. */
+	settingsFile(scope: SettingsScope): Promise<{ path: string; text: string; exists: boolean; inWorkspace: boolean }>;
+	/** Validates and atomically writes raw JSON text for User or Workspace `settings.json`. */
+	saveSettingsFile(scope: SettingsScope, text: string): Promise<{ effective: Settings; strippedUserOnly: string[] }>;
+	/** Discovers Instructions, Skills, Custom Agents, Prompt Files, and MCP Servers across Workspace and User scopes (ADR 0053). */
+	customizations(): Promise<AgentCustomizationsSnapshot>;
+	/** Reads a customization file inside an allowed workspace or user customization directory. */
+	customizationRead(path: string): Promise<{ path: string; text: string; scope: CustomizationScope }>;
+	/** Atomically writes edits to a customization file inside an allowed customization directory. */
+	customizationSave(path: string, text: string): Promise<void>;
+	/** Creates a new Skill, Custom Agent, Instruction Rule, or Prompt File from a starter template. */
+	customizationCreate(request: CreateCustomizationRequest): Promise<{ path: string }>;
+	/** Deletes a customization file (or skill folder when deleting a SKILL.md) inside an allowed directory. */
+	customizationDelete(path: string): Promise<boolean>;
+	/** Creates or updates an MCP server entry in User or Workspace `mcp.json`. */
+	mcpSave(scope: CustomizationScope, server: McpServerConfig): Promise<void>;
+	/** Deletes an MCP server entry from User or Workspace `mcp.json`. */
+	mcpDelete(scope: CustomizationScope, id: string): Promise<boolean>;
+	/** Explicitly trusts or revokes trust for a workspace MCP server's SHA-256 fingerprint in User config. */
+	mcpSetTrust(id: string, fingerprint: string, trusted: boolean): Promise<void>;
 	themes(): Promise<ThemeFile[]>;
 	/** Asks for a VS Code theme file and keeps a copy; null when cancelled. */
 	importTheme(): Promise<ThemeFile | null>;

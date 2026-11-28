@@ -181,7 +181,7 @@ export type StatusSurface = {
 };
 
 export type StatusSurfaceInput = {
-	centerView: "editors" | "graph" | "welcome";
+	centerView: "editors" | "graph" | "welcome" | "settings" | "customizations";
 	inReview: boolean;
 	reviewLanguage?: string | null;
 	path: string | null;

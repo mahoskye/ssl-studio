@@ -460,6 +460,61 @@ export class SettingsStore {
 		});
 	}
 
+	/** Reads the raw JSON text of User or Workspace `settings.json` for the Settings (JSON) editor. */
+	async readFile(scope: SettingsScope): Promise<{ path: string; text: string; exists: boolean; inWorkspace: boolean }> {
+		const root = scope === "workspace" ? this.root() : null;
+		const path = this.path(scope);
+		if (scope === "workspace") assertPathInsideRoot(root!, path, true);
+		try {
+			const text = await Bun.file(path).text();
+			return { path, text, exists: true, inWorkspace: scope === "workspace" };
+		} catch (e: any) {
+			if (e?.code === "ENOENT" || e?.code === "ENOTDIR") {
+				return { path, text: "{\n}\n", exists: false, inWorkspace: scope === "workspace" };
+			}
+			throw e;
+		}
+	}
+
+	/** Validates and atomically writes raw JSON text for User or Workspace `settings.json`. */
+	async writeFile(scope: SettingsScope, rawText: string): Promise<{ effective: Settings; strippedUserOnly: string[] }> {
+		const root = scope === "workspace" ? this.root() : null;
+		const path = this.path(scope);
+		return this.saves.run("settings", async () => {
+			if (scope === "workspace") assertPathInsideRoot(root!, path, true);
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(rawText.trim() ? rawText : "{}");
+			} catch (e: any) {
+				const found = jsonProblem(rawText);
+				if (found) {
+					const before = rawText.slice(0, found.offset);
+					const line = before.split("\n").length;
+					const column = found.offset - (before.lastIndexOf("\n") + 1) + 1;
+					throw new Error(`Invalid JSON at line ${line}, column ${column}: ${found.message}`);
+				}
+				throw new Error(`Invalid JSON: ${String(e?.message ?? e)}`);
+			}
+			if (!isPlainObject(parsed)) {
+				throw new Error("Settings file must contain a JSON object (`{ ... }`).");
+			}
+			const next: Record<string, unknown> = {};
+			const strippedUserOnly: string[] = [];
+			for (const [key, value] of Object.entries(parsed)) {
+				if (UNSAFE_KEYS.has(key) || value === undefined || value === null) continue;
+				if (scope === "workspace" && USER_ONLY_SETTINGS.has(key)) {
+					strippedUserOnly.push(key);
+					continue;
+				}
+				next[key] = value;
+			}
+			if (scope === "workspace") assertPathInsideRoot(root!, path, true);
+			const formatted = JSON.stringify(next, null, 2) + "\n";
+			await atomicWrite(path, formatted, scope === "workspace" ? "shared" : "private", "and save settings again");
+			return { effective: (await this.load()).effective, strippedUserOnly };
+		});
+	}
+
 	/**
 	 * What a settings file holds, to be changed and written back: nothing when it is not there or is empty. As it is
 	 * written, not as `load` takes it: a value of the wrong kind is the user's text too, and stays in the file.

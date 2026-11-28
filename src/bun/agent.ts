@@ -9,6 +9,7 @@
 import { randomBytes } from "node:crypto";
 import type { Subprocess } from "bun";
 import type { AgentModel, AgentReply, AgentStatus } from "../shared/protocol";
+import { mergeMcpIntoOpencodeConfig, type McpServerEntry } from "../shared/agentCustomizations";
 import { compareVersions, OPENCODE_RANGE, opencodeCommand, verbatim } from "./tools";
 import { isLocalModelRef, LOCAL_PROVIDERS, parseModelRef } from "../shared/agentModels";
 
@@ -31,6 +32,7 @@ const NO_TOOLS_OF_ITS_OWN = ["read", "glob", "grep", "subagent", "skill"];
  * has connected, which is outside the workspace; `browser` is the web by
  * another name. A rule for an action a server does not have denies nothing.
  */
+const MCP_RESOURCE_TOOLS = new Set(["opencode_list_mcp_resources", "opencode_read_mcp_resource", "opencode_watch_mcp_event"]);
 const DENY = ["shell", "webfetch", "websearch", "external_directory", "question", "edit", "browser", "experimental_image_generate", "opencode_list_mcp_resources", "opencode_read_mcp_resource", "opencode_watch_mcp_event", ...NO_TOOLS_OF_ITS_OWN];
 /** Providers that run on the user's own machines. Anything else may bill. */
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
@@ -62,6 +64,8 @@ export type AgentOptions = {
 	confirmedModels?: string[];
 	/** Explicitly permits the configured non-local model for this adapter instance. */
 	allowPaidModel?: boolean;
+	/** Trusted/configured MCP servers discovered by CustomizationsStore (only trusted & enabled servers are passed to opencode). */
+	mcpServers?: McpServerEntry[];
 	/** For tests: overrides startup URL wait timeout (default 30 s). */
 	startupTimeoutMs?: number;
 	/** For tests: overrides per-request API timeout (default 60 s). */
@@ -252,7 +256,9 @@ export class Agent {
 	) {}
 
 	configure(options: AgentOptions) {
-		const changed = options.serverConfig !== this.options.serverConfig || options.serverUrl !== this.options.serverUrl;
+		const prevConfig = mergeMcpIntoOpencodeConfig(this.options.serverConfig, this.options.mcpServers ?? []).configJson;
+		const nextConfig = mergeMcpIntoOpencodeConfig(options.serverConfig, options.mcpServers ?? []).configJson;
+		const changed = prevConfig !== nextConfig || options.serverUrl !== this.options.serverUrl;
 		this.options = options;
 		if (changed && this.status.state !== "off") this.stop();
 	}
@@ -329,7 +335,8 @@ export class Agent {
 			} else {
 				const password = randomBytes(24).toString("base64url");
 				const env: Record<string, string> = { ...(process.env as Record<string, string>), OPENCODE_PASSWORD: password };
-				if (this.options.serverConfig) env.OPENCODE_CONFIG_CONTENT = this.options.serverConfig;
+				const merged = mergeMcpIntoOpencodeConfig(this.options.serverConfig, this.options.mcpServers ?? []);
+				if (merged.configJson) env.OPENCODE_CONFIG_CONTENT = merged.configJson;
 				// The npm shim under a path with a space is a line written out for cmd.exe: Windows is given it as written.
 				const proc = Bun.spawn(this.command, { env, stdin: "pipe", stdout: "pipe", stderr: "pipe", cwd: this.root() ?? undefined, windowsVerbatimArguments: verbatim(this.command) });
 				spawned = proc;
@@ -735,11 +742,13 @@ export class Agent {
 		if (!sessionID) {
 			const model = await this.model();
 			this.setStatus({ ...this.status, model: `${model.providerID}/${model.id}` });
+			const allowMcpTools = (this.options.mcpServers ?? []).some((s) => s.trusted && !s.disabled && s.allowTools);
+			const sessionDeny = allowMcpTools ? DENY.filter((action) => !MCP_RESOURCE_TOOLS.has(action)) : DENY;
 			const created = await this.api("POST", "/api/session", {
 				title: input.title ?? "SSL Studio",
 				location: { directory: root },
 				model,
-				permissions: DENY.map((action) => ({ action, resource: "*", effect: "deny" })),
+				permissions: sessionDeny.map((action) => ({ action, resource: "*", effect: "deny" })),
 			});
 			const createdID = created?.data?.id;
 			if (typeof createdID !== "string" || !createdID.trim()) {

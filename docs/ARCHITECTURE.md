@@ -189,7 +189,7 @@ base, registries, and a catalog for each folder. The guide is
 
 | What | Where |
 | --- | --- |
-| User settings, style profile, themes | `~/.config/ssl-studio/` |
+| User settings, style profile, themes | `~/.config/ssl-studio/` (`settings.json`, `mcp.json`, `skills/`, `agents/`, `prompts/`, `rules/`; [ADR 0053](adr/0053-settings-editor-and-agent-customizations.md)) |
 | Project settings: name, description, folders, agent model, style preset | `<workspace>/.ssl-studio/project.toml`, written once by "Set up project" and then edited by hand ([ADR 0006](adr/0006-a-project-has-settings-a-readme-and-an-agents-file.md)) |
 | Workspace settings the IDE writes: region colours, panel layout, profile overrides | `<workspace>/.ssl-studio/settings.json` (the user decides whether to commit it) |
 | The project's documents | `README.md` and `AGENTS.md` at the root, Markdown under `docs/`, the data's shape under `schema/` (or the folders `project.toml` names), plans under `design/` |

@@ -33,7 +33,8 @@ import { AgentPanel } from "./agent/Agent";
 import { GraphView, resetGraphState } from "./graph/GraphView";
 import { session } from "./lsp/session";
 import { QuickPick } from "./QuickPick";
-import { SettingsDialog } from "./Settings";
+import { SettingsDialog, SettingsView } from "./Settings";
+import { CustomizationsHost, CustomizationsView } from "./settings/CustomizationsView";
 import { MenuBar } from "./MenuBar";
 import { useNavigation } from "./navigation";
 import { StatusBar } from "./StatusBar";
@@ -1081,6 +1082,20 @@ export function App() {
 								<Welcome />
 							</CenterTabStrip>
 						</Show>
+						<Show when={state.centerView === "settings"}>
+							<CenterTabStrip title="Settings" tooltip="User and Workspace Settings (Ctrl+,)" icon="gear" onClose={() => setState((s) => { s.centerView = "editors"; })}>
+								<RegionBoundary what="Settings">
+									<SettingsView />
+								</RegionBoundary>
+							</CenterTabStrip>
+						</Show>
+						<Show when={state.centerView === "customizations"}>
+							<CenterTabStrip title="Agent Customizations" tooltip="Instructions, Skills, Custom Agents, Prompts, and MCP Servers" icon="sparkle" onClose={() => setState((s) => { s.centerView = "editors"; })}>
+								<RegionBoundary what="Agent Customizations">
+									<CustomizationsView />
+								</RegionBoundary>
+							</CenterTabStrip>
+						</Show>
 						<Show when={state.centerView === "editors"}>
 							<Show
 								when={review()}
@@ -1222,6 +1237,7 @@ export function App() {
 			{/* One menu for every list's rows, whichever panel is showing: the Explorer's files, the working documents, Health's checks. */}
 			<RowMenu />
 			<SettingsDialog />
+			<CustomizationsHost />
 			<StyleProfile />
 			<Dialogs />
 		</div>
