@@ -6,7 +6,7 @@ import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Subprocess } from "bun";
 import { parseStatus, type GitFile, type GitStatus } from "../shared/gitStatus";
-import type { GitActionResult, GitBlameLine, GitBranchesResult, GitBranchInfo, GitCommit, GitStashResult, TicketGitCommit } from "../shared/protocol";
+import type { GitActionResult, GitBlameLine, GitBranchesResult, GitBranchInfo, GitCommit, GitGraphCommit, GitStashResult, TicketGitCommit } from "../shared/protocol";
 import { decode, looksBinary } from "./encoding";
 
 type Ran = { code: number; out: Uint8Array; err: string; truncated?: boolean };
@@ -674,6 +674,105 @@ export class Git {
 		if (ran.code !== 0) return [];
 		const wordRe = new RegExp(`(?<![A-Za-z0-9_-])${cleanKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_-])`, "i");
 		return parseCommitLogZ(text(ran.out), this.prefix, true, (subject, body) => wordRe.test(subject) || wordRe.test(body));
+	}
+
+	/** Recent local Git commits on HEAD with ref decorations, parent SHAs, and changed files (ADR 0022: local only). */
+	async recentLog(limit = 25): Promise<GitGraphCommit[]> {
+		if (!(await this.repository())) return [];
+		const cap = Math.max(1, Math.min(100, Math.round(limit)));
+		const ran = await this.run([
+			"-c",
+			"core.quotePath=false",
+			"log",
+			"-n",
+			String(cap),
+			"--format=%x1e%H%x1f%h%x1f%ct%x1f%an%x1f%D%x1f%p%x1f%s",
+			"--name-status",
+			"-z",
+			"--",
+		]);
+		if (ran.code !== 0) return [];
+		const tokens = text(ran.out).split("\0");
+		const commits: GitGraphCommit[] = [];
+		let i = 0;
+		while (i < tokens.length) {
+			const headerToken = tokens[i]!.replace(/^[\r\n]+/, "");
+			if (!headerToken.startsWith("\x1e")) {
+				i++;
+				continue;
+			}
+			i++;
+			const fields = headerToken.slice(1).split("\x1f");
+			const sha = fields[0] ?? "";
+			const shortSha = fields[1] ?? "";
+			const ct = fields[2] ?? "";
+			const author = fields[3] ?? "";
+			const refsRaw = fields[4] ?? "";
+			const parentsRaw = fields[5] ?? "";
+			const subject = fields.slice(6).join(" ");
+			const refs = refsRaw
+				? refsRaw
+						.split(",")
+						.map((r) => r.trim())
+						.filter(Boolean)
+				: [];
+			const parents = parentsRaw
+				? parentsRaw
+						.trim()
+						.split(/\s+/)
+						.filter(Boolean)
+				: [];
+			const files: TicketGitCommit["files"] = [];
+			while (i < tokens.length) {
+				const tok = tokens[i]!;
+				if (tok === "") {
+					i++;
+					continue;
+				}
+				const trimmedStart = tok.replace(/^[\r\n]+/, "");
+				if (trimmedStart.startsWith("\x1e")) break;
+				const status = trimmedStart.trim();
+				i++;
+				if (!status) continue;
+				let filePath: string | undefined;
+				if (status.startsWith("R") || status.startsWith("C")) {
+					filePath = tokens[i + 1];
+					i += 2;
+				} else {
+					filePath = tokens[i];
+					i += 1;
+				}
+				if (!filePath) continue;
+				const inWorkspace = !this.prefix || filePath.startsWith(this.prefix);
+				const rel = this.prefix && filePath.startsWith(this.prefix) ? filePath.slice(this.prefix.length) : filePath;
+				files.push({ status, path: rel, repoPath: filePath, inWorkspace });
+			}
+			if (!sha || !shortSha) continue;
+			commits.push({
+				sha,
+				shortSha,
+				time: (Number(ct) || 0) * 1000,
+				author,
+				subject,
+				refs,
+				parents,
+				files,
+			});
+		}
+		return commits;
+	}
+
+	/** Initializes a new local Git repository in the workspace folder when none encloses it. */
+	async init(): Promise<GitActionResult> {
+		if (await this.repository(true)) {
+			return { ok: false, message: "This folder is already inside a Git repository." };
+		}
+		const ran = await this.run(["init"]);
+		const msg = (text(ran.out) || ran.err).trim();
+		if (ran.code !== 0) return { ok: false, message: msg || "git init failed." };
+		this.top = undefined;
+		this.repoInit = undefined;
+		return { ok: true, message: msg.split("\n")[0] || "Initialized empty Git repository." };
 	}
 
 	/** Reads a file's text at a specific Git commit SHA. Returns null if binary, missing, oversized, or invalid SHA. */

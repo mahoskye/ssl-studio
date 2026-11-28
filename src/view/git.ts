@@ -203,6 +203,63 @@ export async function discard(file: GitFile): Promise<void> {
 	await refreshGit();
 }
 
+/**
+ * Discards unstaged changes across multiple files (after one explicit confirmation).
+ * Leaves conflicted files and folders holding their own git repositories untouched.
+ */
+export async function discardMany(files: readonly GitFile[], scopeLabel?: string): Promise<void> {
+	const eligible = files.filter((f) => f.unstaged && f.unstaged !== "conflict" && !isOwnRepository(f));
+	if (!eligible.length) return;
+	if (eligible.length === 1) return discard(eligible[0]!);
+	const root = state.workspace?.root;
+	const untracked = eligible.filter((f) => f.unstaged === "untracked");
+	const tracked = eligible.filter((f) => f.unstaged !== "untracked");
+	const parts: string[] = [];
+	if (tracked.length) {
+		parts.push(`restore ${tracked.length} modified ${tracked.length === 1 ? "file" : "files"} (each text file is kept in local history first)`);
+	}
+	if (untracked.length) {
+		parts.push(`move ${untracked.length} untracked ${untracked.length === 1 ? "file" : "files"} to the trash`);
+	}
+	const where = scopeLabel ? ` in ${scopeLabel}` : "";
+	const DISCARD_ALL = `Discard ${eligible.length} files`;
+	const what = `Discard unstaged changes${where}? This will ${parts.join(" and ")}.`;
+	if ((await choose(what, [DISCARD_ALL], { danger: DISCARD_ALL })) !== DISCARD_ALL) return;
+	if (state.workspace?.root !== root) return;
+	const failedNames: string[] = [];
+	let done = 0;
+	for (const file of eligible) {
+		if (state.workspace?.root !== root) return;
+		const canon = canonical(file.path);
+		const isUntracked = file.unstaged === "untracked";
+		try {
+			await changingOnDisk(file.path, () => backend.gitDiscard(file.path));
+		} catch (e: any) {
+			failedNames.push(`${baseName(file.path)}: ${String(e?.message ?? e)}`);
+			continue;
+		}
+		if (state.workspace?.root !== root) return;
+		const onDisk = await backend.sizes([file.path]).then(
+			(sizes) => (sizes ? file.path in sizes : !isUntracked),
+			() => !isUntracked,
+		);
+		if (state.workspace?.root !== root) return;
+		if (!onDisk) fileRemoved(file.path);
+		else if (documents.get(canon)) await revert(canon);
+		else await fileChangedOnDisk(file.path);
+		historyChanged.fire(canon);
+		done++;
+	}
+	if (done > 0) {
+		setState((s) => {
+			s.treeVersion += 1;
+			suppressedTreeVersion = s.treeVersion;
+		});
+	}
+	await refreshGit();
+	if (failedNames.length) notify(`Some files were not discarded: ${failedNames.slice(0, 3).join("; ")}`, "error");
+}
+
 let showingChange = 0;
 
 /** Shows a change: the file as git has it beside the file as it is. `staged` is the change that is staged for the next commit. */

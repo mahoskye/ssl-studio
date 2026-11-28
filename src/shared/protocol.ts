@@ -199,6 +199,7 @@ export type KeptText = {
 };
 export type GitCommit = { sha: string; shortSha: string; time: number; author: string; subject: string; path: string };
 export type TicketGitCommit = { sha: string; shortSha: string; time: number; author: string; subject: string; files: { status: string; path: string; repoPath?: string; inWorkspace?: boolean }[] };
+export type GitGraphCommit = TicketGitCommit & { refs: string[]; parents: string[] };
 export type GitBlameLine = { sha: string; shortSha: string; author: string; date: string; summary: string; ticket?: string; filename?: string };
 export type GitBranchInfo = { name: string; current: boolean; upstream?: string; lastSubject?: string };
 export type GitBranchesResult = { current: string; branches: GitBranchInfo[] };
@@ -418,6 +419,10 @@ export interface BackendApi {
 	gitLog(path: string, limit?: number): Promise<GitCommit[]>;
 	/** Local Git commits whose subject/body mentions `ticketKey`, with changed file paths (ADR 0022). */
 	gitTicketLog(ticketKey: string, limit?: number): Promise<TicketGitCommit[]>;
+	/** Recent local Git commits on HEAD with branch/tag refs, parent SHAs, and changed files (ADR 0022). */
+	gitRecentLog(limit?: number): Promise<GitGraphCommit[]>;
+	/** Initializes a new local Git repository in the workspace folder when none encloses it (ADR 0022). */
+	gitInit(): Promise<GitActionResult>;
 	/** A file's text at a specific Git commit SHA (using its path in that commit when renamed). Null when binary or absent. */
 	gitShow(path: string, sha: string, repoPath?: string): Promise<string | null>;
 	/** Local unified diff (staged or working tree), optionally filtered to specific workspace paths and byte-capped (ADR 0022). */

@@ -19,7 +19,7 @@ import { clampScale } from "./uiScale";
 import { Explorer } from "./panels/Explorer";
 import { History } from "./panels/History";
 import { GitPanel } from "./panels/Git";
-import { useGit } from "./git";
+import { changedCount, useGit } from "./git";
 import { Objects, useSymbols } from "./panels/Objects";
 import { Output, Problems, counts } from "./panels/Problems";
 import { Search } from "./panels/Search";
@@ -272,7 +272,7 @@ function PanelBody(props: { id: PanelId }) {
 	);
 }
 
-function PanelButton(props: { id: PanelId; badge?: string; badgeNote?: string }) {
+function PanelButton(props: { id: PanelId; badge?: string; badgeNote?: string; badgeTone?: "warn" | "accent" }) {
 	const panel = () => PANELS.find((p) => p.id === props.id)!;
 	// A panel shows a folder's contents: with no folder open there is nothing to switch to.
 	const usable = () => Boolean(state.workspace);
@@ -290,7 +290,7 @@ function PanelButton(props: { id: PanelId; badge?: string; badgeNote?: string })
 			{/* Icons in the private use area are Codicons, drawn with that font. */}
 			{/[\ue000-\uf8ff]/.test(panel().icon) ? <span class="codicon-glyph" aria-hidden="true">{panel().icon}</span> : panel().icon}
 			<Show when={usable() && props.badge}>
-				<span class="activity-badge" aria-hidden="true">
+				<span class={["activity-badge", { accent: props.badgeTone === "accent" }]} aria-hidden="true">
 					{props.badge}
 				</span>
 			</Show>
@@ -941,8 +941,13 @@ export function App() {
 			docAuditData().issues.filter((i) => i.level === "note").length +
 			docAuditData().unusedAttachments.length,
 	);
-	const panelBadge = (id: PanelId) => (id === "health" ? badgeText(healthWarnings()) : "");
+	const panelBadge = (id: PanelId) => (id === "health" ? badgeText(healthWarnings()) : id === "git" ? badgeText(changedCount()) : "");
+	const panelBadgeTone = (id: PanelId): "warn" | "accent" => (id === "git" ? "accent" : "warn");
 	const panelBadgeNote = (id: PanelId) => {
+		if (id === "git") {
+			const n = changedCount();
+			return n ? `${n} pending ${n === 1 ? "change" : "changes"}` : undefined;
+		}
 		if (id !== "health") return undefined;
 		const w = healthWarnings();
 		const n = healthNotes();
@@ -966,7 +971,7 @@ export function App() {
 				<MenuBar />
 			</Show>
 			<nav class="activity" aria-label="Views">
-				<For each={PANELS.filter((p) => sideOf(p.id) === "left" && isPanelAvailable(p.id))}>{(p) => <PanelButton id={p.id} badge={panelBadge(p.id)} badgeNote={panelBadgeNote(p.id)} />}</For>
+				<For each={PANELS.filter((p) => sideOf(p.id) === "left" && isPanelAvailable(p.id))}>{(p) => <PanelButton id={p.id} badge={panelBadge(p.id)} badgeNote={panelBadgeNote(p.id)} badgeTone={panelBadgeTone(p.id)} />}</For>
 				<button
 					title={state.workspace ? `Call graph${shortcut("graph")}` : "Call graph: open a folder first"}
 					aria-label="Call graph"
@@ -987,7 +992,7 @@ export function App() {
 				<Show when={PANELS.some((p) => sideOf(p.id) === "right" && isPanelAvailable(p.id))}>
 					<span class="activity-divider" aria-hidden="true" />
 				</Show>
-				<For each={PANELS.filter((p) => sideOf(p.id) === "right" && isPanelAvailable(p.id))}>{(p) => <PanelButton id={p.id} badge={panelBadge(p.id)} badgeNote={panelBadgeNote(p.id)} />}</For>
+				<For each={PANELS.filter((p) => sideOf(p.id) === "right" && isPanelAvailable(p.id))}>{(p) => <PanelButton id={p.id} badge={panelBadge(p.id)} badgeNote={panelBadgeNote(p.id)} badgeTone={panelBadgeTone(p.id)} />}</For>
 				<button title={`All commands${shortcut("command-palette")}`} aria-label="All commands" onClick={() => setState((s) => { s.quickPick = "commands"; })}>
 					<span class="codicon-glyph" aria-hidden="true">
 						{"\ueb94"}

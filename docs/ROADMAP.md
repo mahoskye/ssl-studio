@@ -954,6 +954,13 @@ which supersedes one point of ADR 0009.
   - **The Settings dialog:** each section, its search, the keys page, and
     what a change does at once.
 
+- **Accounts, remote Git, and GitHub integration (2026-11-27).** Bring VS Code's
+  bottom-of-Activity-Bar Accounts menu and provider sign-in model (OS keychain /
+  device-flow OAuth) to SSL Studio, superseding the local-only boundary in
+  [ADR 0022](adr/0022-source-control-is-the-users-own-git-and-stays-on-this-machine.md)
+  with opt-in remote Sync / Fetch / Pull / Push, Publish Branch, and GitHub (plus
+  enterprise Git hosts like Azure DevOps / GitLab) pull-request and issue views.
+
 - **Document export to Confluence and PDF (2026-11-22).** Convert project
   documents across their formats (Markdown notes, tickets, specs, CSV
   registries, plans/flowcharts, and schema files) into Confluence-ready

@@ -2,42 +2,66 @@
 // staged for the next one, and the commit itself. A row shows its change
 // beside what git has of the file; its menu stages it, takes it out again,
 // or lets its changes go (after asking). Everything stays on this machine:
-// there is no fetch, pull or push here.
+// there is no fetch, pull or push here (ADR 0022).
 import { Icon } from "../Icon";
-import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
+import { Menu, type MenuItem } from "../Menu";
+import { createContext, createEffect, createMemo, createSignal, For, onSettled, Show, useContext } from "solid-js";
 import { createAsyncQuery } from "../asyncQuery";
 import { changeLetter, changeWord, commitProblem, GIT_ACTIONS, rowMenuEntries, stagedOf, unstagedOf, type GitFile } from "../../shared/gitStatus";
 import { draftCommitMessage, formatTicketChangelog } from "../../shared/markdownDiff";
 import { detectBranchTicketMismatch } from "../../shared/menuBar";
 import type { RowMenuEntry } from "../../shared/contextMenu";
 import { baseName, dirName, isInside, relativeTo, resolvePath } from "../../shared/paths";
-import type { DocFile, TicketGitCommit } from "../../shared/protocol";
+import type { DocFile, GitGraphCommit, TicketGitCommit } from "../../shared/protocol";
 import { codeMatchesRef, docsGoverningFile, ticketsForFile, ticketWork } from "../../shared/workContext";
 import { backend } from "../backend";
 import { docAuditData } from "../docAudit";
 import { languageFor } from "../editor/languages";
 import { openComparison } from "../editor/Review";
 import { FileMark } from "../FileMark";
-import { branchText, commit, discard, gitFailure, gitStatus, gitVersion, isOwnRepository, refreshGit, showChange, stage, unstage } from "../git";
+import { branchText, commit, discard, discardMany, gitFailure, gitStatus, gitVersion, isOwnRepository, refreshGit, showChange, stage, unstage } from "../git";
+import { recall, remember } from "../graph/canvas";
 import { docs } from "../project";
 import { appendNoteToTicket, staleCatalogSummary, ticketAtHand, updateCatalogs, updateManifest } from "../projectDocs";
 import { activePath, canonical, notify, openFile, state } from "../state";
+import {
+	buildGitFileTree,
+	collectGitTreeFolderKeys,
+	commitSubjectMetrics,
+	formatRelativeCommitTime,
+	parseGitDecorations,
+	type GitTreeNode,
+} from "./gitTree";
 import { chooseFromMenu } from "./RowMenu";
-import { IconButton, Row, RowGroup, Rows, type Point } from "./Rows";
+import { IconButton, Row, Rows, type Point } from "./Rows";
 
 const { show: SHOW, open: OPEN, stage: STAGE, unstage: UNSTAGE, discard: DISCARD, trash: TRASH, copyPath: COPY_PATH, copyRelative: COPY_RELATIVE, copyName: COPY_NAME, showInExplorer: SHOW_EXPLORER } = GIT_ACTIONS;
+
+const VIEW_MODE_KEY = "git.viewMode";
+const GRAPH_OPEN_KEY = "git.graphOpen";
 
 /** What the next commit is to say. Kept while the panel is away: a message half written is not lost to a look at another panel. */
 const [message, setMessage] = createSignal("");
 const [busy, setBusy] = createSignal(false);
+const [initializing, setInitializing] = createSignal(false);
+/** Tree view (compacted folders) vs flat file list, persisted across reloads like VS Code. */
+const [treeView, setTreeView] = createSignal(recall(VIEW_MODE_KEY) === "tree");
+/** Bottom Graph (recent local commits) accordion open state, persisted across reloads (defaults open). */
+const [graphOpen, setGraphOpen] = createSignal(recall(GRAPH_OPEN_KEY) !== "false");
 let messageRoot: string | undefined;
 let commitDiffReq = 0;
+
+/** Carries tree indentation depth & directory-trail visibility into `FileRow` without altering its props signature. */
+const GitTreeDepthContext = createContext<{ depth: () => number; showDir: () => boolean }>({
+	depth: () => 0,
+	showDir: () => true,
+});
 
 /** As many files as a list shows: a folder of thousands that git was never told to ignore must not become thousands of rows. */
 const ROWS_SHOWN = 500;
 const More = (props: { count: number }) => (
 	<Show when={props.count > 0}>
-		<p class="hint">
+		<p class="hint git-more">
 			And {props.count} more, not listed. "Stage all" and "Unstage all" act on every one of them.
 		</p>
 	</Show>
@@ -81,11 +105,17 @@ export function GitPanel() {
 	);
 	const staged = () => (gitStatus() ? stagedOf(gitStatus()!) : []);
 	const changes = () => (gitStatus() ? unstagedOf(gitStatus()!) : []);
+	const conflicts = createMemo(() => changes().filter((f) => f.unstaged === "conflict"));
+	const ordinaryChanges = createMemo(() => changes().filter((f) => f.unstaged !== "conflict"));
+	const discardableChanges = createMemo(() => ordinaryChanges().filter((f) => !isOwnRepository(f)));
 	/** Files staged above the workspace's folder: not listed, and in the commit all the same. */
 	const above = () => gitStatus()?.stagedOutside ?? 0;
+	const stagedTotal = () => staged().length + above();
 	const [driftOpen, setDriftOpen] = createSignal(false);
 	const [commitsOpen, setCommitsOpen] = createSignal(false);
 	const [commitScope, setCommitScope] = createSignal<"active" | "file">("active");
+	const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
+	const [expandedCommit, setExpandedCommit] = createSignal<string | null>(null);
 	const activeTicketKey = () => state.settings.activeTicket?.trim() || "";
 	const fileTicketKey = createMemo(() => {
 		const fromFile = ticketsForFile(docs(), activePath(), state.workspace?.root)[0];
@@ -98,6 +128,70 @@ export function GitPanel() {
 	const runGitCmd = async (id: string) => {
 		const { runCommand } = await import("../commands");
 		runCommand(id);
+	};
+
+	const isCollapsed = (key: string) => collapsed().has(key);
+	const toggleCollapsed = (key: string) =>
+		setCollapsed((prev) => {
+			const next = new Set(prev);
+			if (next.has(key)) next.delete(key);
+			else next.add(key);
+			return next;
+		});
+
+	const toggleViewMode = () => {
+		const next = !treeView();
+		setTreeView(next);
+		remember(VIEW_MODE_KEY, next ? "tree" : "list");
+	};
+
+	const toggleGraphOpen = () => {
+		const next = !graphOpen();
+		setGraphOpen(next);
+		remember(GRAPH_OPEN_KEY, next ? "true" : "false");
+	};
+
+	const relOf = (path: string) => {
+		const rel = relativeTo(state.workspace?.root, path);
+		return rel === path ? baseName(path) : rel;
+	};
+
+	const stagedTree = createMemo<GitTreeNode[]>(() =>
+		treeView() ? buildGitFileTree(staged().slice(0, ROWS_SHOWN).map((file) => ({ file, relPath: relOf(file.path) })), "staged") : [],
+	);
+	const changesTree = createMemo<GitTreeNode[]>(() =>
+		treeView() ? buildGitFileTree(ordinaryChanges().slice(0, ROWS_SHOWN).map((file) => ({ file, relPath: relOf(file.path) })), "changes") : [],
+	);
+	const conflictTree = createMemo<GitTreeNode[]>(() =>
+		treeView() ? buildGitFileTree(conflicts().slice(0, ROWS_SHOWN).map((file) => ({ file, relPath: relOf(file.path) })), "merge") : [],
+	);
+
+	const allCollapsibleKeys = createMemo(() => {
+		const keys: string[] = [];
+		if (conflicts().length) keys.push("sec:merge");
+		if (staged().length) keys.push("sec:staged");
+		if (ordinaryChanges().length) keys.push("sec:changes");
+		if (treeView()) {
+			keys.push(
+				...collectGitTreeFolderKeys(conflictTree()),
+				...collectGitTreeFolderKeys(stagedTree()),
+				...collectGitTreeFolderKeys(changesTree()),
+			);
+		}
+		return keys;
+	});
+
+	const allCollapsed = createMemo(() => {
+		const keys = allCollapsibleKeys();
+		if (!keys.length) return false;
+		const shut = collapsed();
+		return keys.every((k) => shut.has(k));
+	});
+
+	const toggleCollapseAll = () => {
+		const keys = allCollapsibleKeys();
+		if (!keys.length) return;
+		setCollapsed(allCollapsed() ? new Set<string>() : new Set(keys));
 	};
 
 	// Non-blocking pre-commit doc readiness advisory for staged changes:
@@ -295,6 +389,15 @@ export function GitPanel() {
 		};
 	});
 
+	const [recentCommits] = createAsyncQuery(
+		() => {
+			const root = state.workspace?.root;
+			const st = gitStatus();
+			return root && st && !st.initial ? { root, v: gitVersion() } : null;
+		},
+		async (): Promise<GitGraphCommit[]> => backend.gitRecentLog(25).catch(() => []),
+	);
+
 	const [ticketCommits] = createAsyncQuery(
 		() => {
 			const root = state.workspace?.root;
@@ -305,6 +408,7 @@ export function GitPanel() {
 		async ({ key }) => backend.gitTicketLog(key, 15).catch(() => []),
 	);
 	const problem = () => (busy() ? "The commit is being made" : commitProblem(gitStatus() ?? null, message()));
+	const subjectMetrics = createMemo(() => commitSubjectMetrics(message()));
 	const folder = (path: string) => {
 		const dir = relativeTo(state.workspace?.root, dirName(path));
 		return dir === dirName(path) || !dir ? "" : dir;
@@ -336,6 +440,7 @@ export function GitPanel() {
 		const esc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 		return new RegExp(`(?<![A-Za-z0-9_-])${esc}(?![A-Za-z0-9_-])`, "i").test(message());
 	};
+	const visibleTicketChips = createMemo(() => suggestedTickets().filter((k) => !messageMentionsKey(k)));
 	const prependTicketKey = (key: string) => {
 		setMessage((cur) => {
 			const trimmed = cur.trimStart();
@@ -344,6 +449,19 @@ export function GitPanel() {
 			if (m) return `${m[1]}, ${key}:${m[2]}`;
 			return `${key}: ${trimmed}`;
 		});
+	};
+	const initRepo = async () => {
+		if (initializing()) return;
+		setInitializing(true);
+		try {
+			const res = await backend.gitInit();
+			notify(res.message, res.ok ? "info" : "error");
+			await refreshGit();
+		} catch (e: any) {
+			notify(`Could not initialize repository: ${String(e?.message ?? e)}`, "error");
+		} finally {
+			setInitializing(false);
+		}
 	};
 	const act = async (action: string | null, file: GitFile) => {
 		if (action === OPEN) await openFile(file.path, { keep: true });
@@ -415,6 +533,10 @@ export function GitPanel() {
 			ticketTitle: ticketDoc?.title,
 		});
 		if (drafted) setMessage(drafted);
+	};
+	const stageFolderFiles = async (files: readonly GitFile[]) => {
+		const stageable = files.filter((f) => f.unstaged !== "conflict" && !isOwnRepository(f));
+		if (stageable.length) await stage(stageable);
 	};
 	type CommitFileEntry = TicketGitCommit["files"][number];
 	const openCommitFileDiff = async (commitItem: TicketGitCommit, f: CommitFileEntry) => {
@@ -489,15 +611,70 @@ export function GitPanel() {
 		if (!md) return notify(`No local commits mentioning ${key} to append.`);
 		await appendNoteToTicket(key, md);
 	};
+	const moreMenuItems = (): MenuItem[] => {
+		if (!gitStatus()) {
+			return [
+				{ label: "Initialize Repository", run: () => void initRepo() },
+				"separator",
+				{ label: "Refresh", run: () => void refreshGit() },
+			];
+		}
+		const prob = problem();
+		return [
+			{ label: "Commit", keys: "Ctrl+Enter", disabled: Boolean(prob), why: prob || undefined, run: () => void make() },
+			{
+				label: "Draft Commit Message",
+				disabled: !staged().length,
+				why: staged().length ? undefined : "Stage files first to draft a commit message",
+				run: draftMessage,
+			},
+			"separator",
+			{
+				label: "Stage All Changes",
+				disabled: !ordinaryChanges().length,
+				run: () => void stageAll(),
+			},
+			{
+				label: "Unstage All Changes",
+				disabled: !staged().length,
+				run: () => void unstage(staged()),
+			},
+			{
+				label: "Discard All Changes…",
+				disabled: !discardableChanges().length,
+				run: () => void discardMany(discardableChanges()),
+			},
+			"separator",
+			{ label: "Switch Branch…", run: () => void runGitCmd("git-switch-branch") },
+			{ label: "Stash…", run: () => void runGitCmd("git-stash") },
+			{ label: "Show Line Commit & Ticket (Blame)", run: () => void runGitCmd("git-blame-line") },
+			"separator",
+			{ label: "View as Tree", checked: treeView(), run: toggleViewMode },
+			{ label: "Show Graph", checked: graphOpen(), run: toggleGraphOpen },
+		];
+	};
+	const IndentGuides = (props: { depth: number }) => (
+		<Show when={props.depth > 0}>
+			<For each={Array.from({ length: props.depth }, (_, i) => i)}>
+				{(idx) => <span class="git-guide" style={{ left: `${14 + idx * 14}px` }} aria-hidden="true" />}
+			</For>
+		</Show>
+	);
 	const FileRow = (props: { file: GitFile; staged: boolean }) => {
+		const treeCtx = useContext(GitTreeDepthContext);
 		const kind = () => (props.staged ? props.file.staged : props.file.unstaged)!;
 		const name = () => baseName(props.file.path);
 		/** Not a file: a folder with a repository of its own, which git here lists as one new name. */
 		const own = () => !props.staged && isOwnRepository(props.file);
+		const depth = () => treeCtx.depth();
+		const showDir = () => treeCtx.showDir();
 		return (
 			<Row
 				class="tree-row git-row"
+				role={treeView() ? "treeitem" : "option"}
+				level={treeView() ? depth() + 1 : undefined}
 				key={`${props.staged ? "staged" : "changed"}:${props.file.path}`}
+				style={depth() > 0 ? { "padding-left": `${12 + depth() * 14}px` } : undefined}
 				label={name()}
 				title={
 					own()
@@ -507,24 +684,36 @@ export function GitPanel() {
 				onActivate={() => void showChange(props.file, props.staged)}
 				onMenu={(at) => void menu(props.file, props.staged, at)}
 			>
+				<IndentGuides depth={depth()} />
 				<FileMark name={name()} folder={own() ? { open: false } : undefined} />
 				<span class={["label", { gone: kind() === "deleted" }]}>
-					{name()}
+					<span class="git-file-name">{name()}</span>
 					<Show when={own()}>
 						<span class="git-folder">{OWN_REPOSITORY}</span>
 					</Show>
-					<Show when={folder(props.file.path)}>
+					<Show when={showDir() && folder(props.file.path)}>
 						<span class="git-folder">{folder(props.file.path)}</span>
 					</Show>
 				</span>
-				{/* The same steps as the row's menu, for the pointer: out of the keyboard's way, which has the menu key. */}
+				{/* Zero-width-cost hover overlay matching VS Code: Open File, Discard, Stage/Unstage. */}
 				<span class="git-acts" onClick={(e) => e.stopPropagation()}>
+					<Show when={!own() && kind() !== "deleted"}>
+						<button
+							type="button"
+							tabindex={-1}
+							title="Open File"
+							aria-label={`Open ${name()}`}
+							onClick={() => void openFile(props.file.path, { keep: true })}
+						>
+							<Icon name="go-to-file" />
+						</button>
+					</Show>
 					<Show when={!props.staged && kind() !== "conflict" && !own()}>
 						<button type="button" tabindex={-1} title={kind() === "untracked" ? "Move to trash…" : "Discard changes…"} aria-label={`${kind() === "untracked" ? "Move to trash" : "Discard the changes to"} ${name()}`} onClick={() => void discard(props.file)}>
 							<Icon name="discard" />
 						</button>
 					</Show>
-					<button type="button" tabindex={-1} title={props.staged ? "Unstage" : "Stage"} aria-label={`${props.staged ? "Unstage" : "Stage"} ${name()}`} onClick={() => void (props.staged ? unstage([props.file]) : stage([props.file]))}>
+					<button type="button" tabindex={-1} title={props.staged ? "Unstage Changes" : "Stage Changes"} aria-label={`${props.staged ? "Unstage" : "Stage"} ${name()}`} onClick={() => void (props.staged ? unstage([props.file]) : stage([props.file]))}>
 						<Icon name={props.staged ? "remove" : "add"} />
 					</button>
 				</span>
@@ -534,16 +723,129 @@ export function GitPanel() {
 			</Row>
 		);
 	};
+	const GitTreeNodeView = (props: { node: GitTreeNode; staged: boolean; depth: number; isMerge?: boolean }) => (
+		<Show
+			when={props.node.kind === "folder" ? props.node : null}
+			fallback={
+				<GitTreeDepthContext value={{ depth: () => props.depth, showDir: () => false }}>
+					<FileRow file={(props.node as Extract<GitTreeNode, { kind: "file" }>).file} staged={props.staged} />
+				</GitTreeDepthContext>
+			}
+		>
+			{(folderNode) => {
+				const open = () => !isCollapsed(folderNode().key);
+				const folderDiscardable = () => folderNode().files.filter((f) => f.unstaged && f.unstaged !== "conflict" && !isOwnRepository(f));
+				return (
+					<>
+						<Row
+							class="tree-row git-folder-row"
+							role="treeitem"
+							level={props.depth + 1}
+							expanded={open()}
+							key={folderNode().key}
+							style={{ "padding-left": `${8 + props.depth * 14}px` }}
+							label={folderNode().name}
+							title={`${folderNode().relDir} (${folderNode().count} ${folderNode().count === 1 ? "change" : "changes"})`}
+							onActivate={() => toggleCollapsed(folderNode().key)}
+							onToggle={() => toggleCollapsed(folderNode().key)}
+						>
+							<IndentGuides depth={props.depth} />
+							<Icon name={open() ? "chevron-down" : "chevron-right"} class="twisty" />
+							<FileMark name={folderNode().name} folder={{ open: open() }} />
+							<span class="label git-folder-title">{folderNode().name}</span>
+							<span class="git-acts" onClick={(e) => e.stopPropagation()}>
+								<Show when={!props.staged && !props.isMerge && folderDiscardable().length > 0}>
+									<button
+										type="button"
+										tabindex={-1}
+										title={`Discard Changes in ${folderNode().relDir}…`}
+										aria-label={`Discard changes in ${folderNode().relDir}`}
+										onClick={() => void discardMany(folderDiscardable(), folderNode().relDir)}
+									>
+										<Icon name="discard" />
+									</button>
+								</Show>
+								<Show when={!props.isMerge}>
+									<button
+										type="button"
+										tabindex={-1}
+										title={props.staged ? `Unstage ${folderNode().relDir}` : `Stage ${folderNode().relDir}`}
+										aria-label={`${props.staged ? "Unstage" : "Stage"} changes in ${folderNode().relDir}`}
+										onClick={() => void (props.staged ? unstage(folderNode().files) : stageFolderFiles(folderNode().files))}
+									>
+										<Icon name={props.staged ? "remove" : "add"} />
+									</button>
+								</Show>
+							</span>
+							<span class="git-count-pill">{folderNode().count}</span>
+						</Row>
+						<Show when={open()}>
+							<For each={folderNode().children} keyed={(child) => child.key}>
+								{(child) => <GitTreeNodeView node={child()} staged={props.staged} depth={props.depth + 1} isMerge={props.isMerge} />}
+							</For>
+						</Show>
+					</>
+				);
+			}}
+		</Show>
+	);
+	const SectionHeader = (props: {
+		foldKey: string;
+		title: string;
+		count: number;
+		tone?: "merge";
+		actions?: any;
+	}) => {
+		const open = () => !isCollapsed(props.foldKey);
+		return (
+			<div class={["git-sec-head", { merge: props.tone === "merge" }]}>
+				<button
+					type="button"
+					class="git-sec-toggle"
+					aria-expanded={open() ? "true" : "false"}
+					onClick={() => toggleCollapsed(props.foldKey)}
+				>
+					<Icon name={open() ? "chevron-down" : "chevron-right"} class="twisty" />
+					<Show when={props.tone === "merge"}>
+						<Icon name="git-merge" class="git-merge-icon" />
+					</Show>
+					<span class="git-sec-title">{props.title}</span>
+				</button>
+				<Show when={props.actions}>
+					<span class="git-sec-acts" onClick={(e) => e.stopPropagation()}>
+						{props.actions}
+					</span>
+				</Show>
+				<span class={["git-count-pill", { merge: props.tone === "merge" }]}>{props.count}</span>
+			</div>
+		);
+	};
 	return (
 		<div class="panel-body" data-panel="git">
 			<div class="panel-title">
 				<span>Source control</span>
-				<Show when={gitStatus()}>
-					<IconButton label="Switch branch" title="Switch Git branch…" icon="git-branch" onClick={() => void runGitCmd("git-switch-branch")} />
-					<IconButton label="Git stash" title="Stash changes / pop stash…" icon="layers" onClick={() => void runGitCmd("git-stash")} />
-					<IconButton label="Line blame" title="Show Git commit & ticket for the current line" icon="eye" onClick={() => void runGitCmd("git-blame-line")} />
-				</Show>
-				<IconButton label="Ask git again" title="Refresh" icon="refresh" onClick={() => void refreshGit()} />
+				<div class="git-title-actions">
+					<Show when={gitStatus()}>
+						<IconButton
+							label={treeView() ? "View changes as list" : "View changes as tree"}
+							title={treeView() ? "View as List" : "View as Tree"}
+							icon={treeView() ? "list-flat" : "list-tree"}
+							onClick={toggleViewMode}
+						/>
+						<Show when={allCollapsibleKeys().length > 0}>
+							<IconButton
+								label={allCollapsed() ? "Expand all change groups" : "Collapse all change groups"}
+								title={allCollapsed() ? "Expand All" : "Collapse All"}
+								icon={allCollapsed() ? "expand-all" : "collapse-all"}
+								onClick={toggleCollapseAll}
+							/>
+						</Show>
+					</Show>
+					<IconButton label="Ask git again" title="Refresh" icon="refresh" onClick={() => void refreshGit()} />
+					<Menu floating label="More Source Control actions" title="Views and More Actions…" items={moreMenuItems}>
+						<Icon name="ellipsis" />
+					</Menu>
+				</div>
 			</div>
 			<Show when={gitFailure()}>
 				<p class="hint warn" role="alert">
@@ -560,13 +862,44 @@ export function GitPanel() {
 				{gitStatus() ? `${staged().length} staged, ${changes().length} not staged` : ""}
 			</p>
 			<Show when={gitStatus() === null}>
-				<p class="hint">This folder is not in a git repository, or git is not installed. Once it is, what has changed since the last commit is listed here.</p>
+				<div class="git-empty-repo">
+					<p class="hint">
+						The folder currently open doesn't have a Git repository. Initialize a local repository to track changes, stage files, and commit directly from SSL Studio.
+					</p>
+					<button
+						type="button"
+						class="primary git-init-btn"
+						aria-disabled={initializing() ? "true" : undefined}
+						onClick={() => void initRepo()}
+					>
+						<Icon name="repo" />
+						<span>{initializing() ? "Initializing…" : "Initialize Repository"}</span>
+					</button>
+				</div>
 			</Show>
 			<Show when={gitStatus()}>
-				<p class="hint git-branch" title={gitStatus()!.upstream ? `Follows ${gitStatus()!.upstream}. Nothing here fetches or pushes: that is done with git itself.` : "This branch follows no other. Nothing here fetches or pushes."}>
-					On <strong>{branchText()}</strong>
-					{gitStatus()!.initial ? ", with no commit yet" : ""}
-				</p>
+				<div class="git-repo-bar">
+					<button
+						type="button"
+						class="git-branch-btn"
+						title={
+							gitStatus()!.upstream
+								? `Branch ${branchText()} (follows ${gitStatus()!.upstream}). Click to switch local branch. Remote fetch/pull/push stays in git itself (ADR 0022).`
+								: `Branch ${branchText()}. Click to switch local branch.`
+						}
+						onClick={() => void runGitCmd("git-switch-branch")}
+					>
+						<Icon name="git-branch" />
+						<span class="git-branch-name">{branchText()}</span>
+						<Show when={gitStatus()!.initial}>
+							<span class="git-branch-note">initial</span>
+						</Show>
+					</button>
+					<div class="git-repo-acts">
+						<IconButton label="Git stash" title="Stash changes / pop stash…" icon="layers" onClick={() => void runGitCmd("git-stash")} />
+						<IconButton label="Line blame" title="Show Git commit & ticket for the current line" icon="eye" onClick={() => void runGitCmd("git-blame-line")} />
+					</div>
+				</div>
 				<Show when={branchMismatch()}>
 					{(mismatch) => (
 						<div class="git-branch-mismatch" role="status" aria-label="Branch and active ticket mismatch">
@@ -791,131 +1124,289 @@ export function GitPanel() {
 					</div>
 				</Show>
 				<form class="git-commit" onSubmit={(e) => (e.preventDefault(), void make())}>
-					<Show when={suggestedTickets().length > 0}>
+					<Show when={visibleTicketChips().length > 0}>
 						<div class="git-ticket-chips">
-							<For each={suggestedTickets()}>
+							<For each={visibleTicketChips()}>
 								{(key) => (
-									<Show when={!messageMentionsKey(key)}>
-										<button
-											type="button"
-											class="git-ticket-chip"
-											title={`Add ${key} to commit message prefix`}
-											onClick={() => prependTicketKey(key)}
-										>
-											+ {key}:
-										</button>
-									</Show>
+									<button
+										type="button"
+										class="git-ticket-chip"
+										title={`Add ${key} to commit message prefix`}
+										onClick={() => prependTicketKey(key)}
+									>
+										+ {key}:
+									</button>
 								)}
 							</For>
 						</div>
 					</Show>
-					<textarea
-						aria-label="What the commit does"
-						placeholder="What the commit does (Ctrl+Enter commits)"
-						rows={3}
-						value={message()}
-						onInput={(e) => setMessage(e.currentTarget.value)}
-						onKeyDown={(e) => e.key === "Enter" && (e.ctrlKey || e.metaKey) && (e.preventDefault(), void make())}
-					/>
-					<div style={{ display: "flex", "align-items": "center", gap: "var(--space-2)", "flex-wrap": "wrap" }}>
-						{/* Not the button's own "disabled": it keeps the keyboard, and says why it does nothing. */}
-						<button type="submit" class="primary" aria-disabled={problem() ? "true" : undefined} title={problem() || `Commit the ${staged().length + above()} staged ${staged().length + above() === 1 ? "file" : "files"}`}>
-							Commit
-						</button>
-						<button
-							type="button"
-							style={{ display: "inline-flex", "align-items": "center", gap: "4px" }}
-							aria-disabled={!staged().length ? "true" : undefined}
-							title={staged().length ? "Build a commit message from the staged files and active ticket" : "Stage files first to draft a commit message"}
-							onClick={draftMessage}
-						>
-							<Icon name="sparkle" />
-							<span>Draft commit message</span>
-						</button>
+					<div class={["git-message-box", { warn: subjectMetrics().level === "warn", over: subjectMetrics().level === "over" }]}>
+						<div class="git-message-row">
+							<textarea
+								aria-label="Commit message"
+								placeholder={`Message (Ctrl+Enter to commit on "${gitStatus()!.branch || "HEAD"}")`}
+								rows={2}
+								spellcheck="true"
+								value={message()}
+								onInput={(e) => setMessage(e.currentTarget.value)}
+								onKeyDown={(e) => e.key === "Enter" && (e.ctrlKey || e.metaKey) && (e.preventDefault(), void make())}
+							/>
+							<button
+								type="button"
+								class="git-draft-btn"
+								aria-label="Draft commit message"
+								aria-disabled={!staged().length ? "true" : undefined}
+								title={staged().length ? "Draft commit message from staged files and active ticket" : "Stage files first to draft a commit message"}
+								onClick={draftMessage}
+							>
+								<Icon name="sparkle" />
+							</button>
+						</div>
+						<Show when={subjectMetrics().length > 40}>
+							<span
+								class={["git-subject-count", subjectMetrics().level]}
+								title={`First line is ${subjectMetrics().length} characters (recommended ≤ 50, max 72)`}
+							>
+								{subjectMetrics().length}/50
+							</span>
+						</Show>
 					</div>
+					{/* Not the button's own "disabled": it keeps the keyboard, and says why it does nothing. */}
+					<button
+						type="submit"
+						class="primary git-commit-btn"
+						aria-disabled={problem() ? "true" : undefined}
+						title={problem() || `Commit the ${stagedTotal()} staged ${stagedTotal() === 1 ? "file" : "files"} (Ctrl+Enter)`}
+					>
+						<Icon name="check" />
+						<span>{busy() ? "Committing…" : stagedTotal() > 0 ? `Commit (${stagedTotal()})` : "Commit"}</span>
+					</button>
 				</form>
 				<Show when={above()}>
-					<p class="hint warn" role="status">
+					<p class="hint warn git-above-note" role="status">
 						{above()} more staged {above() === 1 ? "file is" : "files are"} above this folder in the repository, and not listed here. A commit takes {above() === 1 ? "it" : "them"} too.
 					</p>
 				</Show>
-				<Show when={!gitStatus()!.files.length}>
-					<p class="hint">Nothing has changed in this folder since the last commit.</p>
-				</Show>
-				<Show when={gitStatus()!.files.length}>
-					<Rows label="Changed files">
-						<Show when={staged().length}>
-							<RowGroup
-								headClass="group-head git-head"
-								head={
-									<>
-										<span class="label">Staged for the commit</span>
-										<span class="count">{staged().length}</span>
-										<IconButton label="Unstage all" title="Take every file out of the commit" icon="remove" onClick={() => void unstage(staged())} />
-									</>
+				<div class="git-changes-body">
+					<Show when={!gitStatus()!.files.length}>
+						<p class="hint git-clean-hint">No changes detected.</p>
+					</Show>
+					<Show when={gitStatus()!.files.length}>
+						<Rows label="Changed files" role={treeView() ? "tree" : "group"} class="tree git-changes-tree">
+							<Show when={conflicts().length > 0}>
+								<SectionHeader foldKey="sec:merge" title="Merge Changes" count={conflicts().length} tone="merge" />
+								<Show when={!isCollapsed("sec:merge")}>
+									<Show
+										when={treeView()}
+										fallback={<For each={conflicts().slice(0, ROWS_SHOWN)}>{(file) => <FileRow file={file} staged={false} />}</For>}
+									>
+										<For each={conflictTree()} keyed={(node) => node.key}>
+											{(node) => <GitTreeNodeView node={node()} staged={false} depth={0} isMerge={true} />}
+										</For>
+									</Show>
+									<More count={conflicts().length - ROWS_SHOWN} />
+								</Show>
+							</Show>
+							<Show when={staged().length > 0}>
+								<SectionHeader
+									foldKey="sec:staged"
+									title="Staged Changes"
+									count={staged().length}
+									actions={
+										<IconButton label="Unstage all" title="Unstage All Changes" icon="remove" onClick={() => void unstage(staged())} />
+									}
+								/>
+								<Show when={!isCollapsed("sec:staged")}>
+									<Show
+										when={treeView()}
+										fallback={<For each={staged().slice(0, ROWS_SHOWN)}>{(file) => <FileRow file={file} staged={true} />}</For>}
+									>
+										<For each={stagedTree()} keyed={(node) => node.key}>
+											{(node) => <GitTreeNodeView node={node()} staged={true} depth={0} />}
+										</For>
+									</Show>
+									<More count={staged().length - ROWS_SHOWN} />
+								</Show>
+							</Show>
+							<Show when={ordinaryChanges().length > 0}>
+								<SectionHeader
+									foldKey="sec:changes"
+									title="Changes"
+									count={ordinaryChanges().length}
+									actions={
+										<>
+											<Show when={discardableChanges().length > 0}>
+												<IconButton
+													label="Discard all changes"
+													title="Discard All Changes…"
+													icon="discard"
+													onClick={() => void discardMany(discardableChanges())}
+												/>
+											</Show>
+											<IconButton label="Stage all" title="Stage All Changes" icon="add" onClick={() => void stageAll()} />
+										</>
+									}
+								/>
+								<Show when={!isCollapsed("sec:changes")}>
+									<Show
+										when={treeView()}
+										fallback={<For each={ordinaryChanges().slice(0, ROWS_SHOWN)}>{(file) => <FileRow file={file} staged={false} />}</For>}
+									>
+										<For each={changesTree()} keyed={(node) => node.key}>
+											{(node) => <GitTreeNodeView node={node()} staged={false} depth={0} />}
+										</For>
+									</Show>
+									<More count={ordinaryChanges().length - ROWS_SHOWN} />
+								</Show>
+							</Show>
+						</Rows>
+					</Show>
+				</div>
+				<section class={["git-accordion git-graph", { open: graphOpen(), tall: !gitStatus()!.files.length }]} aria-label="Commit graph">
+					<div class="git-accordion-head">
+						<button
+							type="button"
+							class="git-accordion-toggle"
+							aria-expanded={graphOpen() ? "true" : "false"}
+							onClick={toggleGraphOpen}
+						>
+							<Icon name={graphOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
+							<span class="git-accordion-title">Graph</span>
+							<Show when={!gitStatus()!.initial && !recentCommits.loading && (recentCommits()?.length ?? 0) > 0}>
+								<span class="git-count-pill">{recentCommits()!.length}</span>
+							</Show>
+						</button>
+					</div>
+					<Show when={graphOpen()}>
+						<div class="git-accordion-body">
+							<Show
+								when={!gitStatus()!.initial && !recentCommits.loading && (recentCommits()?.length ?? 0) > 0}
+								fallback={
+									<p class="hint git-graph-empty">
+										{gitStatus()!.initial
+											? "No commits yet on this branch."
+											: recentCommits.loading
+												? "Loading commit history…"
+												: "No local commits found."}
+									</p>
 								}
 							>
-								<For each={staged().slice(0, ROWS_SHOWN)}>{(file) => <FileRow file={file} staged={true} />}</For>
-							</RowGroup>
-							<More count={staged().length - ROWS_SHOWN} />
-						</Show>
-						<Show when={changes().length}>
-							<RowGroup
-								headClass="group-head git-head"
-								head={
-									<>
-										<span class="label">Changes</span>
-										<span class="count">{changes().length}</span>
-										<IconButton label="Stage all" title="Put every non-conflicted change into the commit" icon="add" onClick={() => void stageAll()} />
-									</>
-								}
-							>
-								<For each={changes().slice(0, ROWS_SHOWN)}>{(file) => <FileRow file={file} staged={false} />}</For>
-							</RowGroup>
-							<More count={changes().length - ROWS_SHOWN} />
-						</Show>
-					</Rows>
-				</Show>
+								<ul class="git-graph-list">
+									<For each={recentCommits()}>
+										{(c, idx) => {
+											const isHead = () => idx() === 0;
+											const isMerge = () => c.parents.length > 1;
+											const badges = () => parseGitDecorations(c.refs.join(", "));
+											const expanded = () => expandedCommit() === c.sha;
+											return (
+												<li class={["git-graph-item", { expanded: expanded(), head: isHead() }]}>
+													<button
+														type="button"
+														class="git-graph-row"
+														aria-expanded={expanded() ? "true" : "false"}
+														title={`${c.shortSha} · ${c.author} · ${new Date(c.time).toLocaleString()}\n${c.subject}${c.files.length ? `\n${c.files.length} changed ${c.files.length === 1 ? "file" : "files"} (click to inspect)` : ""}`}
+														onClick={() => setExpandedCommit(expanded() ? null : c.sha)}
+													>
+														<span class="git-graph-rail" aria-hidden="true">
+															<span class={["git-graph-line top", { hide: idx() === 0 }]} />
+															<span class={["git-graph-node", { head: isHead(), merge: isMerge() }]} />
+															<span class={["git-graph-line bottom", { hide: idx() === (recentCommits()?.length ?? 1) - 1 }]} />
+														</span>
+														<span class="git-graph-main">
+															<span class="git-graph-top">
+																<span class="git-graph-subj">{c.subject}</span>
+																<span class="git-graph-age">{formatRelativeCommitTime(c.time)}</span>
+															</span>
+															<span class="git-graph-meta">
+																<code class="git-commit-sha">{c.shortSha}</code>
+																<span class="git-graph-author">{c.author}</span>
+																<Show when={badges().length > 0}>
+																	<span class="git-ref-list">
+																		<For each={badges().slice(0, 3)}>
+																			{(b) => <span class={`git-ref-badge ${b.kind}`}>{b.label}</span>}
+																		</For>
+																	</span>
+																</Show>
+															</span>
+														</span>
+													</button>
+													<Show when={expanded() && c.files.length > 0}>
+														<ul class="git-commit-files git-graph-files">
+															<For each={c.files.slice(0, 12)}>
+																{(f) => {
+																	const stClass = f.status.startsWith("A")
+																		? "added"
+																		: f.status.startsWith("D")
+																			? "deleted"
+																			: "modified";
+																	return (
+																		<li>
+																			<button
+																				type="button"
+																				class="git-commit-file-btn"
+																				title={`${f.path} — Click to view commit diff (${c.shortSha}~1..${c.shortSha}); right-click for more`}
+																				onClick={() => void openCommitFileDiff(c, f)}
+																				onContextMenu={(e) => {
+																					e.preventDefault();
+																					e.stopPropagation();
+																					const box = e.currentTarget.getBoundingClientRect();
+																					void commitFileMenu(
+																						c,
+																						f,
+																						e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : { x: box.left + 16, y: box.bottom },
+																					);
+																				}}
+																			>
+																				<span class={`git-letter ${stClass}`}>{f.status[0] ?? "M"}</span>
+																				<span class="label">{f.path}</span>
+																			</button>
+																		</li>
+																	);
+																}}
+															</For>
+															<Show when={c.files.length > 12}>
+																<li class="meta">… and {c.files.length - 12} more</li>
+															</Show>
+														</ul>
+													</Show>
+												</li>
+											);
+										}}
+									</For>
+								</ul>
+							</Show>
+						</div>
+					</Show>
+				</section>
 				<Show when={displayedCommitTicket()}>
 					{(key) => (
-						<section class="git-ticket-log" aria-label={`Commits mentioning ${key()}`}>
-							<div class="group-head git-head git-ticket-log-head" style={{ display: "flex", "align-items": "center", gap: "var(--space-2)" }}>
+						<section class={["git-accordion git-ticket-log", { open: commitsOpen() }]} aria-label={`Commits mentioning ${key()}`}>
+							<div class="git-accordion-head">
 								<button
 									type="button"
-									class="foldable"
-									style={{
-										flex: 1,
-										display: "flex",
-										"align-items": "center",
-										gap: "var(--space-2)",
-										padding: 0,
-										background: "transparent",
-										border: 0,
-										color: "inherit",
-										font: "inherit",
-										"text-align": "left",
-										"min-width": 0,
-									}}
+									class="git-accordion-toggle"
 									aria-expanded={commitsOpen() ? "true" : "false"}
 									onClick={() => setCommitsOpen((v) => !v)}
 								>
 									<Icon name={commitsOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
-									<span class="label">Ticket commits · {key()}</span>
-									<span class="count">{ticketCommits.loading ? "…" : (ticketCommits()?.length ?? 0)}</span>
+									<span class="git-accordion-title">Ticket commits · {key()}</span>
+									<span class="git-count-pill">{ticketCommits.loading ? "…" : (ticketCommits()?.length ?? 0)}</span>
 								</button>
 								<Show when={!ticketCommits.loading && (ticketCommits()?.length ?? 0) > 0}>
-									<IconButton
-										label="Copy ticket changelog"
-										title={`Copy ${key()} commits as a Markdown bullet list`}
-										icon="copy"
-										onClick={() => void copyTicketChangelog(key())}
-									/>
-									<IconButton
-										label="Append to ticket"
-										title={`Append ${key()} commit changelog to the ticket document`}
-										icon="note"
-										onClick={() => void appendTicketChangelog(key())}
-									/>
+									<span class="git-accordion-acts">
+										<IconButton
+											label="Copy ticket changelog"
+											title={`Copy ${key()} commits as a Markdown bullet list`}
+											icon="copy"
+											onClick={() => void copyTicketChangelog(key())}
+										/>
+										<IconButton
+											label="Append to ticket"
+											title={`Append ${key()} commit changelog to the ticket document`}
+											icon="note"
+											onClick={() => void appendTicketChangelog(key())}
+										/>
+									</span>
 								</Show>
 							</div>
 							<Show when={commitsOpen()}>
@@ -939,7 +1430,7 @@ export function GitPanel() {
 										Current file{fileTicketKey() ? ` (${fileTicketKey()})` : ""}
 									</button>
 								</div>
-								<div class="git-ticket-log-body">
+								<div class="git-accordion-body git-ticket-log-body">
 									<Show
 										when={!ticketCommits.loading && (ticketCommits()?.length ?? 0) > 0}
 										fallback={

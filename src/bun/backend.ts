@@ -338,6 +338,8 @@ export function createBackend(host: Host, initial?: string) {
 		},
 		gitLog: async (path, limit) => (files ? git().log(need().inside(path), limit) : []),
 		gitTicketLog: (ticketKey, limit) => (files ? git().ticketLog(ticketKey, limit) : Promise.resolve([])),
+		gitRecentLog: (limit) => (files ? git().recentLog(limit) : Promise.resolve([])),
+		gitInit: () => (files ? git().init() : Promise.resolve({ ok: false, message: "No workspace open." })),
 		gitShow: async (path, sha, repoPath) => (files ? git().show(need().inside(path), sha, repoPath) : null),
 		gitDiff: async (options) => {
 			if (!files) return "";
