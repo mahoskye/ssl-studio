@@ -3,6 +3,7 @@
 // (ADR 0002).
 import { createSignal, createStore, flush, onFlush, reconcile, snapshot } from "solid-js";
 import { DEFAULT_SETTINGS, type Info, type KeptText, type LspState, type Project, type Settings, type SettingsPatch, type ThemeFile, type Workspace } from "../shared/protocol";
+import { inferOutputChannel, inferOutputLevel, type OutputChannelId, type OutputChannelSelection, type OutputEntry, type OutputLevel } from "../shared/outputChannels";
 import { backend, on } from "./backend";
 import { removeRecentGroup, resetRecentTabs } from "./recentTabs";
 import { monaco } from "./editor/monaco";
@@ -115,6 +116,7 @@ const [state, setStore] = createStore({
 	mdViewMode: parseMarkdownViewMode(recall(MARKDOWN_MODE_KEY)) as MarkdownViewMode | null,
 	messages: [] as Message[],
 	output: [] as string[],
+	outputEntries: [] as OutputEntry[],
 	cursor: { line: 1, column: 1 },
 	/** Bumped when the tree should reload a folder. */
 	treeVersion: 0,
@@ -150,9 +152,30 @@ export const dismiss = (id: number) =>
 		s.messages = s.messages.filter((m) => m.id !== id);
 	});
 
-export function log(line: string) {
+let nextOutputId = 1;
+export function log(line: string, channel?: OutputChannelId, level?: OutputLevel) {
+	const time = new Date().toLocaleTimeString();
+	const entry: OutputEntry = {
+		id: nextOutputId++,
+		time,
+		channel: channel ?? inferOutputChannel(line),
+		level: level ?? inferOutputLevel(line),
+		text: line,
+	};
 	setState((s) => {
-		s.output = [...s.output.slice(-499), `${new Date().toLocaleTimeString()}  ${line}`];
+		s.output = [...s.output.slice(-499), `${time}  ${line}`];
+		s.outputEntries = [...s.outputEntries.slice(-1499), entry];
+	});
+}
+
+export function clearOutput(channel: OutputChannelSelection = "all") {
+	setState((s) => {
+		if (channel === "all") {
+			s.output = [];
+			s.outputEntries = [];
+		} else {
+			s.outputEntries = s.outputEntries.filter((e) => e.channel !== channel);
+		}
 	});
 }
 
@@ -2632,9 +2655,26 @@ on("closeRequested", async () => {
 	}
 });
 
+// Structured backend log lines routed directly to their Output panel channel.
+on("output", (entry) => {
+	if (typeof entry?.text === "string" && entry.text) {
+		log(entry.text, entry.channel, entry.level);
+	}
+});
+
+session.onLog = (line, level) => log(line, "lsp", level);
+
+let lastLoggedLspState = "";
 on("lspState", (lsp) => {
 	setState((s) => {
 		reconcile(lsp, null)(s.lsp);
 	});
-	if (lsp.message) log(lsp.message);
+	const level: OutputLevel = lsp.state === "failed" ? "error" : lsp.state === "restarting" ? "warn" : "info";
+	if (lsp.message) {
+		log(lsp.message, "lsp", level);
+		lastLoggedLspState = `${lsp.state}:${lsp.message}`;
+	} else if (lsp.state !== lastLoggedLspState && (lsp.state === "starting" || lsp.state === "running" || lsp.state === "stopped")) {
+		log(`starlims-lsp ${lsp.state}.`, "lsp", level);
+		lastLoggedLspState = lsp.state;
+	}
 });

@@ -128,9 +128,20 @@ export class LspSession {
 	sslSettings: () => Record<string, unknown> = () => ({});
 	/** Loads a model for a URI the server pointed at (definition, references). */
 	ensureModel: (uri: string) => Promise<monaco.editor.ITextModel | null> = async () => null;
+	/** Optional sink for LSP lifecycle & `window/logMessage` entries routed to the Output panel. */
+	onLog: (line: string, level?: "info" | "warn" | "error") => void = () => {};
 
 	constructor() {
 		this.client.on("textDocument/publishDiagnostics", (params) => this.publish(params));
+		const onServerMsg = (params: any) => {
+			const message = typeof params?.message === "string" ? params.message.trim() : "";
+			if (!message) return;
+			const type = Number(params?.type ?? 3);
+			const level = type === 1 ? "error" : type === 2 ? "warn" : "info";
+			this.onLog(message, level);
+		};
+		this.client.on("window/logMessage", onServerMsg);
+		this.client.on("window/showMessage", onServerMsg);
 		this.client.onRequest("workspace/configuration", (params) =>
 			(params?.items ?? []).map((item: { section?: string }) => (item.section === "ssl" ? this.sslSettings() : item.section ? null : { ssl: this.sslSettings() })),
 		);
@@ -218,6 +229,9 @@ export class LspSession {
 				this.client.notify("initialized", {});
 				this.readyFlag = true;
 				setLspReadyEpoch(myEpoch);
+				if (this.server) {
+					this.onLog(`Initialized ${this.server.name}${this.server.version ? ` ${this.server.version}` : ""} for ${baseName(root)}.`, "info");
+				}
 				for (const model of monaco.editor.getModels()) {
 					const uri = model.uri.toString();
 					if (this.tracked.has(uri) && !this.versions.get(uri) && !model.isDisposed() && readByServer(model)) this.open(model);

@@ -256,6 +256,11 @@ export function createBackend(host: Host, initial?: string) {
 							(s) => {
 								if (!isStale() && lsp === nextLsp) emitLspState(s);
 							},
+							undefined,
+							undefined,
+							(line) => {
+								if (!isStale() && lsp === nextLsp) host.emit("output", { channel: "lsp", text: line });
+							},
 						);
 						startedLsp = nextLsp;
 						lsp = nextLsp;
@@ -850,6 +855,11 @@ export function createBackend(host: Host, initial?: string) {
 				},
 				(s) => {
 					if (!disposed && seq === openSeq && lsp === nextLsp) emitLspState(s);
+				},
+				undefined,
+				undefined,
+				(line) => {
+					if (!disposed && seq === openSeq && lsp === nextLsp) host.emit("output", { channel: "lsp", text: line });
 				},
 			);
 			lsp = nextLsp;

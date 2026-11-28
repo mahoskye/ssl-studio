@@ -10,6 +10,7 @@ import type {
 } from "./agentCustomizations";
 import type { CsvTableConfig } from "./csvFormat";
 import type { FormatDocumentRequest, FormatDocumentResult, SqlDialect } from "./format";
+import type { OutputChannelId, OutputLevel } from "./outputChannels";
 import type { Groups, OpenText, SearchOptions } from "./searchPattern";
 import type { GitStatus } from "./gitStatus";
 
@@ -687,6 +688,8 @@ export type BackendEvents = {
 	 * for local history did not): the view shows it as a notice, and an error is kept in Output.
 	 */
 	notice: { kind: "info" | "error"; text: string };
+	/** Structured backend log line routed to a specific VS Code-style Output channel. */
+	output: { channel: OutputChannelId; level?: OutputLevel; text: string };
 };
 
 export type AgentModel = { providerID: string; id: string; name: string; local: boolean; tools: boolean; variants: string[] };

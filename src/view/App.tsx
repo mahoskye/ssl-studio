@@ -21,7 +21,7 @@ import { History } from "./panels/History";
 import { GitPanel } from "./panels/Git";
 import { changedCount, useGit } from "./git";
 import { Objects, useSymbols } from "./panels/Objects";
-import { Output, Problems, ProblemsHeaderActions, scopedCounts } from "./panels/Problems";
+import { Output, OutputHeaderActions, Problems, ProblemsHeaderActions, scopedCounts } from "./panels/Problems";
 import { formatScopedProblemsTooltip } from "./panels/problemsModel";
 import { Search } from "./panels/Search";
 import { Palette } from "./panels/Palette";
@@ -1145,7 +1145,7 @@ export function App() {
 							role="tablist"
 							aria-label="Bottom panel"
 							onDblClick={(e) => {
-								if (!(e.target as HTMLElement).closest("button")) setState((s) => { s.bottomMaximized = !s.bottomMaximized; });
+								if (!(e.target as HTMLElement).closest("button, select, input")) setState((s) => { s.bottomMaximized = !s.bottomMaximized; });
 							}}
 						>
 							<button
@@ -1180,6 +1180,9 @@ export function App() {
 							<div class="bottom-tab-acts">
 								<Show when={state.bottomView === "problems"}>
 									<ProblemsHeaderActions />
+								</Show>
+								<Show when={state.bottomView === "output"}>
+									<OutputHeaderActions />
 								</Show>
 								<button
 									class="bottom-action"

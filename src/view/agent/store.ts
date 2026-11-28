@@ -465,12 +465,14 @@ export async function start() {
 				s.status = status;
 				dropChatSession(s);
 			});
+			if (status.message) log(`opencode ${status.state}: ${status.message}`, "agent", status.state === "failed" ? "error" : "info");
 		} else {
 			const models = (await backend.agent("models", [])) as AgentModel[];
 			setAgent((s) => {
 				s.status = status;
 				s.models = models;
 			});
+			log(`opencode ready${status.version ? ` (${status.version})` : ""}: ${models.length} model${models.length === 1 ? "" : "s"} available.`, "agent", "info");
 		}
 	} catch (e) {
 		// The panel shows the message under the status line; Output keeps it.
@@ -478,7 +480,7 @@ export async function start() {
 			s.status = { state: "failed", message: errorText(e) };
 			dropChatSession(s);
 		});
-		log(`opencode did not start: ${errorText(e)}`);
+		log(`opencode did not start: ${errorText(e)}`, "agent", "error");
 	}
 }
 

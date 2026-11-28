@@ -7,7 +7,7 @@ import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { isInside } from "../shared/paths";
 import type { AuditCitationIssue, DocAuditResult } from "../shared/protocol";
 import { backend } from "./backend";
-import { activeDoc, documents, state } from "./state";
+import { activeDoc, documents, log, state } from "./state";
 
 const EMPTY: DocAuditResult = { unusedAttachments: [], openTasks: [], issues: [], citationIssues: [] };
 
@@ -56,6 +56,7 @@ export function useDocAudit() {
 
 	let seq = 0;
 	let prevRoot: string | undefined;
+	let lastAuditSummary = "";
 	onCleanup(() => {
 		seq++;
 	});
@@ -100,6 +101,7 @@ export function useDocAudit() {
 		}
 		if (rootChanged) {
 			setDocAuditData(EMPTY);
+			lastAuditSummary = "";
 		}
 		const dirtyBuffers = collectDirtyBuffers(root, dirtyKeys);
 		void backend
@@ -108,7 +110,21 @@ export function useDocAudit() {
 				...(dirtyBuffers ? { dirtyBuffers } : {}),
 			})
 			.then((res) => {
-				if (mine === seq) setDocAuditData({ ...EMPTY, ...res, citationIssues: res.citationIssues ?? [] });
+				if (mine === seq) {
+					const merged = { ...EMPTY, ...res, citationIssues: res.citationIssues ?? [] };
+					setDocAuditData(merged);
+					const warnCount = merged.issues.filter((i) => i.level === "warn").length + (merged.schemaDrift?.length ?? 0);
+					const noteCount = merged.issues.filter((i) => i.level !== "warn").length;
+					const summary = `${root}|${warnCount}|${noteCount}|${merged.openTasks.length}|${merged.unusedAttachments.length}`;
+					if (summary !== lastAuditSummary) {
+						lastAuditSummary = summary;
+						log(
+							`Document audit: ${warnCount} warning${warnCount === 1 ? "" : "s"}, ${noteCount} note${noteCount === 1 ? "" : "s"}, ${merged.openTasks.length} open task${merged.openTasks.length === 1 ? "" : "s"}${merged.unusedAttachments.length ? `, ${merged.unusedAttachments.length} unused attachment${merged.unusedAttachments.length === 1 ? "" : "s"}` : ""}.`,
+							"docs",
+							warnCount > 0 ? "warn" : "info",
+						);
+					}
+				}
 			})
 			.catch(() => {
 				if (mine === seq) setDocAuditData(EMPTY);

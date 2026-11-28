@@ -1,6 +1,7 @@
 // Owns the starlims-lsp process for the open workspace: start, pipe
 // messages, restart on crash (ARCHITECTURE, "Language features").
 import type { Subprocess } from "bun";
+import { splitLogLines } from "../shared/outputChannels";
 import type { LspState } from "../shared/protocol";
 import { createFrameReader, frame } from "./frames";
 import { lspCommand, verbatim } from "./tools";
@@ -112,6 +113,8 @@ export class LspProcess {
 		private stopGraceMs = STOP_GRACE_MS,
 		/** For tests: stands in for Windows and its taskkill, where neither is there. */
 		private treeKill: TreeKill = SYSTEM_TREE_KILL,
+		/** Optional live stderr line consumer for the Output panel's LSP channel. */
+		private onStderr?: (line: string) => void,
 	) {}
 
 	start() {
@@ -164,11 +167,30 @@ export class LspProcess {
 		})();
 		(async () => {
 			try {
-				// The server logs to stderr; keep the tail for crash messages.
+				// The server logs to stderr; keep the tail for crash messages and stream lines to Output.
+				const decoder = new TextDecoder();
+				let carry = "";
 				for (;;) {
 					const { value: chunk, done } = await stderr.read();
 					if (done || proc !== this.proc || this.stopping) break;
-					this.lastError = new TextDecoder().decode(chunk).slice(-500);
+					const text = decoder.decode(chunk, { stream: true });
+					this.lastError = text.slice(-500);
+					if (this.onStderr) {
+						const combined = carry + text;
+						const lastNl = Math.max(combined.lastIndexOf("\n"), combined.lastIndexOf("\r"));
+						if (lastNl >= 0) {
+							for (const line of splitLogLines(combined.slice(0, lastNl + 1))) this.onStderr(line);
+							carry = combined.slice(lastNl + 1);
+						} else if (combined.length > 4096) {
+							for (const line of splitLogLines(combined)) this.onStderr(line);
+							carry = "";
+						} else {
+							carry = combined;
+						}
+					}
+				}
+				if (this.onStderr && carry.trim()) {
+					for (const line of splitLogLines(carry)) this.onStderr(line);
 				}
 			} catch {
 				// Stream closed on process exit/stop.

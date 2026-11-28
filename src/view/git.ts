@@ -9,7 +9,7 @@ import { backend } from "./backend";
 import { choose } from "./dialogs";
 import { openReview } from "./editor/Review";
 import { languageFor } from "./editor/languages";
-import { canonical, changingOnDisk, documents, fileChangedOnDisk, fileRemoved, historyChanged, notify, revert, setState, state } from "./state";
+import { canonical, changingOnDisk, documents, fileChangedOnDisk, fileRemoved, historyChanged, log, notify, revert, setState, state } from "./state";
 
 /** What git says: null outside a repository (or with no git), undefined before it was first asked. */
 const [status, setStatus] = createSignal<GitStatus | null | undefined>(undefined);
@@ -43,13 +43,19 @@ export async function refreshGit(): Promise<void> {
 	try {
 		const next = await backend.gitStatus();
 		if (mine !== asking || snapshot(state).workspace?.root !== root) return;
+		const firstForRoot = statusRoot !== root;
 		statusRoot = root;
 		setFailure("");
 		setStatus(next);
+		if (firstForRoot && next) {
+			log(`Repository ready on ${branchLabel(next)} (${next.files.length} changed ${next.files.length === 1 ? "file" : "files"}).`, "git", "info");
+		}
 	} catch (e: any) {
 		if (mine !== asking || snapshot(state).workspace?.root !== root) return;
 		if (statusRoot !== root) setStatus(undefined);
-		setFailure(String(e?.message ?? e));
+		const msg = String(e?.message ?? e);
+		setFailure(msg);
+		log(`git status failed: ${msg}`, "git", "error");
 	}
 	setGitVersion((v) => v + 1);
 }
@@ -148,12 +154,15 @@ export async function unstage(files: GitFile[]): Promise<void> {
 export async function commit(message: string): Promise<boolean> {
 	try {
 		const said = await backend.gitCommit(message);
+		log(`git commit: ${said}`, "git", "info");
 		notify(`Committed: ${said}`);
 		await refreshGit();
 		return true;
 	} catch (e: any) {
 		// git's own words: a check its repository runs may have refused the commit, and says why.
-		notify(`Not committed. git said: ${String(e?.message ?? e)}`, "error");
+		const msg = String(e?.message ?? e);
+		log(`git commit failed: ${msg}`, "git", "error");
+		notify(`Not committed. git said: ${msg}`, "error");
 		await refreshGit();
 		return false;
 	}

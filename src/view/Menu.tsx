@@ -92,7 +92,7 @@ export function Menu(props: {
 		const from = button.getBoundingClientRect();
 		const box = list.getBoundingClientRect();
 		const naturalH = Math.max(box.height, list.scrollHeight);
-		const naturalW = Math.min(Math.max(box.width, list.offsetWidth, 200), Math.min(360, window.innerWidth - 16));
+		const naturalW = Math.min(Math.max(box.width, list.offsetWidth, from.width, 200), Math.min(360, window.innerWidth - 16));
 		if (isFloating()) {
 			const placed = placeAnchoredMenu(
 				{ left: from.left, right: from.right, top: from.top, bottom: from.bottom },
