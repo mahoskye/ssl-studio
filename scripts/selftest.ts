@@ -11,6 +11,7 @@
 import { join } from "node:path";
 import { cpSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { closeUnsupported, requestClose, windowsTitled } from "./window-close";
+import { consoleNotes, passOn } from "./selftestConsole";
 
 export const SELFTEST_XDG_DIRS = ["config", "data", "state", "cache"] as const;
 
@@ -69,13 +70,26 @@ async function main() {
 	}
 	const TITLE = "SSL Studio";
 	const hutch = Bun.which("hutch") ?? process.env.HUTCH ?? "hutch";
-	const start = () =>
-		Bun.spawn([hutch, "electrobun", "dev"], {
+	// The app's output is passed on through `consoleNotes`, which explains the ERR blocks a scripted click or key
+	// press makes the editor log in WebKit, and counts them for the end of the run.
+	const notes = consoleNotes();
+	const passing: Promise<void>[] = [];
+	const start = () => {
+		const proc = Bun.spawn([hutch, "electrobun", "dev"], {
 			cwd: root,
-			stdout: "inherit",
-			stderr: "inherit",
+			stdout: "pipe",
+			stderr: "pipe",
 			env: selftestEnv({ root, scratch, report, folder, close, cycle }),
 		});
+		passing.push(passOn(proc.stdout, notes.reader(), (text) => process.stdout.write(text)).catch(() => {}));
+		passing.push(passOn(proc.stderr, notes.reader(), (text) => process.stderr.write(text)).catch(() => {}));
+		return proc;
+	};
+	/** Once the app is gone: the rest of its output, then what its ERR blocks were. Not waited on for long, since an app left standing keeps its streams open. */
+	const settle = async () => {
+		await Promise.race([Promise.all(passing), Bun.sleep(3_000)]);
+		for (const line of notes.summary()) console.log(line);
+	};
 	if (close) process.exit(await closeCheck());
 	const proc = start();
 	const timer = setTimeout(() => {
@@ -84,6 +98,7 @@ async function main() {
 	}, cycle ? 300_000 : 180_000);
 	await proc.exited;
 	clearTimeout(timer);
+	await settle();
 	const file = Bun.file(report);
 	if (!(await file.exists())) {
 		console.error("selftest: no report (the app did not finish)");
@@ -243,6 +258,7 @@ async function main() {
 				check(keptLanguage() === LANGUAGE, `the second close kept the document with no file yet in the language mode: ${JSON.stringify(keptLanguage())}`);
 			});
 		}
+		await settle();
 		console.log(JSON.stringify({ close: read() }));
 		for (const problem of problems) console.error(`selftest --close: ${problem}`);
 		console.log(`selftest --close: ${problems.length ? "FAILED" : "ok"}`);

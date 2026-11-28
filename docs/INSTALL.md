@@ -79,6 +79,14 @@ was. Started again, it has to show both documents unsaved with every line they w
 the file is then saved, and the window closed once more. It runs on Linux with X11 and `xdotool`,
 and on Windows; it is not written for macOS.
 
+On Linux the app's log holds `ERR` lines ending in `write@[native code]`. The code editor
+(Monaco) starts a clipboard write on each click and key press in a WebKit window, so that a later
+copy counts as one you asked for; WebKit refuses it for a click or key press the self-test sends by
+script, and the editor logs the refusal. They are not a failure. The self-test shows the first with
+a line marked `[expected]` that says so, counts the rest, and ends by saying how many there were and
+from which part of the self-test. An `ERR` it cannot explain that way is shown whole, marked
+`[not explained]`, and counted apart.
+
 ## A local model through Ollama
 
 Ollama's default context is 4096 tokens, and it drops what does not fit without an
