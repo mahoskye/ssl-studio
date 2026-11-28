@@ -272,7 +272,8 @@ describe("P6: a replace across files is held to the text that was searched (a re
 			const { paths, options } = asThePanelSends(scan, [{ path: file, line: 3 }]);
 			expect(options.linesByPath).toEqual({ [file]: [2, 4] });
 			const results = await backend.api.replace("sName", "sOther", options, paths);
-			expect(results).toEqual([
+			// In the order the search found the files, which is the file system's: a CI runner listed other.ssl first.
+			expect([...results].sort((a, b) => a.path.localeCompare(b.path))).toEqual([
 				{ path: file, count: 2 },
 				{ path: other, count: 1 },
 			]);
