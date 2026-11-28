@@ -16,6 +16,7 @@ import { isCatalog, registryTitle, statusChoices, toneOf } from "../shared/proje
 import { generateMermaidErDiagram, parseCreateTables, type SqlTableDef } from "../shared/sqlSchema";
 import { textOrWhy, unreadFilesSaid, type UnreadFile } from "../shared/tablePower";
 import { workspaceTags } from "../shared/tags";
+import { shouldTerminalAllowShellCommand } from "../shared/terminal";
 import { docsGoverningFile } from "../shared/workContext";
 import { runMonacoMarkdownAction } from "./editor/markdownKeys";
 import { backend, fileExists, inApp } from "./backend";
@@ -166,12 +167,24 @@ function toggleMaximizeBottom() {
 		s.bottomMaximized = !s.bottomMaximized;
 	});
 }
-const showBottom = (view: "problems" | "output") => {
+const showBottom = (view: "problems" | "output" | "terminal") => {
 	if (!snapshot(state).workspace) return notify("Open a folder first.");
 	setState((s) => {
 		s.bottomView = view;
 		s.settings.layout.bottom = true;
 	});
+	if (view === "terminal") {
+		void import("./panels/Terminal").then((t) => queueMicrotask(() => t.focusActiveTerminal()));
+	}
+};
+const toggleTerminal = () => {
+	const cur = snapshot(state);
+	if (!cur.workspace) return notify("Open a folder first.");
+	if (cur.settings.layout.bottom && cur.bottomView === "terminal") {
+		setState((s) => { s.settings.layout.bottom = false; });
+		return;
+	}
+	showBottom("terminal");
 };
 const showWorkspacePanel = (id: PanelId) => {
 	if (!snapshot(state).workspace) return notify("Open a folder first.");
@@ -526,6 +539,25 @@ export const commands: Command[] = [
 	{ id: "agent", label: "Show Agent", run: () => showWorkspacePanel("agent") },
 	{ id: "problems", label: "Show Problems", run: () => showBottom("problems") },
 	{ id: "output", label: "Show Output", run: () => showBottom("output") },
+	{ id: "terminal", label: "View: Toggle Terminal", detail: "Open or hide the integrated shell terminal in the bottom panel", run: toggleTerminal },
+	{ id: "terminal-new", label: "Terminal: Create New Terminal", detail: "Spawn a new interactive shell session in the workspace folder", run: () => {
+		if (!snapshot(state).workspace) return notify("Open a folder first.");
+		showBottom("terminal");
+		void import("./panels/Terminal").then((t) => void t.createTerminal());
+	} },
+	{ id: "terminal-clear", label: "Terminal: Clear", detail: "Clear the active terminal screen and scrollback", run: () => {
+		if (!snapshot(state).workspace) return notify("Open a folder first.");
+		void import("./panels/Terminal").then((t) => t.clearActiveTerminal());
+	} },
+	{ id: "terminal-kill", label: "Terminal: Kill the Active Terminal Instance", detail: "Terminate the active shell session", run: () => {
+		if (!snapshot(state).workspace) return notify("Open a folder first.");
+		void import("./panels/Terminal").then((t) => t.killActiveTerminal());
+	} },
+	{ id: "terminal-find", label: "Terminal: Find", detail: "Search inside the active terminal output", run: () => {
+		if (!snapshot(state).workspace) return notify("Open a folder first.");
+		showBottom("terminal");
+		void import("./panels/Terminal").then((t) => t.openTerminalFind());
+	} },
 	{ id: "graph", label: "Show Call graph", detail: "Again to go back to the editors", run: () => (!snapshot(state).workspace ? notify("Open a folder first.") : setState((s) => { s.centerView = s.centerView === "graph" ? "editors" : "graph"; })) },
 	{ id: "projects", label: "Show Projects", detail: "Switch to another recent folder, or go back to the editors", run: () => snapshot(state).workspace && setState((s) => { s.centerView = s.centerView === "welcome" ? "editors" : "welcome"; }) },
 	{ id: "toggle-sidebar", label: "Toggle side bar", run: () => toggleSideOf("left") },
@@ -1896,6 +1928,9 @@ const KEYS: Record<string, string> = {
 	"ctrl+b": "toggle-sidebar",
 	"ctrl+alt+b": "toggle-right-panel",
 	"ctrl+j": "toggle-panel",
+	"ctrl+`": "terminal",
+	"ctrl+shift+`": "terminal-new",
+	"ctrl+shift+~": "terminal-new",
 	"ctrl+shift+m": "problems",
 	"ctrl+,": "settings",
 	// Not Ctrl+Shift+A: that is the editor's block comment on Linux.
@@ -2018,6 +2053,15 @@ export function installKeys() {
 			const overrides = state.settings.keys ?? {};
 			const map = keymap();
 			const { id } = resolveCommandKey(e, map, onMac, overrides);
+			// While the integrated Terminal holds focus, pass shell control keys (Ctrl+C/D/L/R/W/K/A/E,
+			// Alt+B/F, menu-bar Alt+F/E/V, etc.) directly to xterm/PTY except explicit shell-escape commands.
+			if (targetEl?.closest(".term-xterm")) {
+				if (!shouldTerminalAllowShellCommand(id)) return;
+				e.preventDefault();
+				e.stopPropagation();
+				if (id) runCommand(id);
+				return;
+			}
 			// A key of the code editor's own, as it came or as it was changed in Settings (ADR 0039): the editor runs
 			// what is on it. Asked before the menus' Alt letters too, so Alt and a letter can be an editing key.
 			const editors = inCodeEditor ? editorTakesKey(pressed, { map, chosen: overrides }) : undefined;

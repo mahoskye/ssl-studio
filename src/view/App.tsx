@@ -22,6 +22,7 @@ import { GitPanel } from "./panels/Git";
 import { changedCount, useGit } from "./git";
 import { Objects, useSymbols } from "./panels/Objects";
 import { Output, OutputHeaderActions, Problems, ProblemsHeaderActions, scopedCounts } from "./panels/Problems";
+import { Terminal, TerminalHeaderActions, terminalCount } from "./panels/Terminal";
 import { formatScopedProblemsTooltip } from "./panels/problemsModel";
 import { Search } from "./panels/Search";
 import { Palette } from "./panels/Palette";
@@ -1176,6 +1177,18 @@ export function App() {
 							>
 								Output
 							</button>
+							<button
+								role="tab"
+								aria-selected={state.bottomView === "terminal" ? "true" : "false"}
+								class={{ active: state.bottomView === "terminal" }}
+								title={`Terminal${shortcut("terminal")}`}
+								onClick={() => setState((s) => { s.bottomView = "terminal"; })}
+							>
+								Terminal
+								<Show when={terminalCount() > 1}>
+									<span class="count">{terminalCount()}</span>
+								</Show>
+							</button>
 							<span class="spacer" />
 							<div class="bottom-tab-acts">
 								<Show when={state.bottomView === "problems"}>
@@ -1183,6 +1196,9 @@ export function App() {
 								</Show>
 								<Show when={state.bottomView === "output"}>
 									<OutputHeaderActions />
+								</Show>
+								<Show when={state.bottomView === "terminal"}>
+									<TerminalHeaderActions />
 								</Show>
 								<button
 									class="bottom-action"
@@ -1207,6 +1223,9 @@ export function App() {
 										</Match>
 										<Match when={state.bottomView === "output"}>
 											<Output />
+										</Match>
+										<Match when={state.bottomView === "terminal"}>
+											<Terminal />
 										</Match>
 									</Switch>
 								</RegionBoundary>

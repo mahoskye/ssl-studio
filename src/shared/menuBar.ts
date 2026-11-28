@@ -162,6 +162,8 @@ export const MENU_BAR: BarMenu[] = [
 			"separator",
 			forFolder("Problems", "problems"),
 			forFolder("Output", "output"),
+			forFolder("Terminal", "terminal"),
+			forFolder("New terminal", "terminal-new"),
 			forFolder("Call graph", "graph"),
 			"separator",
 			forFolder("Toggle side bar", "toggle-sidebar"),

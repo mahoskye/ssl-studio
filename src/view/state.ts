@@ -65,7 +65,7 @@ export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search
 /** @deprecated names kept for readers: both sides hold any panel. */
 export type LeftView = PanelId;
 export type RightView = PanelId;
-export type BottomView = "problems" | "output";
+export type BottomView = "problems" | "output" | "terminal";
 export type Message = { id: number; kind: "info" | "error"; text: string; action?: { label: string; run: () => void } };
 /** What "Save" was able to do: a caller that goes on to close or discard must check it. */
 export type Saved = boolean;
@@ -711,7 +711,7 @@ export function rememberTabs() {
 
 /** The side panels there are, and the bottom ones: what a kept choice must be one of. */
 const LEFT_VIEWS: readonly PanelId[] = ["explorer", "objects", "palette", "reference", "search", "history", "health", "agent", "docs", "git"];
-const BOTTOM_VIEWS: readonly BottomView[] = ["problems", "output"];
+const BOTTOM_VIEWS: readonly BottomView[] = ["problems", "output", "terminal"];
 
 /** Keeps which side panel, bottom panel and right panel are showing in this folder, for the next time it is opened. */
 export function rememberViews() {

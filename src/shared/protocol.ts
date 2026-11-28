@@ -11,6 +11,7 @@ import type {
 import type { CsvTableConfig } from "./csvFormat";
 import type { FormatDocumentRequest, FormatDocumentResult, SqlDialect } from "./format";
 import type { OutputChannelId, OutputLevel } from "./outputChannels";
+import type { TerminalCreateRequest, TerminalInfo, TerminalProfile } from "./terminal";
 import type { Groups, OpenText, SearchOptions } from "./searchPattern";
 import type { GitStatus } from "./gitStatus";
 
@@ -664,6 +665,18 @@ export interface BackendApi {
 	lspState(): Promise<LspState>;
 	/** Agent calls, forwarded to the opencode adapter (src/bun/agent.ts). */
 	agent(method: string, args: unknown[]): Promise<unknown>;
+	/** Integrated Terminal: detected host shell profiles (bash, zsh, PowerShell, cmd, etc.). */
+	terminalProfiles(): Promise<TerminalProfile[]>;
+	/** Integrated Terminal: currently tracked terminal instances in this backend. */
+	terminalList(): Promise<TerminalInfo[]>;
+	/** Integrated Terminal: spawns a new shell PTY in the active workspace root. */
+	terminalCreate(request?: TerminalCreateRequest): Promise<TerminalInfo>;
+	/** Integrated Terminal: writes keystrokes / paste bytes into a running terminal. */
+	terminalWrite(id: string, data: string): Promise<void>;
+	/** Integrated Terminal: updates PTY columns and rows (TIOCSWINSZ / SIGWINCH). */
+	terminalResize(id: string, cols: number, rows: number): Promise<void>;
+	/** Integrated Terminal: terminates and removes a terminal instance. */
+	terminalKill(id: string): Promise<void>;
 	/** Self-test mode (SSL_STUDIO_SELFTEST=<report path>): the UI reports, then the app quits. */
 	selftestDone(report: object): Promise<void>;
 	/** Writes the self-test's report as it stands and stays open: the close check is read from outside while it runs. */
@@ -690,6 +703,10 @@ export type BackendEvents = {
 	notice: { kind: "info" | "error"; text: string };
 	/** Structured backend log line routed to a specific VS Code-style Output channel. */
 	output: { channel: OutputChannelId; level?: OutputLevel; text: string };
+	/** Streamed output bytes from an integrated Terminal PTY. */
+	terminalData: { id: string; data: string };
+	/** Emitted when an integrated Terminal's shell process exits. */
+	terminalExit: { id: string; exitCode: number | null; signal?: string | null };
 };
 
 export type AgentModel = { providerID: string; id: string; name: string; local: boolean; tools: boolean; variants: string[] };

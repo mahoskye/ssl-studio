@@ -19,6 +19,7 @@ import { fileKey, WorkspaceFiles } from "./workspace";
 import { Git } from "./git";
 import { Agent } from "./agent";
 import { formatDocument } from "./format";
+import { TerminalManager } from "./terminal";
 
 const IMPORT_MAX_BYTES = 20 * 1024 * 1024;
 const ALLOWED_IMPORT_EXTS = new Set([".docx", ".html", ".htm", ".md", ".markdown"]);
@@ -124,6 +125,14 @@ export function createBackend(host: Host, initial?: string) {
 	};
 	/** git for the open workspace: one for as long as the folder is open, so that what it learned of the repository is asked once. */
 	let asked: { root: string; git: Git } | null = null;
+	const terminals = new TerminalManager({
+		onData: (id, data) => {
+			if (!disposed) host.emit("terminalData", { id, data });
+		},
+		onExit: (id, exitCode, signal) => {
+			if (!disposed) host.emit("terminalExit", { id, exitCode, signal });
+		},
+	});
 	const git = () => {
 		const root = need().root;
 		if (asked?.root !== root) {
@@ -219,6 +228,9 @@ export function createBackend(host: Host, initial?: string) {
 		prevLsp?.stop();
 		if (prevLsp || lspState.state !== "stopped") emitLspState({ state: "stopped" });
 		prevAsked?.git.dispose();
+		if (prevFiles && fileKey(prevFiles.root) !== fileKey(nextFiles.root)) {
+			terminals.disposeAll();
+		}
 
 		const isStale = () => disposed || seq !== openSeq;
 		nextFiles.watch((changed) => {
@@ -881,6 +893,29 @@ export function createBackend(host: Host, initial?: string) {
 			});
 			return agent.call(method, args);
 		},
+		terminalProfiles: async () => terminals.profiles(),
+		terminalList: async () => terminals.list(),
+		terminalCreate: async (req) => {
+			if (disposed) throw new Error("backend is disposed");
+			let cwd = files?.root;
+			if (req?.cwd) {
+				cwd = files ? files.inside(req.cwd) : undefined;
+			}
+			const created = terminals.create({ ...req, cwd }, files?.root);
+			host.emit("output", { channel: "studio", text: `Terminal started: ${created.title} (${created.pty ? "PTY" : "pipe"}) in ${created.cwd}` });
+			return created;
+		},
+		terminalWrite: async (id, data) => {
+			if (disposed) return;
+			terminals.write(id, data);
+		},
+		terminalResize: async (id, cols, rows) => {
+			if (disposed) return;
+			terminals.resize(id, cols, rows);
+		},
+		terminalKill: async (id) => {
+			terminals.kill(id);
+		},
 		clipboard: async (text) => {
 			if (!host.clipboard) return false;
 			host.clipboard(text);
@@ -945,6 +980,7 @@ export function createBackend(host: Host, initial?: string) {
 			lspPath = "";
 			asked?.git.dispose();
 			asked = null;
+			terminals.disposeAll();
 			agent.dispose();
 		},
 	};
