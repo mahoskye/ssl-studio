@@ -196,7 +196,7 @@ footer p { margin: 0 0 .6em; }
 	<div class="stats ui" role="list">
 		<div class="stat" role="listitem"><b>28</b><span>commits when first written, all in pull request 5</span></div>
 		<div class="stat" role="listitem"><b>18</b><span>decision records, ADR 0034 to 0051</span></div>
-		<div class="stat" role="listitem"><b>4,153</b><span>unit tests passing, up from 3,896</span></div>
+		<div class="stat" role="listitem"><b>4,147</b><span>unit tests when first written, up from 3,896</span></div>
 		<div class="stat" role="listitem"><b>3</b><span>language server defects reported upstream, all fixed</span></div>
 	</div>
 </header>
@@ -426,7 +426,7 @@ footer p { margin: 0 0 .6em; }
 
 <h2 id="checks"><span class="num ui">15</span>How it was checked</h2>
 <ul>
-	<li><strong>Unit tests</strong> grew from 3,896 at the start to 4,153 on Linux, with 2 skipped and none failing, and the type check clean throughout. In the Windows 11 VM, at the last commit with 0.33.1 built for Windows, it had 4,121 passing, 35 skipped and none failing.</li>
+	<li><strong>Unit tests</strong> grew from 3,896 at the start to 4,153 on Linux once 0.33.1 was in, with 2 skipped and none failing, and the type check clean throughout. In the Windows 11 VM at that point, with 0.33.1 built for Windows, it had 4,121 passing, 35 skipped and none failing.</li>
 	<li><strong>Desktop self-tests</strong> (plain, close-and-restore, long cycle) pass on Linux and in the Windows VM, all three with 0.33.1 on both.</li>
 	<li><strong>One Windows-only failure</strong> turned up on the way: a closing test that opens a folder, and so starts the language server, took 5.3 seconds under the whole suite against a 5-second limit. It passed three times out of three on its own, and its limit is now 30 seconds.</li>
 	<li><strong>In the running app</strong>, each visible change was looked at 720 and 1400 wide, light and dark, by real clicks and keys where the browser tool can send them, and by dispatched key events where it cannot.</li>
