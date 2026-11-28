@@ -177,6 +177,22 @@ const showWorkspacePanel = (id: PanelId) => {
 	if (!snapshot(state).workspace) return notify("Open a folder first.");
 	showPanel(id);
 };
+/** Single-line text currently selected in the active editor, to seed Search on Ctrl+Shift+F like VS Code. */
+const selectedSearchSeed = (): string | undefined => {
+	if (document.activeElement?.closest('[data-panel="search"]')) return undefined;
+	let raw = "";
+	const live = activeLiveEditor();
+	if (live) {
+		raw = live.getSelectedText();
+	} else {
+		const editor = activeEditor();
+		const model = editor?.getModel();
+		const sel = editor?.getSelection();
+		if (model && sel && !sel.isEmpty()) raw = model.getValueInRange(sel);
+	}
+	if (!raw || /[\r\n]/.test(raw) || raw.length > 200) return undefined;
+	return raw;
+};
 /** Puts text on the clipboard: by the app's own way where there is one, by the web view's otherwise. */
 export async function copyText(text: string, said: string) {
 	const copied = (await backend.clipboard(text).catch(() => false)) || (await navigator.clipboard?.writeText(text).then(() => true, () => false));
@@ -482,8 +498,28 @@ export const commands: Command[] = [
 	{ id: "objects", label: "Show Document outline", detail: "Headings, regions and procedures of the open file", run: () => showWorkspacePanel("objects") },
 	{ id: "palette", label: "Show Palette", detail: "Templates, process shapes and graph controls", run: () => showWorkspacePanel("palette") },
 	{ id: "reference", label: "Show Reference", detail: "Built-in functions, classes and keywords", run: () => showWorkspacePanel("reference") },
-	{ id: "search", label: "Show Search", run: () => showWorkspacePanel("search") },
-	{ id: "replace-in-files", label: "Replace in files…", detail: "In Search: what would change is shown first, and nothing is written until it is confirmed", run: () => (!snapshot(state).workspace ? notify("Open a folder first.") : void import("./panels/Search").then((search) => search.showReplace())) },
+	{ id: "search", label: "Show Search", run: () => {
+		if (!snapshot(state).workspace) return notify("Open a folder first.");
+		const seed = selectedSearchSeed();
+		void import("./panels/Search").then((search) => search.focusSearch(seed));
+	} },
+	{ id: "replace-in-files", label: "Replace in files…", detail: "In Search: what would change is shown first, and nothing is written until it is confirmed", run: () => {
+		if (!snapshot(state).workspace) return notify("Open a folder first.");
+		const seed = selectedSearchSeed();
+		void import("./panels/Search").then((search) => search.showReplace(seed));
+	} },
+	{ id: "search-next-match", label: "Search: Focus Next Search Result", detail: "Jump to the next match listed in the Search panel", run: () => {
+		if (!snapshot(state).workspace) return notify("Open a folder first.");
+		void import("./panels/Search").then((search) => {
+			if (!search.stepSearchResult(1)) notify("No search results to navigate.");
+		});
+	} },
+	{ id: "search-prev-match", label: "Search: Focus Previous Search Result", detail: "Jump to the previous match listed in the Search panel", run: () => {
+		if (!snapshot(state).workspace) return notify("Open a folder first.");
+		void import("./panels/Search").then((search) => {
+			if (!search.stepSearchResult(-1)) notify("No search results to navigate.");
+		});
+	} },
 	{ id: "git", label: "Show Source control", detail: "What has changed since the last commit, and the next commit", run: () => showWorkspacePanel("git") },
 	{ id: "history", label: "Show History", detail: "Local snapshots on save and Git commit history", run: () => showWorkspacePanel("history") },
 	{ id: "health", label: "Show Health", detail: "The script against the house style", run: () => showWorkspacePanel("health") },
@@ -1866,6 +1902,8 @@ const KEYS: Record<string, string> = {
 	"ctrl+-": "zoom-out",
 	"ctrl+shift+0": "zoom-reset",
 	f1: "command-palette",
+	f4: "search-next-match",
+	"shift+f4": "search-prev-match",
 	"ctrl+g": "go-to-line",
 	f10: "menu-bar",
 };
@@ -1988,6 +2026,8 @@ export function installKeys() {
 			// it, and it is not a document's "insert link", which was run above): the next key is the editor's too.
 			if (!id && inCodeEditor && startsEditorChord(pressed, onMac)) editorChordAt = Date.now();
 			if (id === "toggle-markdown-mode" && !isMarkdown(activePath())) return;
+			// Ctrl+Alt+Enter inside Search triggers Replace All rather than Follow Link.
+			if (id === "open-link" && targetEl?.closest('[data-panel="search"]')) return;
 			// Alt and a menu's first letter opens that menu, where no shortcut has the key. Not with Ctrl or Shift, and not
 			// where Alt and a letter types a character: the key is then that character, not the letter.
 			const menu = !id && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key.length === 1 ? menuForLetter(e.key) : -1;

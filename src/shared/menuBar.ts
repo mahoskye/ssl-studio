@@ -888,6 +888,7 @@ export type SafeReplaceOptions = {
 	isMarkdown?: boolean;
 	isPlanJson?: boolean;
 	safeDocs?: boolean;
+	preserveCase?: boolean;
 	maxSamples?: number;
 };
 
@@ -923,7 +924,7 @@ export function replaceSafeInText(
 		if (options.allowedLines && !options.allowedLines.has(lineNumber)) continue;
 		const line = parts[at]!;
 		if (regex && line.length > REGEX_MAX_LINE_LENGTH) continue;
-		const found = matchesOn(line, pattern, with_, regex);
+		const found = matchesOn(line, pattern, with_, regex, Infinity, undefined, Boolean(options.preserveCase));
 		if (!found.length) continue;
 		const lineSpans = protectedMap?.get(lineNumber);
 		const usable = lineSpans

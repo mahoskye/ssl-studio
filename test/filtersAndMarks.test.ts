@@ -106,7 +106,7 @@ describe("a filter out of sight until it is asked for", () => {
 
 	test("the lists for that purpose keep their box", () => {
 		expect(source("src/view/panels/Reference.tsx")).toMatch(/<input\s+class="filter"/);
-		expect(source("src/view/panels/Search.tsx")).toContain('placeholder="Search the workspace"');
+		expect(source("src/view/panels/Search.tsx")).toContain('placeholder="Search"');
 		expect(source("src/view/Settings.tsx")).toContain('placeholder="Search settings"');
 	});
 });

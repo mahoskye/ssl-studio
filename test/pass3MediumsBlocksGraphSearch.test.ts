@@ -574,7 +574,7 @@ describe("Search panel — a list that falls short is said to, and is not replac
 		expect(noReplace).toContain("return shortfallBlocksReplace(shortfall(), SEARCH_LIMIT);");
 		expect(between(src, "const executeReplace = async (skipConfirm: boolean) => {", "const startRoot")).toContain("if (replaceBusy || noReplace(true)) return;");
 		expect(between(src, "const previewReplace = async () => {", "const startRoot")).toContain("if (replaceBusy || noReplace(true)) return;");
-		const summary = between(src, "const summary = () => {", "const dismissBtnStyle");
+		const summary = between(src, "const summary = () => {", "const HitRow =");
 		expect(summary).toContain("if (timedOut()) return timedOutEmpty(asked(), filterTail);");
 		expect(summary).toContain('shortfallCount(shortfall(), count(visibleHits().length, "result"), hits().length, SEARCH_LIMIT)');
 	});

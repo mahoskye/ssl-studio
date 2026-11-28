@@ -5,6 +5,7 @@
 // one expression (src/shared/searchPattern.ts), so they agree.
 import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
+import { Menu, type MenuItem } from "../Menu";
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { createAsyncQuery } from "../asyncQuery";
 import { monaco } from "../editor/monaco";
@@ -13,7 +14,7 @@ import { session } from "../lsp/session";
 import type { DocFile, SearchHit } from "../../shared/protocol";
 import { backend } from "../backend";
 import { choose, quickPick } from "../dialogs";
-import { activePath, canonical, documents, fileChangedOnDisk, isUntitled, notify, openFile, save, saveAll, setState, state } from "../state";
+import { activePath, canonical, displayName, documents, fileChangedOnDisk, isUntitled, notify, openFile, openToSide, save, saveAll, setState, state } from "../state";
 import { baseName, isInside, relativeTo } from "../../shared/paths";
 import { parseCsv } from "../../shared/csv";
 import { createFileFilter, folderPattern } from "../../shared/fileGlob";
@@ -21,6 +22,7 @@ import { frontMatter, HEADING, many, one, plainMarkdown } from "../../shared/fro
 import { overlapsProtectedSpan, planLineBreadcrumb, protectedMarkdownSpans, type TextSpan } from "../../shared/menuBar";
 import { DOC_FOLDERS, isCatalog, toneOf } from "../../shared/projectDocs";
 import {
+	applyPreserveCase,
 	becomesFound,
 	changedSinceSearch,
 	folderScope,
@@ -42,10 +44,14 @@ import { recall, remember } from "../graph/canvas";
 import { nodeLines, parsePlan } from "../plan/model";
 import { docs } from "../project";
 import { ticketAtHand } from "../projectDocs";
-import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
+import { chooseFromMenu, type RowMenuEntry } from "./RowMenu";
+import { focusRowsBelow, IconButton, Row, Rows, type Point } from "./Rows";
 import { showPanel } from "./registry";
 import {
+	buildSearchTree,
 	byLine,
+	collectTreeFolderKeys,
+	formatPlaceTrail,
 	markedColumns,
 	parseDocFilterTokens,
 	resolveSearchQuery,
@@ -53,21 +59,34 @@ import {
 	segments,
 	shortfallBlocksReplace,
 	shortfallCount,
+	splitResultPath,
+	stepResultKey,
 	timedOutEmpty,
 	type LineHit,
 	type ParsedDocFilters,
+	type SearchFileGroup,
 	type SearchScopeKind,
+	type SearchTreeNode,
 } from "./searchLines";
 
 const count = (n: number, oneWord: string, manyWord = `${oneWord}s`) => `${n} ${n === 1 ? oneWord : manyWord}`;
 
 /** How much of a line is shown before its first match. */
-const LEAD = 12;
+const LEAD = 14;
+const VIEW_MODE_KEY = "search.viewMode";
 
 /** The row for replacing is open. Kept while the panel is away, as what was typed in it is. */
 const [replacing, setReplacing] = createSignal(false);
 /** The rows for which files to look in are open. */
 const [choosing, setChoosing] = createSignal(false);
+/** Restrict search results to currently open editor tabs (VS Code's Open Editors toggle). */
+const [openEditorsOnly, setOpenEditorsOnly] = createSignal(false);
+/** Preserve casing of each replaced match (VS Code's Preserve Case `AB`, Alt+P). */
+const [preserveCase, setPreserveCase] = createSignal(false);
+/** Honor default workspace excludes and `.gitignore` (VS Code's Use Exclude Settings and Ignore Files). */
+const [useExcludes, setUseExcludes] = createSignal(true);
+/** Tree view (nested compacted folders) vs flat file list, persisted across reloads. */
+const [treeView, setTreeView] = createSignal(recall(VIEW_MODE_KEY) === "tree");
 const [replacement, setReplacement] = createSignal("");
 const [safeDocs, setSafeDocs] = createSignal(true);
 const [include, setInclude] = createSignal("");
@@ -80,15 +99,32 @@ const [exclude, setExclude] = createSignal("");
 export function findInFolder(relFolder: string) {
 	const scope = folderScope(relFolder);
 	setTicketScopeKey(null);
+	setOpenEditorsOnly(false);
 	setInclude(scope.include);
 	setExclude(scope.exclude);
 	setChoosing(true);
+	setFocusTick((n) => n + 1);
 	showPanel("search");
 }
 
 /** Shows the Search panel with its row for replacing open. */
-export function showReplace() {
+export function showReplace(seed?: string) {
 	setReplacing(true);
+	if (seed) {
+		setRequest({ query: seed, preserveScope: true });
+	} else {
+		setFocusTick((n) => n + 1);
+	}
+	showPanel("search");
+}
+
+/** Shows Search, seeding from a selection if given or focusing and selecting the query box. */
+export function focusSearch(seed?: string) {
+	if (seed) {
+		setRequest({ query: seed, preserveScope: true });
+	} else {
+		setFocusTick((n) => n + 1);
+	}
 	showPanel("search");
 }
 
@@ -124,6 +160,7 @@ function replaceGuarded(path: string, text: string, mark: string | undefined, li
 		skip: spans ? (match) => overlapsProtectedSpan(match.column, match.length, spans.get(match.line)) : undefined,
 		json: protect && /\.plan\.json$/i.test(path),
 		maxSamples,
+		preserveCase: preserveCase(),
 	});
 }
 
@@ -138,7 +175,8 @@ function hitsByPath(hits: readonly SearchHit[]): Map<string, SearchHit[]> {
 	return map;
 }
 
-const [request, setRequest] = createSignal<({ query: string } & SearchOptions) | null>(null);
+const [request, setRequest] = createSignal<({ query: string; preserveScope?: boolean } & SearchOptions) | null>(null);
+const [focusTick, setFocusTick] = createSignal(0);
 /** Shows the Search panel with this searched for: a table cell or code check asks where a value appears in code. */
 export function searchFor(query: string, options: SearchOptions = {}) {
 	setRequest({ query, ...options });
@@ -163,7 +201,7 @@ const [status, setStatus] = createSignal<"idle" | "busy" | "done" | "failed">("i
 const [asked, setAsked] = createSignal("");
 const [effectiveAsked, setEffectiveAsked] = createSignal("");
 /** The switches and the files the results on screen were found with: a replace uses these, not what has been changed since. */
-const [searched, setSearched] = createSignal<SearchOptions & { syntheticQuery?: boolean }>({});
+const [searched, setSearched] = createSignal<SearchOptions & { syntheticQuery?: boolean; openEditorsOnly?: boolean }>({});
 const [failure, setFailure] = createSignal("");
 const [docFilterNote, setDocFilterNote] = createSignal("");
 /** True when post-filters (`heading:` / `task:`) narrowed results to specific lines within files. */
@@ -180,15 +218,101 @@ let replaceBusy = false;
 /** Per-file and per-line exclusions dismissed from the current result set before Replace All. */
 const [dismissedFiles, setDismissedFiles] = createSignal<Set<string>>(new Set());
 const [dismissedLines, setDismissedLines] = createSignal<Set<string>>(new Set());
+/** Collapsed file and folder rows (`file:<path>`, `dir:<relDir>`) for the current search session. */
+const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
+/** Key (`path:line`) of the search result currently selected/navigated to. */
+const [activeHitKey, setActiveHitKey] = createSignal<string | null>(null);
+/** Optional single-file or single-line scope handed to `executeReplace` by inline row Replace buttons. */
+let pendingReplaceTarget: { path: string; line?: number } | null = null;
+/** Active debounce timer for live typing search, cleared on workspace switch, unmount, or explicit run. */
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+function clearDebounce() {
+	if (debounceTimer !== null) {
+		clearTimeout(debounceTimer);
+		debounceTimer = null;
+	}
+}
 /** Document-level Markdown protected-span cache for open editors keyed by canonical path and model version. */
 const openMdSpanCache = new Map<string, { version: number; spans: Map<number, TextSpan[]> }>();
 let latest = 0;
 let lastWorkspaceRoot: string | undefined;
 
+/** Steps forward (F4) or backward (Shift+F4) through visible search results from anywhere in the IDE. */
+export function stepSearchResult(dir: 1 | -1): boolean {
+	const skipFiles = dismissedFiles();
+	const skipLines = dismissedLines();
+	const active = hits().filter((h) => {
+		const canon = canonical(h.path);
+		return !skipFiles.has(canon) && !skipLines.has(`${canon}:${h.line}`);
+	});
+	const lines = byLine(active);
+	if (!lines.length) return false;
+	let ordered: LineHit[];
+	if (treeView()) {
+		const byPath = new Map<string, LineHit[]>();
+		for (const line of lines) {
+			const arr = byPath.get(line.path);
+			if (arr) arr.push(line);
+			else byPath.set(line.path, [line]);
+		}
+		const root = state.workspace?.root;
+		const fileGroups: SearchFileGroup[] = [...byPath].map(([path, fileLines]) => ({
+			path,
+			relPath: isUntitled(path) ? displayName(path) : relativeTo(root, path),
+			lines: fileLines,
+			matchCount: fileLines.reduce((n, l) => n + l.matches.length, 0),
+		}));
+		ordered = [];
+		const walk = (nodes: readonly SearchTreeNode[]) => {
+			for (const node of nodes) {
+				if (node.kind === "folder") walk(node.children);
+				else ordered.push(...node.file.lines);
+			}
+		};
+		walk(buildSearchTree(fileGroups));
+	} else {
+		ordered = lines;
+	}
+	const keys = ordered.map((l) => `${l.path}:${l.line}`);
+	const nextKey = stepResultKey(keys, activeHitKey(), dir);
+	if (!nextKey) return false;
+	const target = ordered.find((l) => `${l.path}:${l.line}` === nextKey);
+	if (!target) return false;
+	setActiveHitKey(nextKey);
+	// Expand its file (and any ancestor folders in tree view) so the active row is visible in the panel.
+	setCollapsed((prev) => {
+		if (!prev.size) return prev;
+		const next = new Set(prev);
+		next.delete(`file:${target.path}`);
+		const relPath = isUntitled(target.path) ? "" : relativeTo(state.workspace?.root, target.path).replace(/\\/g, "/");
+		const parts = relPath.split("/").slice(0, -1);
+		let acc = "";
+		for (const part of parts) {
+			acc = acc ? `${acc}/${part}` : part;
+			next.delete(`dir:${acc}`);
+		}
+		return next;
+	});
+	const first = target.matches[0]!;
+	void openFile(target.path, {
+		preview: true,
+		reveal: { line: target.line, column: first.column, endLine: target.line, endColumn: first.column + first.length },
+	});
+	return true;
+}
+
+/** Copies text to the clipboard using the app's native bridge with browser fallback. */
+async function copyTextLocal(text: string, said: string) {
+	const copied = (await backend.clipboard(text).catch(() => false)) || (await navigator.clipboard?.writeText(text).then(() => true, () => false));
+	notify(copied ? said : `Could not reach the clipboard. It was: ${text.length > 300 ? `${text.slice(0, 300)}…` : text}`, copied ? "info" : "error");
+}
+
 /** Clears workspace-scoped Search state whenever the open workspace changes (A -> B). */
 function resetSearchState() {
+	clearDebounce();
 	latest++;
 	replaceBusy = false;
+	pendingReplaceTarget = null;
 	setReplaceActive(false);
 	setHits([]);
 	setMarks({});
@@ -203,7 +327,11 @@ function resetSearchState() {
 	setTimedOut(false);
 	setDismissedFiles(new Set<string>());
 	setDismissedLines(new Set<string>());
+	setCollapsed(new Set<string>());
+	setActiveHitKey(null);
 	setTicketScopeKey(null);
+	setOpenEditorsOnly(false);
+	setUseExcludes(true);
 	setInclude("");
 	setExclude("");
 	setChoosing(false);
@@ -471,7 +599,7 @@ export function Search() {
 	);
 
 	const scopeActive = (inc: string, exc = "") =>
-		!ticketScopeKey() && (choosing() ? include().trim() === inc && exclude().trim() === exc : !inc && !exc);
+		!ticketScopeKey() && !openEditorsOnly() && (choosing() ? include().trim() === inc && exclude().trim() === exc : !inc && !exc);
 	const inCodeScope = () => scopeActive("", codeExcludeGlob());
 	const inDocsScope = () => scopeActive(docsIncludeGlob(), "");
 
@@ -531,6 +659,8 @@ export function Search() {
 		};
 	});
 
+	onCleanup(clearDebounce);
+
 	type RunOverrides = {
 		query?: string;
 		regex?: boolean;
@@ -540,10 +670,15 @@ export function Search() {
 		include?: string;
 		exclude?: string;
 		ticketScopeKey?: string | null;
+		openEditorsOnly?: boolean;
+		useExcludes?: boolean;
+		record?: boolean;
 	};
 
 	const run = async (overrides: RunOverrides = {}) => {
+		clearDebounce();
 		const rawQuery = overrides.query ?? input.value;
+		const prevAsked = asked();
 		const mine = ++latest;
 		const startRoot = state.workspace?.root;
 		setDocFilterNote("");
@@ -557,9 +692,18 @@ export function Search() {
 			setAsked("");
 			setEffectiveAsked("");
 			setStatus("idle");
+			setMarks({});
+			setSearched({});
+			setFailure("");
+			setCollapsed(new Set<string>());
+			setActiveHitKey(null);
 			return;
 		}
-		recordHistory(rawQuery);
+		if (rawQuery !== prevAsked) {
+			setCollapsed(new Set<string>());
+			setActiveHitKey(null);
+		}
+		if (overrides.record !== false) recordHistory(rawQuery);
 		historyIdx = -1;
 		setStatus("busy");
 		setAsked(rawQuery);
@@ -568,6 +712,8 @@ export function Search() {
 		const curInclude = overrides.include ?? include();
 		const curExclude = overrides.exclude ?? exclude();
 		const curTicketScopeKey = overrides.ticketScopeKey !== undefined ? overrides.ticketScopeKey : ticketScopeKey();
+		const curOpenOnly = overrides.openEditorsOnly ?? openEditorsOnly();
+		const curUseExcludes = overrides.useExcludes ?? useExcludes();
 		const curRegex = overrides.regex ?? regex();
 		const curCaseSensitive = overrides.caseSensitive ?? caseSensitive();
 		const curWholeWord = overrides.wholeWord ?? wholeWord();
@@ -577,14 +723,14 @@ export function Search() {
 		const root = startRoot;
 		const activeTicket = curTicketScopeKey && activeTicketScope()?.key === curTicketScopeKey ? activeTicketScope() : null;
 		const isScopeActive = (inc: string, exc = "") =>
-			!curTicketScopeKey && (curChoosing ? curInclude.trim() === inc && curExclude.trim() === exc : !inc && !exc);
+			!curTicketScopeKey && !curOpenOnly && (curChoosing ? curInclude.trim() === inc && curExclude.trim() === exc : !inc && !exc);
 		const scopeKind: SearchScopeKind = isScopeActive("", codeExcludeGlob())
 			? "code"
 			: isScopeActive(docsIncludeGlob(), "")
 				? "docs"
 				: activeTicket
 					? "ticket"
-					: baseInclude.trim() || baseExclude.trim()
+					: curOpenOnly || baseInclude.trim() || baseExclude.trim()
 						? "custom"
 						: "all";
 
@@ -669,8 +815,9 @@ export function Search() {
 			setDocFilterNote(`${filterNotes.join(" ")} (${matchedDocs.length} ${matchedDocs.length === 1 ? "doc" : "docs"})`);
 			if (!matchedDocs.length) {
 				setHits([]);
+				setMarks({});
 				setTruncated(false);
-				setSearched({ regex: effectiveRegex, caseSensitive: effectiveCase, wholeWord: effectiveWhole, ...(syntheticQuery ? { syntheticQuery: true } : {}) });
+				setSearched({ regex: effectiveRegex, caseSensitive: effectiveCase, wholeWord: effectiveWhole, ...(syntheticQuery ? { syntheticQuery: true } : {}), ...(curOpenOnly ? { openEditorsOnly: true } : {}) });
 				setStatus("done");
 				return;
 			}
@@ -687,6 +834,47 @@ export function Search() {
 			}
 		}
 
+		// Restrict to currently open editor tabs when VS Code's "Search only in Open Editors" toggle is active.
+		const openTabSet = curOpenOnly ? new Set(state.groups.flatMap((g) => g.tabs).map(canonical)) : null;
+		if (openTabSet) {
+			const openFilter = createFileFilter(effectiveInclude, effectiveExclude);
+			const openRelPaths: string[] = [];
+			let hasOpenUntitled = false;
+			for (const tabPath of openTabSet) {
+				const doc = documents.get(tabPath);
+				if (doc?.binary) continue;
+				if (allowedDocSet && !allowedDocSet.has(tabPath)) continue;
+				if (isUntitled(tabPath)) {
+					if (!baseInclude.trim() && !hasDocMetaFilters && !hasHeadingFilter && !hasTaskFilter) hasOpenUntitled = true;
+					continue;
+				}
+				if (root && isInside(root, tabPath)) {
+					const relPath = relativeTo(root, tabPath).replace(/\\/g, "/");
+					if (!openFilter(relPath)) continue;
+					if ((hasHeadingFilter || hasTaskFilter) && !/\.(md|markdown)$/i.test(relPath)) continue;
+					openRelPaths.push(relPath);
+				}
+			}
+			if (effectivePaths !== undefined) {
+				const openSet = new Set(openRelPaths);
+				effectivePaths = effectivePaths.filter((p) => openSet.has(p.replace(/\\/g, "/")));
+			} else {
+				effectivePaths = openRelPaths;
+			}
+			effectiveInclude = "";
+			effectiveExclude = "";
+			if (!effectivePaths.length && !hasOpenUntitled) {
+				setHits([]);
+				setMarks({});
+				setTruncated(false);
+				setSearched({ regex: effectiveRegex, caseSensitive: effectiveCase, wholeWord: effectiveWhole, paths: [], ...(syntheticQuery ? { syntheticQuery: true } : {}), openEditorsOnly: true });
+				setEffectiveAsked(effectiveQuery);
+				setLineFiltered(hasHeadingFilter || hasTaskFilter);
+				setStatus("done");
+				return;
+			}
+		}
+
 		const backendOptions: SearchOptions = {
 			regex: effectiveRegex,
 			caseSensitive: effectiveCase,
@@ -694,8 +882,9 @@ export function Search() {
 			...(effectiveInclude ? { include: effectiveInclude } : {}),
 			...(effectiveExclude ? { exclude: effectiveExclude } : {}),
 			...(effectivePaths !== undefined ? { paths: effectivePaths } : {}),
+			...(curUseExcludes ? {} : { useExcludes: false }),
 		};
-		setSearched({ ...backendOptions, ...(syntheticQuery ? { syntheticQuery: true } : {}) });
+		setSearched({ ...backendOptions, ...(syntheticQuery ? { syntheticQuery: true } : {}), ...(curOpenOnly ? { openEditorsOnly: true } : {}) });
 		setEffectiveAsked(effectiveQuery);
 		setLineFiltered(hasHeadingFilter || hasTaskFilter);
 
@@ -708,10 +897,11 @@ export function Search() {
 			const pathAllowSet = effectivePaths !== undefined ? new Set(effectivePaths.map((p) => p.replace(/\\/g, "/"))) : null;
 			for (const [docPath, doc] of documents) {
 				const at = canonical(docPath);
-				if (!state.dirty[at] || doc.binary) continue;
+				if ((!state.dirty[at] && !(openTabSet && isUntitled(at) && openTabSet.has(at))) || doc.binary) continue;
 				if (allowedDocSet && !allowedDocSet.has(at)) continue;
+				if (openTabSet && !openTabSet.has(at)) continue;
 				if (isUntitled(at)) {
-					if (effectiveInclude.trim() || pathAllowSet !== null) continue;
+					if (openTabSet ? Boolean(baseInclude.trim()) || hasDocMetaFilters || hasHeadingFilter || hasTaskFilter : Boolean(effectiveInclude.trim()) || pathAllowSet !== null) continue;
 				} else if (root && isInside(root, at)) {
 					const relPath = relativeTo(root, at).replace(/\\/g, "/");
 					if (pathAllowSet !== null && !pathAllowSet.has(relPath)) continue;
@@ -789,6 +979,40 @@ export function Search() {
 		}
 	};
 
+	const scheduleSearch = (overrides: RunOverrides = {}, delayMs?: number) => {
+		clearDebounce();
+		const q = overrides.query ?? (input ? input.value : typed());
+		if (!q) {
+			void run({ ...overrides, query: "", record: false });
+			return;
+		}
+		const wait = delayMs ?? (regex() ? 320 : 210);
+		debounceTimer = setTimeout(() => {
+			debounceTimer = null;
+			void run({ ...overrides, record: false });
+		}, wait);
+	};
+
+	const clearSearch = () => {
+		setTyped("");
+		if (input) input.value = "";
+		void run({ query: "", record: false });
+		input?.focus();
+	};
+
+	// Focus & select query box when invoked via Ctrl+Shift+F / Replace in files without a selection seed.
+	createEffect(
+		() => focusTick(),
+		(tick) => {
+			if (!tick || !input) return;
+			queueMicrotask(() => {
+				if (!input.isConnected) return;
+				input.focus();
+				input.select();
+			});
+		},
+	);
+
 	// A search asked for from elsewhere is put in the box and run, as if it had been typed.
 	createEffect(
 		() => request(),
@@ -796,17 +1020,27 @@ export function Search() {
 			if (!wanted || !input) return;
 			setRequest(null);
 			input.value = wanted.query;
+			setTyped(wanted.query);
+			queueMicrotask(() => {
+				if (!input.isConnected) return;
+				input.focus();
+				input.select();
+			});
+			if (wanted.preserveScope) {
+				void run({ query: wanted.query });
+				return;
+			}
 			const nextRegex = Boolean(wanted.regex);
 			const nextWhole = Boolean(wanted.wholeWord);
 			const nextCase = Boolean(wanted.caseSensitive);
 			const nextInc = wanted.include ?? "";
 			const nextExc = wanted.exclude ?? "";
 			const nextChoosing = Boolean(nextInc.trim() || nextExc.trim());
-			setTyped(wanted.query);
 			setRegex(nextRegex);
 			setWholeWord(nextWhole);
 			setCaseSensitive(nextCase);
 			setTicketScopeKey(null);
+			setOpenEditorsOnly(false);
 			setInclude(nextInc);
 			setExclude(nextExc);
 			setChoosing(nextChoosing);
@@ -819,6 +1053,7 @@ export function Search() {
 				exclude: nextExc,
 				choosing: nextChoosing,
 				ticketScopeKey: null,
+				openEditorsOnly: false,
 			});
 		},
 	);
@@ -826,7 +1061,7 @@ export function Search() {
 	const flip = (kind: "caseSensitive" | "wholeWord" | "regex", set: (v: boolean) => void, now: boolean) => {
 		const next = !now;
 		set(next);
-		if (status() !== "idle") void run({ [kind]: next });
+		if (typed()) void run({ [kind]: next });
 	};
 
 	const visibleHits = createMemo(() => {
@@ -848,6 +1083,13 @@ export function Search() {
 			return next;
 		});
 
+	const dismissFiles = (paths: readonly string[]) =>
+		setDismissedFiles((prev) => {
+			const next = new Set(prev);
+			for (const path of paths) next.add(canonical(path));
+			return next;
+		});
+
 	const dismissLine = (path: string, line: number) =>
 		setDismissedLines((prev) => {
 			const next = new Set(prev);
@@ -855,10 +1097,62 @@ export function Search() {
 			return next;
 		});
 
-	const groups = () => {
+	const restoreDismissed = () => {
+		setDismissedFiles(new Set<string>());
+		setDismissedLines(new Set<string>());
+	};
+
+	const rel = (path: string) => (isUntitled(path) ? displayName(path) : relativeTo(state.workspace?.root, path));
+	const matchesIn = (list: LineHit[]) => list.reduce((n, line) => n + line.matches.length, 0);
+
+	const groups = createMemo(() => {
 		const map = new Map<string, LineHit[]>();
 		for (const line of byLine(visibleHits())) map.set(line.path, [...(map.get(line.path) ?? []), line]);
 		return [...map];
+	});
+
+	const fileGroups = createMemo<SearchFileGroup[]>(() =>
+		groups().map(([path, lines]) => ({
+			path,
+			relPath: rel(path),
+			lines,
+			matchCount: matchesIn(lines),
+		})),
+	);
+
+	const searchTree = createMemo<SearchTreeNode[]>(() => (treeView() ? buildSearchTree(fileGroups()) : []));
+
+	const isCollapsed = (key: string) => collapsed().has(key);
+	const toggleCollapsed = (key: string) =>
+		setCollapsed((prev) => {
+			const next = new Set(prev);
+			if (next.has(key)) next.delete(key);
+			else next.add(key);
+			return next;
+		});
+
+	const allCollapsibleKeys = createMemo(() => {
+		const fileKeys = groups().map(([path]) => `file:${path}`);
+		return treeView() ? [...collectTreeFolderKeys(searchTree()), ...fileKeys] : fileKeys;
+	});
+
+	const allCollapsed = createMemo(() => {
+		const keys = allCollapsibleKeys();
+		if (!keys.length) return false;
+		const shut = collapsed();
+		return keys.every((k) => shut.has(k));
+	});
+
+	const toggleCollapseAll = () => {
+		const keys = allCollapsibleKeys();
+		if (!keys.length) return;
+		setCollapsed(allCollapsed() ? new Set<string>() : new Set(keys));
+	};
+
+	const toggleViewMode = () => {
+		const next = !treeView();
+		setTreeView(next);
+		remember(VIEW_MODE_KEY, next ? "tree" : "list");
 	};
 
 	// Where each line sits: SSL region › procedure (from starlims-lsp via ephemeral scratchSymbols),
@@ -897,7 +1191,8 @@ export function Search() {
 							}
 						};
 						walk(mdSymbols);
-						if (trail.length) out.set(`${path}:${line.line}`, trail.join(" › "));
+						const label = formatPlaceTrail(trail, { dropRootTitle: true });
+						if (label) out.set(`${path}:${line.line}`, label);
 					}
 					continue;
 				}
@@ -964,11 +1259,9 @@ export function Search() {
 		for (const line of list) map.set(place(line), [...(map.get(place(line)) ?? []), line]);
 		return [...map];
 	};
-	const rel = (path: string) => relativeTo(state.workspace?.root, path);
-	const matchesIn = (list: LineHit[]) => list.reduce((n, line) => n + line.matches.length, 0);
 	/** The switches that narrow a search, by the names on their buttons: what to try without when nothing is found. */
 	const switchesOn = () => [caseSensitive() ? "Aa" : "", wholeWord() ? "ab" : "", regex() ? ".*" : ""].filter(Boolean);
-	const narrowed = () => Boolean(searched().include?.trim() || searched().exclude?.trim() || searched().paths !== undefined);
+	const narrowed = () => Boolean(searched().include?.trim() || searched().exclude?.trim() || searched().paths !== undefined || searched().openEditorsOnly);
 
 	const topTags = createMemo(() => workspaceTags(docs()).slice(0, 4));
 	/** Distinct statuses actually present across workspace docs (with sensible fallback if none exist yet). */
@@ -1012,18 +1305,91 @@ export function Search() {
 	const applyScope = (inc: string, exc = "") => {
 		const nextChoosing = Boolean(inc || exc);
 		setTicketScopeKey(null);
+		setOpenEditorsOnly(false);
 		setInclude(inc);
 		setExclude(exc);
 		setChoosing(nextChoosing);
-		if (typed()) void run({ ticketScopeKey: null, include: inc, exclude: exc, choosing: nextChoosing });
+		if (typed()) void run({ ticketScopeKey: null, openEditorsOnly: false, include: inc, exclude: exc, choosing: nextChoosing });
 	};
 
 	const applyTicketScope = (key: string) => {
 		setTicketScopeKey(key);
+		setOpenEditorsOnly(false);
 		setInclude("");
 		setExclude("");
 		setChoosing(false);
-		if (typed()) void run({ ticketScopeKey: key, include: "", exclude: "", choosing: false });
+		if (typed()) void run({ ticketScopeKey: key, openEditorsOnly: false, include: "", exclude: "", choosing: false });
+	};
+
+	const toggleOpenEditorsOnly = () => {
+		const next = !openEditorsOnly();
+		setOpenEditorsOnly(next);
+		if (next) setTicketScopeKey(null);
+		if (typed()) void run({ openEditorsOnly: next, ...(next ? { ticketScopeKey: null } : {}) });
+	};
+
+	const toggleUseExcludes = () => {
+		const next = !useExcludes();
+		setUseExcludes(next);
+		if (typed()) void run({ useExcludes: next });
+	};
+
+	const toggleDetails = () => {
+		const nextChoosing = !choosing();
+		setChoosing(nextChoosing);
+		// Patterns that were narrowing the results stop when their boxes go, and start when they come back.
+		if (typed() && (include().trim() || exclude().trim())) void run({ choosing: nextChoosing });
+	};
+
+	const activeScopeChip = createMemo<{ label: string; title: string; clear: () => void } | null>(() => {
+		const ticket = ticketScopeKey();
+		if (ticket) {
+			return {
+				label: ticket,
+				title: `Scoped to ${ticket}. Click to search all workspace files.`,
+				clear: () => applyScope("", ""),
+			};
+		}
+		if (inCodeScope()) {
+			return {
+				label: "Code",
+				title: "Scoped to code files only. Click to search all workspace files.",
+				clear: () => applyScope("", ""),
+			};
+		}
+		if (inDocsScope()) {
+			return {
+				label: "Docs",
+				title: "Scoped to project docs, plans, and schema. Click to search all workspace files.",
+				clear: () => applyScope("", ""),
+			};
+		}
+		return null;
+	});
+
+	const hasCustomFilter = () => Boolean(activeScopeChip()) || openEditorsOnly() || !useExcludes() || !safeDocs();
+
+	const clearAllFilters = () => {
+		setTicketScopeKey(null);
+		setOpenEditorsOnly(false);
+		setInclude("");
+		setExclude("");
+		setChoosing(false);
+		setCaseSensitive(false);
+		setWholeWord(false);
+		setRegex(false);
+		if (typed()) {
+			void run({
+				ticketScopeKey: null,
+				openEditorsOnly: false,
+				include: "",
+				exclude: "",
+				choosing: false,
+				caseSensitive: false,
+				wholeWord: false,
+				regex: false,
+			});
+		}
 	};
 
 	// --- replacing -------------------------------------------------------------
@@ -1126,12 +1492,18 @@ export function Search() {
 		}
 		const entries: [number, string][] = [];
 		const isRegex = Boolean(searched().regex);
+		const keepCase = preserveCase();
 		const where = isRegex ? groupsAt() : null;
 		for (const match of line.matches) {
 			if (overlapsProtectedSpan(match.column, match.length, lineSpans)) continue;
 			// From where the search found the match and its groups: the expression is not run again here.
 			const text = becomesFound(line.text, line.textOffset ?? 0, where?.get(`${line.path}\n${line.line}\n${match.column}`) ?? match, replacement(), isRegex);
-			if (text !== undefined) entries.push([match.column, text]);
+			if (text !== undefined) {
+				const off = line.textOffset ?? 0;
+				const start = match.column - 1 - off;
+				const out = keepCase && start >= 0 && start + match.length <= line.text.length ? applyPreserveCase(line.text.slice(start, start + match.length), text) : text;
+				entries.push([match.column, out]);
+			}
 		}
 		return new Map(entries);
 	};
@@ -1150,6 +1522,8 @@ export function Search() {
 		return shortfallBlocksReplace(shortfall(), SEARCH_LIMIT);
 	};
 	const executeReplace = async (skipConfirm: boolean) => {
+		const target = pendingReplaceTarget;
+		pendingReplaceTarget = null;
 		if (replaceBusy || noReplace(true)) return;
 		const startRoot = state.workspace?.root;
 		const startSearchId = latest;
@@ -1158,12 +1532,22 @@ export function Search() {
 		const query = effectiveAsked() || searchedFor;
 		const options = searched();
 		const with_ = replacement();
-		const activeGroups = groups();
+		const rawGroups = groups();
+		const activeGroups = target
+			? rawGroups
+					.filter(([p]) => p === target.path)
+					.map(([p, lines]) => [p, target.line !== undefined ? lines.filter((l) => l.line === target.line) : lines] as [string, LineHit[]])
+					.filter(([, lines]) => lines.length > 0)
+			: rawGroups;
+		if (!activeGroups.length) return;
 		const paths = activeGroups.map(([path]) => path);
-		const total = visibleHits().length;
+		const total = target ? activeGroups.reduce((n, [, lines]) => n + matchesIn(lines), 0) : visibleHits().length;
 		const protect = safeDocs();
+		const keepCase = preserveCase();
 		// What was listed and the texts it was found in, as they are now: asked for again after a wait, they could be another search's.
-		const listed = listedBy();
+		const listed = target?.line !== undefined
+			? hitsByPath(visibleHits().filter((h) => h.path === target.path && h.line === target.line))
+			: listedBy();
 		const searchedAs = marks();
 
 		replaceBusy = true;
@@ -1208,7 +1592,7 @@ export function Search() {
 				for (const [path, fileLines] of activeGroups) {
 					if (state.workspace?.root !== startRoot) return;
 					const at = canonical(path);
-					const allowedLines = allowedLinesFor(path, fileLines);
+					const allowedLines = target?.line !== undefined ? new Set([target.line]) : allowedLinesFor(path, fileLines);
 					const mark = searchedAs[path];
 
 					const doc = documents.get(at);
@@ -1275,6 +1659,7 @@ export function Search() {
 						wholeWord: options.wholeWord,
 						safeDocs: protect,
 						asSearched,
+						...(keepCase ? { preserveCase: true } : {}),
 						...(Object.keys(linesByPath).length ? { linesByPath } : {}),
 					};
 					const results = await backend.replace(query, with_, replaceOptions, onDiskPaths);
@@ -1484,35 +1869,179 @@ export function Search() {
 
 	const summary = () => {
 		if (status() === "busy") return "Searching…";
-		if (status() === "failed") return `The search for “${asked()}” failed: ${failure()}${regex() ? " Check the regular expression, or switch .* off." : ""}`;
-		if (status() === "idle") {
-			return "Type what to find and press Enter. Filters: tag:, status:, ticket:, group:, kind:, heading:, task:open|done, prop:val. Up/Down recalls history.";
-		}
+		if (status() === "failed") return failure() || `The search for “${asked()}” failed.`;
+		if (status() === "idle") return "";
 		const filterTail = docFilterNote() ? ` [${docFilterNote()}]` : "";
-		const dismissedTail = dismissedHitCount() ? ` (${dismissedHitCount()} dismissed)` : "";
+		const openTail = searched().openEditorsOnly ? " · open editors" : "";
+		const scopeTail = narrowed() && !docFilterNote() && !searched().openEditorsOnly ? " · filtered" : "";
 		if (!visibleHits().length) {
-			if (dismissedHitCount()) return `All ${count(hits().length, "result")} for “${asked()}” were dismissed.`;
+			if (dismissedHitCount()) return `All ${count(hits().length, "result")} dismissed`;
 			if (timedOut()) return timedOutEmpty(asked(), filterTail);
-			return `Nothing found for “${asked()}”${filterTail}${narrowed() && !docFilterNote() ? " in the files chosen" : ""}. Check the spelling${switchesOn().length ? `, or switch ${switchesOn().join(" and ")} off` : ""}${narrowed() ? ", or look in more files" : ""}.`;
+			return `No results found${filterTail}${openTail}${scopeTail}`;
 		}
 		const countText = shortfallCount(shortfall(), count(visibleHits().length, "result"), hits().length, SEARCH_LIMIT);
-		return `${countText} in ${count(groups().length, "file")} for “${asked()}”${filterTail}${dismissedTail}${narrowed() && !docFilterNote() ? ", in the files chosen" : ""}`;
+		return `${countText} in ${count(groups().length, "file")}${filterTail}${openTail}${scopeTail}`;
 	};
 
-	const dismissBtnStyle = {
-		flex: "none",
-		display: "inline-flex",
-		"align-items": "center",
-		"justify-content": "center",
-		width: "18px",
-		height: "18px",
-		padding: "0",
-		color: "var(--muted)",
-		"border-radius": "var(--radius-sm)",
-	} as const;
+	const replaceInFile = (path: string) => {
+		if (noReplace()) return notify(`${noReplace()}.`);
+		pendingReplaceTarget = { path };
+		void executeReplace(true);
+	};
 
-	const HitRow = (props: { line: LineHit }) => {
-		const first = () => props.line.matches[0]!;
+	const replaceInLine = (path: string, line: number) => {
+		if (noReplace()) return notify(`${noReplace()}.`);
+		pendingReplaceTarget = { path, line };
+		void executeReplace(true);
+	};
+
+	const openMatch = (line: LineHit, keep: boolean) => {
+		const first = line.matches[0]!;
+		setActiveHitKey(`${line.path}:${line.line}`);
+		if (asked()) recordHistory(asked());
+		void openFile(line.path, {
+			...(keep ? { keep: true } : { preview: true }),
+			reveal: { line: line.line, column: first.column, endLine: line.line, endColumn: first.column + first.length },
+		});
+	};
+
+	const openMatchToSide = async (line: LineHit) => {
+		const first = line.matches[0]!;
+		setActiveHitKey(`${line.path}:${line.line}`);
+		if (asked()) recordHistory(asked());
+		await openToSide(line.path);
+		await openFile(line.path, {
+			group: state.activeGroup,
+			keep: true,
+			reveal: { line: line.line, column: first.column, endLine: line.line, endColumn: first.column + first.length },
+		});
+	};
+
+	const openHitMenu = async (line: LineHit, at: Point) => {
+		const first = line.matches[0]!;
+		const canReplace = replacing() && !noReplace();
+		const entries: RowMenuEntry[] = [
+			{ label: "Open Match", value: "open", keys: "Enter" },
+			{ label: "Open to the Side", value: "side" },
+			"separator",
+			{ label: "Copy Line", value: "copy-line" },
+			{ label: "Copy Match", value: "copy-match" },
+			{ label: "Copy Path", value: "copy-path" },
+			{ label: "Copy Relative Path", value: "copy-rel" },
+			"separator",
+			...(canReplace ? [{ label: "Replace", value: "replace" }] : []),
+			{ label: "Dismiss", value: "dismiss", keys: "Del" },
+		];
+		const picked = await chooseFromMenu(`Match on line ${line.line}`, entries, at);
+		if (!picked) return;
+		if (picked === "open") openMatch(line, true);
+		else if (picked === "side") void openMatchToSide(line);
+		else if (picked === "copy-line") void copyTextLocal(line.text.trim(), "Copied matched line.");
+		else if (picked === "copy-match") {
+			const off = line.textOffset ?? 0;
+			const start = Math.max(0, first.column - 1 - off);
+			const matched = line.text.slice(start, start + first.length);
+			void copyTextLocal(matched, `Copied “${matched}”.`);
+		} else if (picked === "copy-path") void copyTextLocal(`${line.path}:${line.line}`, `Copied ${baseName(line.path)}:${line.line}`);
+		else if (picked === "copy-rel") void copyTextLocal(`${rel(line.path)}:${line.line}`, `Copied ${rel(line.path)}:${line.line}`);
+		else if (picked === "replace") replaceInLine(line.path, line.line);
+		else if (picked === "dismiss") dismissLine(line.path, line.line);
+	};
+
+	const openFileMenu = async (path: string, lines: readonly LineHit[], at: Point) => {
+		const canReplace = replacing() && !noReplace();
+		const entries: RowMenuEntry[] = [
+			{ label: "Open File", value: "open" },
+			{ label: "Open to the Side", value: "side" },
+			...(!isUntitled(path) ? [{ label: "Reveal in Explorer", value: "reveal" }] : []),
+			"separator",
+			{ label: "Copy Path", value: "copy-path" },
+			{ label: "Copy Relative Path", value: "copy-rel" },
+			{ label: "Copy File Name", value: "copy-name" },
+			{ label: "Copy All Matches in File", value: "copy-all" },
+			"separator",
+			...(canReplace ? [{ label: "Replace in File", value: "replace" }] : []),
+			{ label: "Dismiss", value: "dismiss", keys: "Del" },
+		];
+		const picked = await chooseFromMenu(`Results in ${baseName(path)}`, entries, at);
+		if (!picked) return;
+		if (picked === "open") void openFile(path, { keep: true });
+		else if (picked === "side") void openToSide(path);
+		else if (picked === "reveal") void import("./Explorer").then((m) => m.showInExplorer(path));
+		else if (picked === "copy-path") void copyTextLocal(path, `Copied ${path}`);
+		else if (picked === "copy-rel") void copyTextLocal(rel(path), `Copied ${rel(path)}`);
+		else if (picked === "copy-name") void copyTextLocal(displayName(path), `Copied ${displayName(path)}`);
+		else if (picked === "copy-all") {
+			const dump = lines.map((l) => `${l.line}: ${l.text.trim()}`).join("\n");
+			void copyTextLocal(dump, `Copied ${count(lines.length, "matched line", "matched lines")}.`);
+		} else if (picked === "replace") replaceInFile(path);
+		else if (picked === "dismiss") dismissFile(path);
+	};
+
+	const openFolderMenu = async (relDir: string, filePaths: readonly string[], at: Point) => {
+		const entries: RowMenuEntry[] = [
+			{ label: "Find in Folder…", value: "find" },
+			{ label: "Copy Relative Path", value: "copy-rel" },
+			"separator",
+			{ label: "Dismiss Folder", value: "dismiss", keys: "Del" },
+		];
+		const picked = await chooseFromMenu(`Folder ${relDir}`, entries, at);
+		if (!picked) return;
+		if (picked === "find") {
+			findInFolder(relDir);
+			if (typed()) void run({ include: folderScope(relDir).include, exclude: "", choosing: true, ticketScopeKey: null, openEditorsOnly: false });
+		} else if (picked === "copy-rel") void copyTextLocal(relDir, `Copied ${relDir}`);
+		else if (picked === "dismiss") dismissFiles(filePaths);
+	};
+
+	const onSearchShortcut = (e: KeyboardEvent) => {
+		if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+			const k = e.key.toLowerCase();
+			if (k === "c") {
+				e.preventDefault();
+				e.stopPropagation();
+				flip("caseSensitive", setCaseSensitive, caseSensitive());
+				return true;
+			}
+			if (k === "w") {
+				e.preventDefault();
+				e.stopPropagation();
+				flip("wholeWord", setWholeWord, wholeWord());
+				return true;
+			}
+			if (k === "r") {
+				e.preventDefault();
+				e.stopPropagation();
+				flip("regex", setRegex, regex());
+				return true;
+			}
+			if (k === "p" && replacing()) {
+				e.preventDefault();
+				e.stopPropagation();
+				setPreserveCase(!preserveCase());
+				return true;
+			}
+		}
+		if ((e.ctrlKey || e.metaKey) && e.altKey && !e.shiftKey && e.key === "Enter" && replacing()) {
+			e.preventDefault();
+			e.stopPropagation();
+			if (noReplace()) notify(`${noReplace()}.`);
+			else void replaceAll();
+			return true;
+		}
+		return false;
+	};
+
+	const IndentGuides = (props: { depth: number }) => (
+		<Show when={props.depth > 0}>
+			<For each={Array.from({ length: props.depth }, (_, i) => i)}>
+				{(idx) => <span class="search-guide" style={{ left: `${12 + idx * 14}px` }} aria-hidden="true" />}
+			</For>
+		</Show>
+	);
+
+	const HitRow = (props: { line: LineHit; depth: number }) => {
+		const rowKey = () => `${props.line.path}:${props.line.line}`;
 		/** The line's parts, each marked match with the column it starts at. */
 		const parts = () => {
 			const columns = markedColumns(props.line);
@@ -1525,18 +2054,31 @@ export function Search() {
 				? becomes(props.line)
 				: null,
 		);
+		const canReplace = () => replacing() && !noReplace();
 		return (
 			<Row
 				class="tree-row hit"
-				key={`${props.line.path}:${props.line.line}`}
-				style={{ "padding-left": "22px" }}
+				classList={{ selected: activeHitKey() === rowKey() }}
+				role="treeitem"
+				level={props.depth + 1}
+				selected={activeHitKey() === rowKey()}
+				key={rowKey()}
+				style={{ "padding-left": `${8 + props.depth * 14}px` }}
 				label={props.line.text.trim()}
 				title={`Line ${props.line.line}${props.line.matches.length > 1 ? `, ${props.line.matches.length} matches` : ""}: ${props.line.text.trim()}`}
 				// To stay or for a look, a result opens at its match.
-				onKeep={() => void openFile(props.line.path, { keep: true, reveal: { line: props.line.line, column: first().column, endLine: props.line.line, endColumn: first().column + first().length } })}
-				onActivate={() => void openFile(props.line.path, { preview: true, reveal: { line: props.line.line, column: first().column, endLine: props.line.line, endColumn: first().column + first().length } })}
+				onKeep={() => openMatch(props.line, true)}
+				onActivate={() => openMatch(props.line, false)}
+				onKey={(e) => {
+					if (e.key === "Delete") {
+						dismissLine(props.line.path, props.line.line);
+						return true;
+					}
+				}}
+				onMenu={(at) => void openHitMenu(props.line, at)}
 			>
-				<span class="meta">{props.line.line}</span>
+				<IndentGuides depth={props.depth} />
+				<span class="search-line-num">{props.line.line}</span>
 				<span class="label">
 					{/* A dozen characters of what comes before: in a side panel's width, more would push the match itself out of sight. */}
 					<For each={parts()}>
@@ -1555,28 +2097,316 @@ export function Search() {
 						}
 					</For>
 				</span>
-				<button
-					type="button"
-					class="search-dismiss"
-					style={dismissBtnStyle}
-					tabindex={-1}
-					title="Dismiss this result from list and Replace all"
-					aria-label={`Dismiss match on line ${props.line.line}`}
-					onClick={(e) => {
-						e.stopPropagation();
-						dismissLine(props.line.path, props.line.line);
-					}}
-				>
-					<Icon name="close" />
-				</button>
+				<span class="search-row-actions">
+					<Show when={canReplace()}>
+						<button
+							type="button"
+							class="search-row-act"
+							tabindex={-1}
+							title={`Replace match on line ${props.line.line}`}
+							aria-label={`Replace match on line ${props.line.line}`}
+							onClick={(e) => {
+								e.stopPropagation();
+								replaceInLine(props.line.path, props.line.line);
+							}}
+						>
+							<Icon name="replace" />
+						</button>
+					</Show>
+					<button
+						type="button"
+						class="search-dismiss search-row-act"
+						tabindex={-1}
+						title="Dismiss (Delete)"
+						aria-label={`Dismiss match on line ${props.line.line}`}
+						onClick={(e) => {
+							e.stopPropagation();
+							dismissLine(props.line.path, props.line.line);
+						}}
+					>
+						<Icon name="close" />
+					</button>
+				</span>
 			</Row>
 		);
+	};
+
+	const FilePlaces = (props: { list: LineHit[]; depth: number }) => {
+		const grouped = createMemo(() => byPlace(props.list));
+		return (
+			<For each={grouped()} keyed={([where]) => where}>
+				{(entry) => {
+					const where = () => entry()[0];
+					const lines = () => entry()[1];
+					return (
+						<Show
+							when={where()}
+							fallback={
+								<For each={lines()} keyed={(line) => `${line.path}:${line.line}`}>
+									{(line) => <HitRow line={line()} depth={props.depth} />}
+								</For>
+							}
+						>
+							<div class="tree-row place" style={{ "padding-left": `${8 + props.depth * 14}px` }} title={where()} aria-hidden="true">
+								<IndentGuides depth={props.depth} />
+								<span class="label">{where()}</span>
+							</div>
+							<For each={lines()} keyed={(line) => `${line.path}:${line.line}`}>
+								{(line) => <HitRow line={line()} depth={props.depth} />}
+							</For>
+						</Show>
+					);
+				}}
+			</For>
+		);
+	};
+
+	const FileGroupView = (props: { path: string; relPath: string; list: LineHit[]; depth: number; showDir: boolean }) => {
+		const foldKey = () => `file:${props.path}`;
+		const open = () => !isCollapsed(foldKey());
+		const split = () => splitResultPath(props.relPath);
+		const canReplace = () => replacing() && !noReplace();
+		return (
+			<>
+				<Row
+					class="tree-row file-head"
+					role="treeitem"
+					level={props.depth + 1}
+					expanded={open()}
+					key={foldKey()}
+					style={{ "padding-left": `${6 + props.depth * 14}px` }}
+					label={split().name}
+					title={props.path}
+					onActivate={() => toggleCollapsed(foldKey())}
+					onKeep={() => {
+						void openFile(props.path, { keep: true });
+						return true;
+					}}
+					onToggle={() => toggleCollapsed(foldKey())}
+					onKey={(e) => {
+						if (e.key === "Delete") {
+							dismissFile(props.path);
+							return true;
+						}
+					}}
+					onMenu={(at) => void openFileMenu(props.path, props.list, at)}
+				>
+					<IndentGuides depth={props.depth} />
+					<Icon name={open() ? "chevron-down" : "chevron-right"} class="twisty" />
+					<FileMark name={props.path} />
+					<span class="search-file-label">
+						<span class="search-file-name">{split().name}</span>
+						<Show when={props.showDir && split().dir}>
+							<span class="search-file-dir">{split().dir}</span>
+						</Show>
+					</span>
+					<span class="search-count-badge" title={`${count(matchesIn(props.list), "match", "matches")} in ${split().name}`}>
+						{matchesIn(props.list)}
+					</span>
+					<span class="search-row-actions">
+						<Show when={canReplace()}>
+							<button
+								type="button"
+								class="search-row-act"
+								tabindex={-1}
+								title={`Replace all in ${split().name}`}
+								aria-label={`Replace all matches in ${split().name}`}
+								onClick={(e) => {
+									e.stopPropagation();
+									replaceInFile(props.path);
+								}}
+							>
+								<Icon name="replace-all" />
+							</button>
+						</Show>
+						<button
+							type="button"
+							class="search-dismiss search-row-act"
+							tabindex={-1}
+							title={`Dismiss ${props.relPath} (Delete)`}
+							aria-label={`Dismiss ${props.relPath} from results`}
+							onClick={(e) => {
+								e.stopPropagation();
+								dismissFile(props.path);
+							}}
+						>
+							<Icon name="close" />
+						</button>
+					</span>
+				</Row>
+				<Show when={open()}>
+					<FilePlaces list={props.list} depth={props.depth + 1} />
+				</Show>
+			</>
+		);
+	};
+
+	const TreeNodeView = (props: { node: SearchTreeNode; depth: number }) => (
+		<Show
+			when={props.node.kind === "folder" ? props.node : null}
+			fallback={(() => {
+				const file = () => (props.node as Extract<SearchTreeNode, { kind: "file" }>).file;
+				return <FileGroupView path={file().path} relPath={file().relPath} list={file().lines} depth={props.depth} showDir={false} />;
+			})()}
+		>
+			{(folder) => {
+				const open = () => !isCollapsed(folder().key);
+				return (
+					<>
+						<Row
+							class="tree-row search-folder-head"
+							role="treeitem"
+							level={props.depth + 1}
+							expanded={open()}
+							key={folder().key}
+							style={{ "padding-left": `${6 + props.depth * 14}px` }}
+							label={folder().name}
+							title={`${folder().relDir} (${count(folder().matchCount, "result")} in ${count(folder().fileCount, "file")})`}
+							onActivate={() => toggleCollapsed(folder().key)}
+							onToggle={() => toggleCollapsed(folder().key)}
+							onKey={(e) => {
+								if (e.key === "Delete") {
+									dismissFiles(folder().filePaths);
+									return true;
+								}
+							}}
+							onMenu={(at) => void openFolderMenu(folder().relDir, folder().filePaths, at)}
+						>
+							<IndentGuides depth={props.depth} />
+							<Icon name={open() ? "chevron-down" : "chevron-right"} class="twisty" />
+							<FileMark name={folder().name} folder={{ open: open() }} />
+							<span class="search-folder-name">{folder().name}</span>
+							<span class="search-count-badge" title={`${count(folder().matchCount, "result")} in ${count(folder().fileCount, "file")}`}>
+								{folder().matchCount}
+							</span>
+							<span class="search-row-actions">
+								<button
+									type="button"
+									class="search-dismiss search-row-act"
+									tabindex={-1}
+									title={`Dismiss ${folder().relDir} (Delete)`}
+									aria-label={`Dismiss folder ${folder().relDir} from results`}
+									onClick={(e) => {
+										e.stopPropagation();
+										dismissFiles(folder().filePaths);
+									}}
+								>
+									<Icon name="close" />
+								</button>
+							</span>
+						</Row>
+						<Show when={open()}>
+							<For each={folder().children} keyed={(child) => child.key}>
+								{(child) => <TreeNodeView node={child()} depth={props.depth + 1} />}
+							</For>
+						</Show>
+					</>
+				);
+			}}
+		</Show>
+	);
+
+	const hasAnyQueryOrResults = () => Boolean(typed() || hits().length || status() !== "idle");
+
+	const filterMenuItems = (): MenuItem[] => {
+		const ticket = activeTicketScope();
+		const items: MenuItem[] = [
+			{ label: "All files", checked: scopeActive("", ""), run: () => applyScope("", "") },
+			{ label: "Code only", checked: inCodeScope(), run: () => applyScope("", codeExcludeGlob()) },
+			{ label: "Docs only", checked: inDocsScope(), run: () => applyScope(docsIncludeGlob(), "") },
+		];
+		if (ticket) {
+			items.push({
+				label: `This ticket (${ticket.key})`,
+				checked: ticketScopeKey() === ticket.key,
+				run: () => applyTicketScope(ticket.key),
+			});
+		}
+		const replaceBlock = noReplace();
+		items.push(
+			"separator",
+			{
+				label: "Safe docs (protect YAML, links & JSON)",
+				checked: safeDocs(),
+				run: () => setSafeDocs(!safeDocs()),
+			},
+			{
+				label: "Preview replace changes…",
+				disabled: Boolean(replaceBlock),
+				why: replaceBlock || undefined,
+				run: () => void previewReplace(),
+			},
+		);
+		if (hasCustomFilter() || include().trim() || exclude().trim()) {
+			items.push("separator", {
+				label: "Clear Scope & Options",
+				run: () => {
+					setTicketScopeKey(null);
+					setOpenEditorsOnly(false);
+					setInclude("");
+					setExclude("");
+					setChoosing(false);
+					setUseExcludes(true);
+					setSafeDocs(true);
+					if (typed()) {
+						void run({
+							ticketScopeKey: null,
+							openEditorsOnly: false,
+							include: "",
+							exclude: "",
+							choosing: false,
+							useExcludes: true,
+						});
+					}
+				},
+			});
+		}
+		return items;
 	};
 
 	return (
 		<div class="panel-body" data-panel="search">
 			<div class="panel-title">
 				<span>Search</span>
+				<div class="search-title-actions">
+					<IconButton
+						label="Refresh search"
+						title="Refresh"
+						icon="refresh"
+						disabled={!typed() && status() === "idle"}
+						onClick={() => void run({ query: typed() })}
+					/>
+					<IconButton
+						label="Clear search results"
+						title="Clear Search Results"
+						icon="clear-all"
+						disabled={!hasAnyQueryOrResults()}
+						onClick={clearSearch}
+					/>
+					<Menu
+						floating
+						class={hasCustomFilter() ? "docs-filter-menu on" : "docs-filter-menu"}
+						label={hasCustomFilter() ? "Search scope and options: a scope or option is active" : "Search scope and options"}
+						title="Scope (All, Code, Docs, Ticket), Safe docs & Replace preview"
+						items={filterMenuItems}
+					>
+						<Icon name={hasCustomFilter() ? "filter-filled" : "filter"} />
+					</Menu>
+					<IconButton
+						label={treeView() ? "View search results as list" : "View search results as tree"}
+						title={treeView() ? "View as List" : "View as Tree"}
+						icon={treeView() ? "list-flat" : "list-tree"}
+						disabled={!groups().length}
+						onClick={toggleViewMode}
+					/>
+					<IconButton
+						label={allCollapsed() ? "Expand all results" : "Collapse all results"}
+						title={allCollapsed() ? "Expand All" : "Collapse All"}
+						icon={allCollapsed() ? "expand-all" : "collapse-all"}
+						disabled={!groups().length}
+						onClick={toggleCollapseAll}
+					/>
+				</div>
 			</div>
 			<form
 				class="search-form"
@@ -1584,6 +2414,7 @@ export function Search() {
 				onSubmit={(e) => (e.preventDefault(), void run())}
 				// Trigger search on Enter for search/include/exclude inputs, never for Replace With or checkboxes.
 				onKeyDown={(e) => {
+					if (onSearchShortcut(e)) return;
 					if (e.key !== "Enter" || !(e.target instanceof HTMLInputElement)) return;
 					if (e.target.type === "checkbox" || e.target.hasAttribute("data-replace-input")) {
 						e.preventDefault();
@@ -1593,132 +2424,260 @@ export function Search() {
 					void run();
 				}}
 			>
-				<div class="search-row">
-					<button type="button" class="search-fold" title={replacing() ? "Hide the replace row" : "Replace across files"} aria-label="Replace across files" aria-expanded={replacing() ? "true" : "false"} onClick={() => setReplacing(!replacing())}>
+				<div class="search-widget">
+					<button
+						type="button"
+						class="search-fold"
+						title={replacing() ? "Toggle Replace (Hide)" : "Toggle Replace"}
+						aria-label="Replace across files"
+						aria-expanded={replacing() ? "true" : "false"}
+						onClick={() => setReplacing(!replacing())}
+					>
 						<Icon name={replacing() ? "chevron-down" : "chevron-right"} />
 					</button>
-					<input
-						ref={(el) => ((input = el), queueMicrotask(() => el.focus()))}
-						value={typed()}
-						onInput={(e) => {
-							historyIdx = -1;
-							setTyped(e.currentTarget.value);
-						}}
-						id="search-input"
-						data-autofocus=""
-						aria-label="Search the workspace"
-						placeholder="Search the workspace"
-						onKeyDown={(e) => {
-							const el = e.currentTarget;
-							const hist = queryHistory();
-							if (e.key === "ArrowUp" && hist.length && (historyIdx >= 0 || !el.value || (el.selectionStart === 0 && el.selectionEnd === 0))) {
-								e.preventDefault();
-								if (historyIdx < 0) historyDraft = el.value;
-								historyIdx = Math.min(hist.length - 1, historyIdx + 1);
-								const nextVal = hist[historyIdx] ?? "";
-								el.value = nextVal;
-								setTyped(nextVal);
-								return;
-							}
-							if (e.key === "ArrowDown" && historyIdx >= 0) {
-								e.preventDefault();
-								historyIdx--;
-								const nextVal = historyIdx < 0 ? historyDraft : (hist[historyIdx] ?? "");
-								el.value = nextVal;
-								setTyped(nextVal);
-								return;
-							}
-							if (e.key === "ArrowDown" && focusRowsBelow(el)) e.preventDefault();
-						}}
-					/>
-					<IconButton label="Match case" glyph="Aa" pressed={caseSensitive()} onClick={() => flip("caseSensitive", setCaseSensitive, caseSensitive())} />
-					<IconButton label="Match whole word" title="Whole word" glyph="ab" pressed={wholeWord()} onClick={() => flip("wholeWord", setWholeWord, wholeWord())} />
-					<IconButton label="Use a regular expression" title="Regular expression" glyph=".*" pressed={regex()} onClick={() => flip("regex", setRegex, regex())} />
-					<IconButton
-						label="Choose which files to search"
-						title="Which files: to include, to exclude"
-						icon="ellipsis"
-						pressed={choosing()}
-						onClick={() => {
-							const nextChoosing = !choosing();
-							setChoosing(nextChoosing);
-							// Patterns that were narrowing the results stop when their boxes go, and start when they come back.
-							if (status() !== "idle" && (include().trim() || exclude().trim())) void run({ choosing: nextChoosing });
-						}}
-					/>
+					<div class="search-inputs">
+						<div class="search-row">
+							<div class={["search-input-box", { invalid: status() === "failed" }]}>
+								<input
+									ref={(el) => ((input = el), queueMicrotask(() => el.focus()))}
+									value={typed()}
+									onInput={(e) => {
+										historyIdx = -1;
+										const val = e.currentTarget.value;
+										setTyped(val);
+										scheduleSearch({ query: val });
+									}}
+									onBlur={() => {
+										if (typed().trim() && asked() === typed()) recordHistory(typed());
+									}}
+									id="search-input"
+									data-autofocus=""
+									spellcheck="false"
+									autocomplete="off"
+									aria-label="Search"
+									placeholder="Search"
+									onKeyDown={(e) => {
+										const el = e.currentTarget;
+										const hist = queryHistory();
+										if (
+											(e.key === "ArrowUp" || (e.altKey && e.key === "ArrowUp")) &&
+											hist.length &&
+											(e.altKey || historyIdx >= 0 || !el.value || (el.selectionStart === 0 && el.selectionEnd === 0))
+										) {
+											e.preventDefault();
+											if (historyIdx < 0) historyDraft = el.value;
+											historyIdx = Math.min(hist.length - 1, historyIdx + 1);
+											const nextVal = hist[historyIdx] ?? "";
+											el.value = nextVal;
+											setTyped(nextVal);
+											scheduleSearch({ query: nextVal }, 120);
+											return;
+										}
+										if ((e.key === "ArrowDown" || (e.altKey && e.key === "ArrowDown")) && historyIdx >= 0) {
+											e.preventDefault();
+											historyIdx--;
+											const nextVal = historyIdx < 0 ? historyDraft : (hist[historyIdx] ?? "");
+											el.value = nextVal;
+											setTyped(nextVal);
+											scheduleSearch({ query: nextVal }, 120);
+											return;
+										}
+										if (e.key === "ArrowDown" && focusRowsBelow(el)) e.preventDefault();
+									}}
+								/>
+								<div class="search-inline-toggles">
+									<IconButton
+										label="Match case"
+										title="Match Case (Alt+C)"
+										icon="case-sensitive"
+										pressed={caseSensitive()}
+										onClick={() => flip("caseSensitive", setCaseSensitive, caseSensitive())}
+									/>
+									<IconButton
+										label="Match whole word"
+										title="Match Whole Word (Alt+W)"
+										icon="whole-word"
+										pressed={wholeWord()}
+										onClick={() => flip("wholeWord", setWholeWord, wholeWord())}
+									/>
+									<IconButton
+										label="Use a regular expression"
+										title="Use Regular Expression (Alt+R)"
+										icon="regex"
+										pressed={regex()}
+										onClick={() => flip("regex", setRegex, regex())}
+									/>
+								</div>
+							</div>
+						</div>
+						<Show when={replacing()}>
+							<div class="search-row search-replace-row">
+								<div class="search-input-box">
+									<input
+										data-replace-input=""
+										spellcheck="false"
+										autocomplete="off"
+										aria-label="Replace"
+										placeholder="Replace"
+										title={regex() ? "Replace ($1 for capture group, $& for whole match)" : "Replace"}
+										value={replacement()}
+										onInput={(e) => setReplacement(e.currentTarget.value)}
+									/>
+									<div class="search-inline-toggles">
+										<IconButton
+											label="Preserve Case"
+											title="Preserve Case (Alt+P)"
+											icon="preserve-case"
+											pressed={preserveCase()}
+											onClick={() => setPreserveCase(!preserveCase())}
+										/>
+									</div>
+								</div>
+								{/* Not the button's own "disabled": it keeps the keyboard, and says why it does nothing. */}
+								<button
+									type="button"
+									class="search-replace search-replace-icon"
+									aria-label="Replace all"
+									aria-disabled={noReplace() ? "true" : undefined}
+									title={noReplace() || "Replace All (Ctrl+Alt+Enter)"}
+									onClick={() => (noReplace() ? notify(`${noReplace()}.`) : void replaceAll())}
+								>
+									<Icon name="replace-all" />
+								</button>
+							</div>
+						</Show>
+					</div>
 				</div>
-				<Show when={replacing()}>
-					<div class="search-row">
-						<span class="search-fold" aria-hidden="true" />
-						<input data-replace-input="" aria-label="Replace with" placeholder={regex() ? "Replace with ($1 is the first group)" : "Replace with"} value={replacement()} onInput={(e) => setReplacement(e.currentTarget.value)} />
+				<Show when={!choosing()}>
+					<div class="search-details-seam">
+						<Show when={activeScopeChip() || openEditorsOnly() || !useExcludes()}>
+							<div class="docs-filter-chips" role="group" aria-label="Active search scope">
+								<Show when={activeScopeChip()}>
+									{(chip) => (
+										<button type="button" class="docs-tag-active" title={chip().title} onClick={chip().clear}>
+											<span>{chip().label}</span>
+											<Icon name="close" />
+										</button>
+									)}
+								</Show>
+								<Show when={openEditorsOnly()}>
+									<button type="button" class="docs-tag-active" title="Searching open editors only. Click to search all files." onClick={toggleOpenEditorsOnly}>
+										<span>Open Editors</span>
+										<Icon name="close" />
+									</button>
+								</Show>
+								<Show when={!useExcludes()}>
+									<button type="button" class="docs-tag-active" title="Searching ignored and excluded files. Click to restore default excludes." onClick={toggleUseExcludes}>
+										<span>Ignored included</span>
+										<Icon name="close" />
+									</button>
+								</Show>
+							</div>
+						</Show>
 						<button
 							type="button"
-							class="search-replace"
-							aria-disabled={noReplace() ? "true" : undefined}
-							title={noReplace() || "Preview affected files and sample before/after changes before replacing"}
-							onClick={() => (noReplace() ? notify(`${noReplace()}.`) : void previewReplace())}
+							class="search-details-toggle"
+							aria-label="Toggle Search Details"
+							aria-expanded="false"
+							title="Toggle Search Details (files to include/exclude)"
+							onClick={toggleDetails}
 						>
-							Preview…
+							<Icon name="ellipsis" />
 						</button>
-						{/* Not the button's own "disabled": it keeps the keyboard, and says why it does nothing. */}
-						<button type="button" class="search-replace" aria-disabled={noReplace() ? "true" : undefined} title={noReplace() || "Replace every match listed below, after asking"} onClick={() => (noReplace() ? notify(`${noReplace()}.`) : void replaceAll())}>
-							Replace all
-						</button>
-					</div>
-					<div class="search-row search-safe-row">
-						<span class="search-fold" aria-hidden="true" />
-						<label
-							class="check search-safe-toggle"
-							title="Skip matches in YAML frontmatter keys and Markdown link targets ](...) / [[...]], and validate .plan.json JSON syntax before writing"
-						>
-							<input type="checkbox" checked={safeDocs()} onChange={(e) => setSafeDocs(e.currentTarget.checked)} />
-							<span>Safe docs (protect YAML keys, links & JSON)</span>
-						</label>
 					</div>
 				</Show>
 				<Show when={choosing()}>
-					<div class="search-row">
-						<span class="search-fold" aria-hidden="true" />
-						<input aria-label="Files to include" title="Patterns with commas between: *.ssl, src/DueDates, docs/**/*.md. Empty for every file." placeholder="Files to include: *.ssl, src" value={include()} onInput={(e) => (setTicketScopeKey(null), setInclude(e.currentTarget.value))} />
-					</div>
-					<div class="search-row">
-						<span class="search-fold" aria-hidden="true" />
-						<input aria-label="Files to exclude" title="Patterns with commas between: tests, *.md. These are left out even when included above." placeholder="Files to exclude: tests, *.md" value={exclude()} onInput={(e) => (setTicketScopeKey(null), setExclude(e.currentTarget.value))} />
+					<div class="search-details">
+						<div class="search-detail-field">
+							<div class="search-field-head">
+								<label class="search-field-label" for="search-include-input">
+									files to include
+								</label>
+								<button
+									type="button"
+									class="search-details-toggle"
+									aria-label="Toggle Search Details"
+									aria-expanded="true"
+									title="Hide files to include/exclude"
+									onClick={toggleDetails}
+								>
+									<Icon name="ellipsis" />
+								</button>
+							</div>
+							<div class="search-input-box">
+								<input
+									id="search-include-input"
+									spellcheck="false"
+									autocomplete="off"
+									aria-label="Files to include"
+									title="Patterns with commas between: *.ssl, src/DueDates, docs/**/*.md. Empty for every file."
+									placeholder="e.g. *.ssl, src/**/include"
+									value={include()}
+									onInput={(e) => {
+										const val = e.currentTarget.value;
+										setTicketScopeKey(null);
+										setInclude(val);
+										if (typed()) scheduleSearch({ ticketScopeKey: null, include: val }, 280);
+									}}
+								/>
+								<div class="search-inline-toggles">
+									<IconButton
+										label="Search only in Open Editors"
+										title="Search only in Open Editors"
+										icon="book"
+										pressed={openEditorsOnly()}
+										onClick={toggleOpenEditorsOnly}
+									/>
+								</div>
+							</div>
+						</div>
+						<div class="search-detail-field">
+							<label class="search-field-label" for="search-exclude-input">
+								files to exclude
+							</label>
+							<div class="search-input-box">
+								<input
+									id="search-exclude-input"
+									spellcheck="false"
+									autocomplete="off"
+									aria-label="Files to exclude"
+									title="Patterns with commas between: tests, *.md. These are left out even when included above."
+									placeholder=""
+									value={exclude()}
+									onInput={(e) => {
+										const val = e.currentTarget.value;
+										setTicketScopeKey(null);
+										setExclude(val);
+										if (typed()) scheduleSearch({ ticketScopeKey: null, exclude: val }, 280);
+									}}
+								/>
+								<div class="search-inline-toggles">
+									<IconButton
+										label="Use Exclude Settings and Ignore Files"
+										title={
+											useExcludes()
+												? "Use Exclude Settings and Ignore Files (On — skipping .gitignore, dist, build, node_modules)"
+												: "Use Exclude Settings and Ignore Files (Off — searching ignored and excluded files)"
+										}
+										icon="exclude"
+										pressed={useExcludes()}
+										onClick={toggleUseExcludes}
+									/>
+								</div>
+							</div>
+						</div>
+						<Show when={activeScopeChip()}>
+							{(chip) => (
+								<div class="docs-filter-chips" role="group" aria-label="Active search scope">
+									<button type="button" class="docs-tag-active" title={chip().title} onClick={chip().clear}>
+										<span>{chip().label}</span>
+										<Icon name="close" />
+									</button>
+								</div>
+							)}
+						</Show>
 					</div>
 				</Show>
-				<div class="search-scopes" role="group" aria-label="Quick search scope">
-					<button type="button" class={{ on: scopeActive("", "") }} title="Search all workspace files" onClick={() => applyScope("", "")}>
-						All
-					</button>
-					<button
-						type="button"
-						class={{ on: scopeActive("", codeExcludeGlob()) }}
-						title="Search code files only (exclude docs, design, schema, and catalogs)"
-						onClick={() => applyScope("", codeExcludeGlob())}
-					>
-						Code
-					</button>
-					<button
-						type="button"
-						class={{ on: scopeActive(docsIncludeGlob(), "") }}
-						title="Search project documentation, plans, schema, and Markdown files"
-						onClick={() => applyScope(docsIncludeGlob(), "")}
-					>
-						Docs
-					</button>
-					<Show when={activeTicketScope()}>
-						{(scope) => (
-							<button
-								type="button"
-								class={{ on: ticketScopeKey() === scope().key }}
-								title={scope().tip}
-								onClick={() => applyTicketScope(scope().key)}
-							>
-								{scope().key}
-							</button>
-						)}
-					</Show>
-				</div>
 				<Show when={showDocChips()}>
 					<div class="search-doc-tokens" role="group" aria-label="Document metadata filter chips">
 						<For each={topTags()}>
@@ -1762,73 +2721,46 @@ export function Search() {
 					</div>
 				</Show>
 			</form>
-			<p class={["hint", { warn: status() === "failed" }]} role="status">
-				{summary()}
-			</p>
-			<Rows label="Search results">
-				<For each={groups()} keyed={([path]) => path}>
-					{(group) => {
-						const path = () => group()[0];
-						const list = () => group()[1];
-						const places = createMemo(() => byPlace(list()));
-						return (
-							<RowGroup
-								headClass="tree-row file-head"
-								title={path()}
-								head={
-									<>
-										<FileMark name={path()} />
-										<span class="label">{rel(path())}</span>
-										<span class="meta" title={count(matchesIn(list()), "match", "matches") + " in this file"}>
-											{matchesIn(list())}
-										</span>
-										<button
-											type="button"
-											class="search-dismiss"
-											style={dismissBtnStyle}
-											tabindex={-1}
-											title={`Dismiss ${rel(path())} from results and Replace all`}
-											aria-label={`Dismiss ${rel(path())} from results`}
-											onClick={(e) => {
-												e.stopPropagation();
-												dismissFile(path());
-											}}
-										>
-											<Icon name="close" />
-										</button>
-									</>
-								}
-							>
-								<For each={places()} keyed={([where]) => where}>
-									{(place) => {
-										const where = () => place()[0];
-										const lines = () => place()[1];
-										return (
-											<Show
-												when={where()}
-												fallback={
-													<For each={lines()} keyed={(line) => `${line.path}:${line.line}`}>
-														{(line) => <HitRow line={line()} />}
-													</For>
-												}
-											>
-												<div role="group" aria-label={where()}>
-													<div class="tree-row place" style={{ "padding-left": "16px" }} title={where()} aria-hidden="true">
-														<span class="label">{where()}</span>
-													</div>
-													<For each={lines()} keyed={(line) => `${line.path}:${line.line}`}>
-														{(line) => <HitRow line={line()} />}
-													</For>
-												</div>
-											</Show>
-										);
-									}}
-								</For>
-							</RowGroup>
-						);
-					}}
-				</For>
-			</Rows>
+			<div class={["search-progress", { busy: status() === "busy" }]} aria-hidden="true">
+				<div class="search-progress-bar" />
+			</div>
+			<Show when={status() === "failed"}>
+				<div class="search-error-banner" role="alert">
+					<Icon name="error" />
+					<span>{summary()}</span>
+				</div>
+			</Show>
+			<Show when={status() !== "failed" && status() !== "idle"}>
+				<div class="search-status-bar" role="status">
+					<span class="search-status-text">{summary()}</span>
+					<Show when={dismissedHitCount() > 0}>
+						<button type="button" class="link search-status-action" onClick={restoreDismissed}>
+							Restore {dismissedHitCount()}
+						</button>
+					</Show>
+					<Show when={status() === "done" && !visibleHits().length && !dismissedHitCount() && (narrowed() || switchesOn().length > 0)}>
+						<button type="button" class="link search-status-action" onClick={clearAllFilters}>
+							Clear filters
+						</button>
+					</Show>
+				</div>
+			</Show>
+			<div class="search-results-wrap" onKeyDown={(e) => void onSearchShortcut(e)}>
+				<Rows role="tree" label="Search results" class="tree search-results">
+					<Show
+						when={treeView()}
+						fallback={
+							<For each={fileGroups()} keyed={(fg) => fg.path}>
+								{(fg) => <FileGroupView path={fg().path} relPath={fg().relPath} list={fg().lines} depth={0} showDir={true} />}
+							</For>
+						}
+					>
+						<For each={searchTree()} keyed={(node) => node.key}>
+							{(node) => <TreeNodeView node={node()} depth={0} />}
+						</For>
+					</Show>
+				</Rows>
+			</div>
 		</div>
 	);
 }

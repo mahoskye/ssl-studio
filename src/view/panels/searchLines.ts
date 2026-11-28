@@ -449,3 +449,167 @@ export function shortfallCount(shortfall: Shortfall, shown: string, hits: number
  */
 export const timedOutEmpty = (asked: string, where = "") =>
 	`Nothing found for “${asked}”${where} in the files read before the search ran out of time: it did not get to every file. Look in fewer files, and search again.`;
+
+// --- VS Code-style result presentation: filename-first split, trail formatting, compacted folder tree, F4 stepping ---
+
+/** Splits a workspace-relative path into its filename (shown first) and quiet parent directory. */
+export function splitResultPath(relPath: string): { name: string; dir: string } {
+	const norm = relPath.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+	const slash = norm.lastIndexOf("/");
+	if (slash < 0) return { name: norm || relPath, dir: "" };
+	return { name: norm.slice(slash + 1), dir: norm.slice(0, slash) };
+}
+
+/**
+ * Formats a breadcrumb trail (Markdown headings or SSL region › procedure) for a narrow panel.
+ * When `dropRootTitle` is set (Markdown H1 document title) and deeper headings exist, the redundant
+ * document title is dropped so subsections stay legible instead of truncating to the same H1 twice.
+ */
+export function formatPlaceTrail(trail: readonly string[], options: { dropRootTitle?: boolean } = {}): string {
+	const clean = trail.map((s) => s.trim()).filter(Boolean);
+	if (!clean.length) return "";
+	const shown = options.dropRootTitle && clean.length > 1 ? clean.slice(1) : clean;
+	return shown.join(" › ");
+}
+
+export type SearchFileGroup = {
+	path: string;
+	relPath: string;
+	lines: LineHit[];
+	matchCount: number;
+};
+
+export type SearchTreeFolder = {
+	kind: "folder";
+	key: string;
+	name: string;
+	relDir: string;
+	children: SearchTreeNode[];
+	filePaths: string[];
+	fileCount: number;
+	matchCount: number;
+};
+
+export type SearchTreeFile = {
+	kind: "file";
+	key: string;
+	name: string;
+	file: SearchFileGroup;
+};
+
+export type SearchTreeNode = SearchTreeFolder | SearchTreeFile;
+
+type MutableDir = {
+	segment: string;
+	relDir: string;
+	dirs: Map<string, MutableDir>;
+	files: SearchFileGroup[];
+};
+
+/**
+ * Builds a VS Code-style compacted folder tree from flat file result groups:
+ * single-child folder chains (e.g. `src` containing only `DueDates`) compact into `src/DueDates`,
+ * folders sort before files, and each folder rolls up its descendant file paths and match counts.
+ */
+export function buildSearchTree(files: readonly SearchFileGroup[]): SearchTreeNode[] {
+	const root: MutableDir = { segment: "", relDir: "", dirs: new Map(), files: [] };
+	for (const file of files) {
+		const norm = file.relPath.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+		const parts = norm.split("/").filter(Boolean);
+		if (parts.length <= 1) {
+			root.files.push(file);
+			continue;
+		}
+		let cur = root;
+		let rel = "";
+		for (let i = 0; i < parts.length - 1; i++) {
+			const seg = parts[i]!;
+			rel = rel ? `${rel}/${seg}` : seg;
+			let next = cur.dirs.get(seg);
+			if (!next) {
+				next = { segment: seg, relDir: rel, dirs: new Map(), files: [] };
+				cur.dirs.set(seg, next);
+			}
+			cur = next;
+		}
+		cur.files.push(file);
+	}
+
+	const cmp = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: "base" });
+
+	const buildDir = (dir: MutableDir): SearchTreeFolder => {
+		let cur = dir;
+		let name = cur.segment;
+		while (cur.files.length === 0 && cur.dirs.size === 1) {
+			const only = cur.dirs.values().next().value!;
+			name = `${name}/${only.segment}`;
+			cur = only;
+		}
+		const folderChildren = [...cur.dirs.values()].sort((a, b) => cmp(a.segment, b.segment)).map(buildDir);
+		const fileChildren: SearchTreeFile[] = [...cur.files]
+			.sort((a, b) => cmp(splitResultPath(a.relPath).name, splitResultPath(b.relPath).name))
+			.map((file) => ({
+				kind: "file",
+				key: `file:${file.path}`,
+				name: splitResultPath(file.relPath).name,
+				file,
+			}));
+		const children: SearchTreeNode[] = [...folderChildren, ...fileChildren];
+		const filePaths: string[] = [];
+		let matchCount = 0;
+		for (const child of children) {
+			if (child.kind === "folder") {
+				filePaths.push(...child.filePaths);
+				matchCount += child.matchCount;
+			} else {
+				filePaths.push(child.file.path);
+				matchCount += child.file.matchCount;
+			}
+		}
+		return {
+			kind: "folder",
+			key: `dir:${cur.relDir}`,
+			name,
+			relDir: cur.relDir,
+			children,
+			filePaths,
+			fileCount: filePaths.length,
+			matchCount,
+		};
+	};
+
+	const topFolders = [...root.dirs.values()].sort((a, b) => cmp(a.segment, b.segment)).map(buildDir);
+	const topFiles: SearchTreeFile[] = [...root.files]
+		.sort((a, b) => cmp(splitResultPath(a.relPath).name, splitResultPath(b.relPath).name))
+		.map((file) => ({
+			kind: "file",
+			key: `file:${file.path}`,
+			name: splitResultPath(file.relPath).name,
+			file,
+		}));
+	return [...topFolders, ...topFiles];
+}
+
+/** Collects every collapsible folder key in a built search tree. */
+export function collectTreeFolderKeys(nodes: readonly SearchTreeNode[]): string[] {
+	const keys: string[] = [];
+	const walk = (list: readonly SearchTreeNode[]) => {
+		for (const node of list) {
+			if (node.kind === "folder") {
+				keys.push(node.key);
+				walk(node.children);
+			}
+		}
+	};
+	walk(nodes);
+	return keys;
+}
+
+/** Steps forward (`+1`, F4) or backward (`-1`, Shift+F4) through visible search result keys, wrapping around. */
+export function stepResultKey(keys: readonly string[], current: string | null, step: 1 | -1): string | null {
+	if (!keys.length) return null;
+	if (!current) return step === 1 ? keys[0]! : keys[keys.length - 1]!;
+	const idx = keys.indexOf(current);
+	if (idx < 0) return step === 1 ? keys[0]! : keys[keys.length - 1]!;
+	return keys[(idx + step + keys.length) % keys.length]!;
+}

@@ -8,6 +8,7 @@ import {
 	lstatSync,
 	mkdirSync,
 	readdirSync,
+	readFileSync,
 	readlinkSync,
 	realpathSync,
 	renameSync,
@@ -33,7 +34,7 @@ import {
 	type OpenText,
 	type SearchOptions,
 } from "../shared/searchPattern";
-import { createFileFilter } from "../shared/fileGlob";
+import { createFileFilter, globMatcher } from "../shared/fileGlob";
 import { replaceSafeInText } from "../shared/menuBar";
 import { renameReplacing } from "./atomic";
 import { decode, encode, encodingOf, isEncoding, looksBinary, textOf, type Encoding } from "./encoding";
@@ -45,6 +46,47 @@ const SKIP = new Set<string>(UNLISTED);
 const TMP_SUFFIX = ".ssl-studio-tmp";
 const OWN_WRITE_TTL_MS = 5000;
 const MAX_SYMLINK_DEPTH = 40;
+const GITIGNORE_MAX_BYTES = 64 * 1024;
+
+/**
+ * Compiles root `.gitignore` patterns into a path predicate when "Use Exclude Settings and Ignore Files" is active.
+ * Honors comments, blank lines, `!` negations (last match wins), directory-only trailing `/`, and root-anchored patterns.
+ */
+function loadGitignoreMatcher(root: string): ((relPath: string) => boolean) | null {
+	const ignorePath = join(root, ".gitignore");
+	let raw: string;
+	try {
+		const st = statSync(ignorePath);
+		if (!st.isFile() || st.size === 0 || st.size > GITIGNORE_MAX_BYTES) return null;
+		raw = readFileSync(ignorePath, "utf8");
+	} catch {
+		return null;
+	}
+	const rules: { negated: boolean; dirOnly: boolean; test: (path: string) => boolean }[] = [];
+	for (const line of raw.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith("#")) continue;
+		const negated = trimmed.startsWith("!");
+		let pat = negated ? trimmed.slice(1).trim() : trimmed;
+		if (!pat) continue;
+		const dirOnly = pat.endsWith("/");
+		pat = pat.replace(/\/+$/, "");
+		if (!pat) continue;
+		const escaped = pat.replace(/,/g, "[,]");
+		rules.push({ negated, dirOnly, test: globMatcher(escaped) });
+	}
+	if (!rules.length) return null;
+	return (relPath: string) => {
+		const slash = relPath.lastIndexOf("/");
+		const parentDir = slash >= 0 ? relPath.slice(0, slash) : "";
+		let ignored = false;
+		for (const rule of rules) {
+			const hit = rule.dirOnly ? Boolean(parentDir) && rule.test(parentDir) : rule.test(relPath);
+			if (hit) ignored = !rule.negated;
+		}
+		return ignored;
+	};
+}
 
 const foldPath = (p: string) => (process.platform === "win32" || process.platform === "darwin" ? p.toLowerCase() : p);
 
@@ -778,7 +820,7 @@ export class WorkspaceFiles {
 		yield* this.walk(dir);
 	}
 
-	private *walk(dir: string): Generator<string> {
+	private *walk(dir: string, includeExcluded = false): Generator<string> {
 		let entries;
 		try {
 			entries = readdirSync(dir, { withFileTypes: true });
@@ -786,9 +828,10 @@ export class WorkspaceFiles {
 			return;
 		}
 		for (const d of entries) {
-			if (SKIP.has(d.name) || d.name.endsWith(TMP_SUFFIX)) continue;
+			if (d.name === ".git" || d.name.endsWith(TMP_SUFFIX)) continue;
+			if (!includeExcluded && SKIP.has(d.name)) continue;
 			const path = join(dir, d.name);
-			if (d.isDirectory()) yield* this.walk(path);
+			if (d.isDirectory()) yield* this.walk(path, includeExcluded);
 			else if (d.isFile()) yield path;
 		}
 	}
@@ -878,11 +921,23 @@ export class WorkspaceFiles {
 			if (cut === "full") break;
 		}
 		if (noFiles) return answer(all(), false);
-		for (const path of this.files()) {
+		const useExcludes = options.useExcludes !== false;
+		const gitignored = useExcludes && pathSet === null ? loadGitignoreMatcher(this.root) : null;
+		const walkFiles = () => {
+			if (useExcludes) return this.files();
+			try {
+				this.inside(this.root);
+			} catch {
+				return (function* () {})();
+			}
+			return this.walk(this.root, true);
+		};
+		for (const path of walkFiles()) {
 			if (performance.now() > deadline) return answer(all(), true);
 			if (imageType(path)) continue;
 			const relPath = normRel(relative(this.root, path));
 			if (pathSet !== null && !pathSet.has(foldPath(relPath))) continue;
+			if (gitignored && gitignored(relPath)) continue;
 			if (!filter(relPath)) continue;
 			if (openRel.size && openRel.has(foldPath(relPath))) continue;
 			try {
@@ -974,6 +1029,7 @@ export class WorkspaceFiles {
 				isMarkdown: isMd,
 				isPlanJson: isPlan,
 				safeDocs: Boolean(options.safeDocs),
+				preserveCase: Boolean(options.preserveCase),
 				maxSamples: 0,
 			});
 			if (res.invalidJson) {

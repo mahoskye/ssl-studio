@@ -35,6 +35,10 @@ export type SearchOptions = {
 	paths?: string[];
 	/** Safe Docs guard for replace: skips YAML frontmatter keys, Markdown link targets, and invalid .plan.json edits. */
 	safeDocs?: boolean;
+	/** Adapts each replacement string to match the casing pattern of the text it replaces (VS Code Preserve Case). */
+	preserveCase?: boolean;
+	/** Honor default workspace excludes and root `.gitignore` when true (default); set false to search excluded files too. */
+	useExcludes?: boolean;
 	/** Per-file 1-based allowed line numbers for partial-line replace (keyed by path). */
 	linesByPath?: Record<string, number[]>;
 	/**
@@ -168,25 +172,74 @@ export function withGroups(pattern: RegExp): RegExp {
 	return pattern.hasIndices ? pattern : new RegExp(pattern.source, `${pattern.flags}d`);
 }
 
+const hasUpper = (text: string) => text !== text.toLowerCase();
+const hasLower = (text: string) => text !== text.toUpperCase();
+
+function applySingleCase(matched: string, replacement: string): string {
+	if (!matched || !replacement) return replacement;
+	const upper = hasUpper(matched);
+	const lower = hasLower(matched);
+	if (!upper && !lower) return replacement;
+	if (!upper) return replacement.toLowerCase();
+	if (!lower) return replacement.toUpperCase();
+	const firstMatchedLetter = matched.match(/\p{L}/u)?.[0];
+	if (!firstMatchedLetter) return replacement;
+	const startsUpper = firstMatchedLetter === firstMatchedLetter.toUpperCase() && firstMatchedLetter !== firstMatchedLetter.toLowerCase();
+	const repMatch = /\p{L}/u.exec(replacement);
+	if (!repMatch) return replacement;
+	const idx = repMatch.index;
+	const lead = replacement.slice(0, idx);
+	const first = repMatch[0]!;
+	const rest = replacement.slice(idx + first.length);
+	const repAllUpper = hasUpper(replacement) && !hasLower(replacement);
+	if (startsUpper) {
+		const restMatched = matched.slice(matched.indexOf(firstMatchedLetter) + firstMatchedLetter.length);
+		const pureTitle = !hasUpper(restMatched);
+		return lead + first.toUpperCase() + (pureTitle && repAllUpper ? rest.toLowerCase() : rest);
+	}
+	return lead + first.toLowerCase() + (repAllUpper ? rest.toLowerCase() : rest);
+}
+
+/**
+ * Adapts `replacement` to mirror the casing style of `matched` (VS Code Preserve Case `AB`):
+ * all-lowercase, ALL-UPPERCASE, Title/PascalCase, camelCase, and matching `-` / `_` segments.
+ */
+export function applyPreserveCase(matched: string, replacement: string): string {
+	if (!matched || !replacement) return replacement;
+	for (const sep of ["-", "_"] as const) {
+		if (matched.includes(sep) && replacement.includes(sep)) {
+			const mParts = matched.split(sep);
+			const rParts = replacement.split(sep);
+			if (mParts.length === rParts.length) {
+				return rParts.map((part, i) => applySingleCase(mParts[i]!, part)).join(sep);
+			}
+		}
+	}
+	return applySingleCase(matched, replacement);
+}
+
 /**
  * What one match becomes. For words as typed, the replacement as typed. For
  * a regular expression, the replacement with its marks filled in from the
  * match: "$1" to "$99" the groups, "$<name>" a named group, "$&" the whole
  * match, "$$" a dollar. A group the expression does not have is left as it
- * was written.
+ * was written. When `preserveCase` is on, the casing of the matched text is
+ * carried onto the replacement.
  */
-export function replacementFor(match: Matched, replacement: string, regex: boolean): string {
-	if (!regex) return replacement;
-	return replacement.replace(/\$(?:(\$)|(&)|<([^>]+)>|(\d{1,2}))/g, (written, dollar, whole, name, digits: string | undefined) => {
-		if (dollar) return "$";
-		if (whole) return match[0] ?? "";
-		if (name !== undefined) return match.groups && name in match.groups ? (match.groups[name] ?? "") : written;
-		// "$12" is group 12 where there is one, else group 1 and a "2".
-		const two = Number(digits);
-		if (two >= 1 && two < match.length) return match[two] ?? "";
-		const one = Number(digits![0]);
-		return digits!.length === 2 && one >= 1 && one < match.length ? (match[one] ?? "") + digits![1] : written;
-	});
+export function replacementFor(match: Matched, replacement: string, regex: boolean, preserveCase = false): string {
+	const raw = !regex
+		? replacement
+		: replacement.replace(/\$(?:(\$)|(&)|<([^>]+)>|(\d{1,2}))/g, (written, dollar, whole, name, digits: string | undefined) => {
+				if (dollar) return "$";
+				if (whole) return match[0] ?? "";
+				if (name !== undefined) return match.groups && name in match.groups ? (match.groups[name] ?? "") : written;
+				// "$12" is group 12 where there is one, else group 1 and a "2".
+				const two = Number(digits);
+				if (two >= 1 && two < match.length) return match[two] ?? "";
+				const one = Number(digits![0]);
+				return digits!.length === 2 && one >= 1 && one < match.length ? (match[one] ?? "") + digits![1] : written;
+			});
+	return preserveCase ? applyPreserveCase(match[0] ?? "", raw) : raw;
 }
 
 /**
@@ -203,13 +256,14 @@ export function matchesOn(
 	regex: boolean,
 	maxMatches = Infinity,
 	clock?: { until: number; late?: boolean },
+	preserveCase = false,
 ): ({ column: number; length: number; becomes: string } & Groups)[] {
 	const out: ({ column: number; length: number; becomes: string } & Groups)[] = [];
 	if (maxMatches <= 0) return out;
 	pattern.lastIndex = 0;
 	let match: RegExpExecArray | null;
 	while (out.length < maxMatches && (match = pattern.exec(line))) {
-		const each: (typeof out)[number] = { column: match.index + 1, length: match[0].length, becomes: replacementFor(match, replacement, regex) };
+		const each: (typeof out)[number] = { column: match.index + 1, length: match[0].length, becomes: replacementFor(match, replacement, regex, preserveCase) };
 		if (match.indices && match.length > 1) {
 			const span = (pair: [number, number] | undefined): Span => (pair ? [pair[0], pair[1]] : null);
 			each.groups = Array.from(match.indices, span).slice(1);
@@ -234,20 +288,31 @@ export function matchesOn(
  * over one line, nothing can stop it once it runs, and run in the window it froze the window. `text` is the
  * match's line, or the part of it from `offset` on; undefined when the match or one of its groups lies outside it.
  */
-export function becomesFound(text: string, offset: number, found: Omit<Found, "line">, replacement: string, regex: boolean): string | undefined {
-	if (!regex) return replacement;
+export function becomesFound(
+	text: string,
+	offset: number,
+	found: Omit<Found, "line">,
+	replacement: string,
+	regex: boolean,
+	preserveCase = false,
+): string | undefined {
+	if (!regex && !preserveCase) return replacement;
 	let outside = false;
 	const part = (from: number, to: number) => {
 		if (from < offset || to > offset + text.length || to < from) outside = true;
 		return outside ? "" : text.slice(from - offset, to - offset);
 	};
+	if (!regex) {
+		const matched = part(found.column - 1, found.column - 1 + found.length);
+		return outside ? undefined : applyPreserveCase(matched, replacement);
+	}
 	const group = (span: Span) => (span ? part(span[0], span[1]) : undefined);
 	const match: (string | undefined)[] & { groups?: Record<string, string | undefined> } = [
 		part(found.column - 1, found.column - 1 + found.length),
 		...(found.groups ?? []).map(group),
 	];
 	if (found.named) match.groups = Object.fromEntries(Object.entries(found.named).map(([name, span]) => [name, group(span)]));
-	return outside ? undefined : replacementFor(match, replacement, true);
+	return outside ? undefined : replacementFor(match, replacement, true, preserveCase);
 }
 
 /**
@@ -263,7 +328,7 @@ export function replaceFound(
 	found: readonly Found[],
 	replacement: string,
 	regex: boolean,
-	options: { skip?: (match: Found) => boolean; maxSamples?: number } = {},
+	options: { skip?: (match: Found) => boolean; maxSamples?: number; preserveCase?: boolean } = {},
 ): {
 	text: string;
 	count: number;
@@ -280,6 +345,7 @@ export function replaceFound(
 	// The lines and what ends each of them, turn about, as `replaceIn` has them.
 	const parts = text.split(/(\r?\n)/);
 	const maxSamples = options.maxSamples ?? 5;
+	const keepCase = Boolean(options.preserveCase);
 	const edits: { line: number; column: number; length: number; text: string }[] = [];
 	const samples: { line: number; before: string; after: string }[] = [];
 	let skipped = 0;
@@ -298,7 +364,7 @@ export function replaceFound(
 				skipped++;
 				continue;
 			}
-			const becomes = becomesFound(line, 0, each, replacement, regex);
+			const becomes = becomesFound(line, 0, each, replacement, regex, keepCase);
 			if (becomes === undefined) return null;
 			out += line.slice(from, start) + becomes;
 			from = end;
@@ -330,7 +396,7 @@ export function replaceSearched(
 	listed: readonly Found[] | undefined,
 	replacement: string,
 	regex: boolean,
-	options: { skip?: (match: Found) => boolean; json?: boolean; maxSamples?: number } = {},
+	options: { skip?: (match: Found) => boolean; json?: boolean; maxSamples?: number; preserveCase?: boolean } = {},
 ): { text: string; count: number; skippedProtected: number; invalidJson: boolean; samples: { line: number; before: string; after: string }[]; edits: ReplaceEdit[] } | null {
 	if (mark === undefined || textMark(text) !== mark) return null;
 	const done = replaceFound(text, listed ?? [], replacement, regex, options);
@@ -413,13 +479,14 @@ export function searchBoxMoved(searched: string, inBox: string): string {
 export function replaceIn(text: string, query: string, replacement: string, options: SearchOptions = {}): { text: string; count: number } {
 	const pattern = searchPattern(query, options);
 	const isRegex = Boolean(options.regex);
+	const keepCase = Boolean(options.preserveCase);
 	let count = 0;
 	// The lines and what ends each of them, turn about: only the lines are searched.
 	const parts = text.split(/(\r?\n)/);
 	for (let at = 0; at < parts.length; at += 2) {
 		const line = parts[at]!;
 		if (isRegex && line.length > REGEX_MAX_LINE_LENGTH) continue;
-		const found = matchesOn(line, pattern, replacement, isRegex);
+		const found = matchesOn(line, pattern, replacement, isRegex, Infinity, undefined, keepCase);
 		if (!found.length) continue;
 		count += found.length;
 		let out = "";
